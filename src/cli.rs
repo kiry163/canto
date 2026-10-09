@@ -52,6 +52,13 @@ pub enum Command {
         #[arg(long)]
         quality: Option<String>,
     },
+    /// 打印某首歌的歌词（排查用）
+    Lyric {
+        /// 歌单 id，或 `favorites`
+        id: String,
+        /// 第几首，从 1 开始
+        index: usize,
+    },
     /// 清除本地会话
     Logout,
 }

@@ -58,6 +58,39 @@ fn main() -> Result<()> {
             let (playlist, songs) = runtime.block_on(load_tracks(&id))?;
             print_tracks(&playlist, &songs);
         }
+        Command::Lyric { id, index } => {
+            let (_, songs) = runtime.block_on(load_tracks(&id))?;
+            let song = songs
+                .get(index.saturating_sub(1))
+                .with_context(|| format!("歌单里没有第 {index} 首（共 {} 首）", songs.len()))?
+                .clone();
+            match runtime.block_on(qq::lyric::get(&song))? {
+                Some(lyric) => {
+                    println!(
+                        "{} — {}（{} 行）",
+                        song.title,
+                        song.singers,
+                        lyric.lines.len()
+                    );
+                    for line in &lyric.lines {
+                        let seconds = line.at.as_secs();
+                        let stamp = format!(
+                            "{:02}:{:02}.{:02}",
+                            seconds / 60,
+                            seconds % 60,
+                            line.at.subsec_millis() / 10
+                        );
+                        match &line.translation {
+                            Some(translation) => {
+                                println!("  [{stamp}] {}   ⟨{translation}⟩", line.text)
+                            }
+                            None => println!("  [{stamp}] {}", line.text),
+                        }
+                    }
+                }
+                None => println!("{} — {}：暂无歌词", song.title, song.singers),
+            }
+        }
         Command::Play { id, index, quality } => {
             let quality = quality.as_deref().map(parse_quality).transpose()?;
             let (_, songs) = runtime.block_on(load_tracks(&id))?;

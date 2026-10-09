@@ -8,6 +8,7 @@
 //! - `j`/`k`（或方向键上下）移动，`g`/`G` 首尾
 //! - `Enter` 左栏=加载该歌单，右栏=播放该首
 //! - `Space` 播放/暂停，`n`/`b` 下一首/上一首，`←`/`→`（或 `h`/`l`）±10 秒，`+`/`-` 音量
+//! - `y` 开/关歌词面板（跟着播放位置高亮当前行，带翻译）
 
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::time::Duration as StdDuration;
@@ -20,7 +21,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Gauge, List, ListItem, ListState, Paragraph};
 
-use crate::model::{Playlist, Song};
+use crate::model::{Lyric, Playlist, Song};
 use crate::player::{Engine, Phase, Track};
 use crate::qq;
 use crate::qq::vkey::Candidate;
@@ -44,6 +45,12 @@ enum Msg {
         index: usize,
         song: Song,
         result: Result<Vec<Candidate>>,
+    },
+    /// 歌词结果（同样是异步的，同样按 `request` 过滤过期回话）。
+    Lyric {
+        request: u64,
+        title: String,
+        result: Result<Option<Lyric>>,
     },
 }
 
@@ -111,6 +118,13 @@ struct App {
     /// 连续自动跳过的不可播曲目数（手动播放或成功播放后清零）。
     skipped: u32,
 
+    /// 当前这首歌的歌词（`None` = 还没拿到或确实没有）。
+    lyric: Option<Lyric>,
+    lyric_loading: bool,
+    /// 歌词面板是否展开。
+    show_lyric: bool,
+    lyric_state: ListState,
+
     /// 正在后台做的事（状态栏）。
     loading: Option<String>,
     /// 一次性提示（错误、结果）。
@@ -135,6 +149,10 @@ impl App {
             queue_name: String::new(),
             request: 0,
             skipped: 0,
+            lyric: None,
+            lyric_loading: false,
+            show_lyric: true,
+            lyric_state: ListState::default(),
             loading: None,
             status: "正在加载歌单…".to_string(),
             quit: false,
@@ -177,16 +195,29 @@ impl App {
         let request = self.request;
         self.queue_index = index;
         self.loading = Some(format!("取流《{}》…", song.title));
+        // 换歌先把旧歌词撤掉，免得新旧串行显示。
+        self.lyric = None;
+        self.lyric_loading = true;
         let tx = self.tx.clone();
         let handle_song = song.clone();
         self.handle.spawn(async move {
             let result = qq::vkey::candidates(&handle_song, None).await;
+            let playable = result.is_ok();
             let _ = tx.send(Msg::Candidates {
                 request,
                 index,
-                song,
+                song: song.clone(),
                 result,
             });
+            // 取流成功才取歌词：放不了的歌没必要取。
+            if playable {
+                let result = qq::lyric::get(&song).await;
+                let _ = tx.send(Msg::Lyric {
+                    request,
+                    title: song.title,
+                    result,
+                });
+            }
         });
     }
 
@@ -243,6 +274,11 @@ impl App {
                     Err(error) => self.status = format!("{error:#}"),
                 }
             }
+            Msg::Lyric {
+                request,
+                title,
+                result,
+            } => self.on_lyric(request, title, result),
             Msg::Candidates {
                 request,
                 index,
@@ -283,6 +319,20 @@ impl App {
         }
     }
 
+    fn on_lyric(&mut self, request: u64, title: String, result: Result<Option<Lyric>>) {
+        if request != self.request {
+            return;
+        }
+        self.lyric_loading = false;
+        match result {
+            Ok(lyric) => self.lyric = lyric,
+            Err(error) => {
+                tracing::warn!("取《{title}》歌词失败：{error:#}");
+                self.lyric = None;
+            }
+        }
+    }
+
     fn handle_key(&mut self, key: KeyEvent) {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.quit = true;
@@ -307,6 +357,7 @@ impl App {
                     self.play_from_tracks(index);
                 }
             },
+            KeyCode::Char('y') => self.show_lyric = !self.show_lyric,
             KeyCode::Char(' ') => self.engine.toggle_pause(),
             KeyCode::Char('n') => self.play_relative(1),
             KeyCode::Char('b') => self.play_relative(-1),
@@ -404,7 +455,18 @@ impl App {
         let columns =
             Layout::horizontal([Constraint::Length(26), Constraint::Min(20)]).split(rows[0]);
         self.draw_playlists(frame, columns[0]);
-        self.draw_tracks(frame, columns[1]);
+        // 右栏：曲目 + 歌词（终端太矮时不展开，免得曲目只剩一两行）。
+        let lyric_height = if self.show_lyric && columns[1].height >= 12 {
+            (columns[1].height / 3).max(5)
+        } else {
+            0
+        };
+        let right = Layout::vertical([Constraint::Min(5), Constraint::Length(lyric_height)])
+            .split(columns[1]);
+        self.draw_tracks(frame, right[0]);
+        if let Some(area) = right.get(1).filter(|_| lyric_height > 0) {
+            self.draw_lyric(frame, *area);
+        }
         self.draw_status(frame, rows[1], rows[2]);
     }
 
@@ -458,6 +520,49 @@ impl App {
             .highlight_style(highlight())
             .highlight_symbol("▶ ");
         frame.render_stateful_widget(list, area, &mut self.track_state);
+    }
+
+    /// 歌词面板：当前行高亮，跟着播放位置走，翻译跟在本行下面。
+    fn draw_lyric(&mut self, frame: &mut Frame, area: Rect) {
+        let title = match &self.lyric {
+            Some(lyric) => format!(" 歌词（{} 行） ", lyric.lines.len()),
+            None => " 歌词 ".to_string(),
+        };
+        let block = Block::bordered().title(title);
+        let Some(lyric) = &self.lyric else {
+            let text = if self.lyric_loading {
+                "歌词加载中…"
+            } else {
+                "暂无歌词"
+            };
+            frame.render_widget(
+                Paragraph::new(text)
+                    .style(Style::new().fg(Color::DarkGray))
+                    .block(block),
+                area,
+            );
+            return;
+        };
+        let items: Vec<ListItem> = lyric
+            .lines
+            .iter()
+            .map(|line| {
+                let mut rows = vec![Line::from(line.text.clone())];
+                if let Some(translation) = &line.translation {
+                    rows.push(
+                        Line::from(translation.clone()).style(Style::new().fg(Color::DarkGray)),
+                    );
+                }
+                ListItem::new(rows)
+            })
+            .collect();
+        let current = lyric.line_at(self.engine.snapshot().position);
+        self.lyric_state.select(current);
+        let list = List::new(items)
+            .block(block)
+            .highlight_symbol("")
+            .highlight_style(Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+        frame.render_stateful_widget(list, area, &mut self.lyric_state);
     }
 
     /// 正在播的那首的「标题 — 歌手」（没在播/播完就返回 `None`）。

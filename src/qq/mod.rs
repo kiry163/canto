@@ -5,6 +5,7 @@
 //! 改一个字符就 404。
 
 pub mod cookie;
+pub mod lyric;
 pub mod parse;
 pub mod vkey;
 
