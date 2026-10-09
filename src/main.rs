@@ -58,6 +58,11 @@ fn main() -> Result<()> {
             let (playlist, songs) = runtime.block_on(load_tracks(&id))?;
             print_tracks(&playlist, &songs);
         }
+        Command::Search { keyword, limit } => {
+            let songs = runtime.block_on(qq::search::songs(&keyword, limit))?;
+            println!("搜索「{keyword}」（{} 首）", songs.len());
+            print_song_rows(&songs);
+        }
         Command::Lyric { id, index } => {
             let (_, songs) = runtime.block_on(load_tracks(&id))?;
             let song = songs
@@ -270,6 +275,11 @@ fn print_tracks(playlist: &Playlist, songs: &[Song]) {
     if let Some(cover) = &playlist.cover_url {
         println!("封面：{cover}");
     }
+    print_song_rows(songs);
+}
+
+/// 带序号、音质、时长的曲目行（歌单与搜索结果共用）。
+fn print_song_rows(songs: &[Song]) {
     let index_width = songs.len().to_string().len();
     for (index, song) in songs.iter().enumerate() {
         println!(

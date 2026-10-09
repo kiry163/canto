@@ -7,6 +7,7 @@
 pub mod cookie;
 pub mod lyric;
 pub mod parse;
+pub mod search;
 pub mod vkey;
 
 use anyhow::{Context, Result, bail};

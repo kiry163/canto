@@ -52,6 +52,14 @@ pub enum Command {
         #[arg(long)]
         quality: Option<String>,
     },
+    /// 搜索歌曲（界面上是 `/`）
+    Search {
+        /// 关键词
+        keyword: String,
+        /// 最多返回多少条（接口上限 60）
+        #[arg(long, default_value_t = 10)]
+        limit: u32,
+    },
     /// 打印某首歌的歌词（排查用）
     Lyric {
         /// 歌单 id，或 `favorites`

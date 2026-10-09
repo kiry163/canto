@@ -9,6 +9,7 @@
 //! - `Enter` 左栏=加载该歌单，右栏=播放该首
 //! - `Space` 播放/暂停，`n`/`b` 下一首/上一首，`←`/`→`（或 `h`/`l`）±10 秒，`+`/`-` 音量
 //! - `y` 开/关歌词面板（跟着播放位置高亮当前行，带翻译）
+//! - `/` 搜索（回车搜、Esc 取消；结果显示在曲目栏，直接回车播放）
 
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 use std::time::Duration as StdDuration;
@@ -45,6 +46,11 @@ enum Msg {
         index: usize,
         song: Song,
         result: Result<Vec<Candidate>>,
+    },
+    /// 搜索结果。
+    Search {
+        keyword: String,
+        result: Result<Vec<Song>>,
     },
     /// 歌词结果（同样是异步的，同样按 `request` 过滤过期回话）。
     Lyric {
@@ -124,6 +130,8 @@ struct App {
     /// 歌词面板是否展开。
     show_lyric: bool,
     lyric_state: ListState,
+    /// `Some` 表示正在输入搜索词。
+    input: Option<String>,
 
     /// 正在后台做的事（状态栏）。
     loading: Option<String>,
@@ -153,6 +161,7 @@ impl App {
             lyric_loading: false,
             show_lyric: true,
             lyric_state: ListState::default(),
+            input: None,
             loading: None,
             status: "正在加载歌单…".to_string(),
             quit: false,
@@ -183,6 +192,16 @@ impl App {
                 playlist_id: task_id,
                 result,
             });
+        });
+    }
+
+    /// 起一个后台搜索。
+    fn search(&mut self, keyword: String) {
+        self.loading = Some(format!("搜索「{keyword}」…"));
+        let tx = self.tx.clone();
+        self.handle.spawn(async move {
+            let result = qq::search::songs(&keyword, 40).await;
+            let _ = tx.send(Msg::Search { keyword, result });
         });
     }
 
@@ -274,6 +293,20 @@ impl App {
                     Err(error) => self.status = format!("{error:#}"),
                 }
             }
+            Msg::Search { keyword, result } => {
+                self.loading = None;
+                match result {
+                    Ok(songs) => {
+                        self.status = format!("搜索「{keyword}」：{} 首", songs.len());
+                        self.shown =
+                            Some((format!("search:{keyword}"), format!("搜索：{keyword}")));
+                        self.track_state.select((!songs.is_empty()).then_some(0));
+                        self.tracks = songs;
+                        self.focus = Focus::Tracks;
+                    }
+                    Err(error) => self.status = format!("{error:#}"),
+                }
+            }
             Msg::Lyric {
                 request,
                 title,
@@ -338,6 +371,27 @@ impl App {
             self.quit = true;
             return;
         }
+        // 输入模式优先：这里 `q` 是字母，不是退出。
+        if let Some(buffer) = self.input.as_mut() {
+            match key.code {
+                KeyCode::Enter => {
+                    let keyword = buffer.trim().to_string();
+                    self.input = None;
+                    if !keyword.is_empty() {
+                        self.search(keyword);
+                    }
+                }
+                KeyCode::Esc => self.input = None,
+                KeyCode::Backspace => {
+                    buffer.pop();
+                }
+                KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    buffer.push(character);
+                }
+                _ => {}
+            }
+            return;
+        }
         match key.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
@@ -357,6 +411,7 @@ impl App {
                     self.play_from_tracks(index);
                 }
             },
+            KeyCode::Char('/') => self.input = Some(String::new()),
             KeyCode::Char('y') => self.show_lyric = !self.show_lyric,
             KeyCode::Char(' ') => self.engine.toggle_pause(),
             KeyCode::Char('n') => self.play_relative(1),
@@ -628,6 +683,15 @@ impl App {
             frame.render_widget(gauge, *row);
         }
 
+        if let Some(buffer) = &self.input {
+            let line = Line::from(vec![
+                Span::styled("搜索：", Style::new().fg(Color::Yellow)),
+                Span::raw(buffer.clone()),
+                Span::styled("▏", Style::new().fg(Color::Yellow)),
+            ]);
+            frame.render_widget(Paragraph::new(line), hint_area);
+            return;
+        }
         let hint = if let Some(loading) = &self.loading {
             format!("⏳ {loading}")
         } else if self.status.is_empty() {

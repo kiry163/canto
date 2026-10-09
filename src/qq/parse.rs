@@ -57,6 +57,39 @@ pub fn parse_song(item: &Value) -> Option<Song> {
     })
 }
 
+/// 解析搜索结果条目。
+///
+/// 搜索接口的字段名与歌单详情那套完全不同（`songname`/`songmid`/`size320`…
+/// 而且没有嵌套的 `file`），所以单独一份解析。音质只报 `size128/320/flac`：
+/// 这个接口不给 hires 大小，所以标签可能低估——取流不依赖它（候选链是固定的）。
+pub fn parse_search_song(item: &Value) -> Option<Song> {
+    let mid = value_str(&item["songmid"])?;
+    let singers = match &item["singer"] {
+        Value::Array(singers) => singers
+            .iter()
+            .filter_map(|singer| value_str(&singer["name"]))
+            .collect::<Vec<_>>()
+            .join("、"),
+        _ => String::new(),
+    };
+    Some(Song {
+        mid,
+        song_id: Some(value_u64(&item["songid"])).filter(|id| *id > 0),
+        media_mid: value_str(&item["media_mid"]).or_else(|| value_str(&item["strMediaMid"])),
+        title: value_str(&item["songname"]).unwrap_or_default(),
+        singers,
+        album_mid: value_str(&item["albummid"]).unwrap_or_default(),
+        album_name: value_str(&item["albumname"]).unwrap_or_default(),
+        duration_secs: value_u64(&item["interval"]),
+        sizes: FileSizes {
+            mp3_128: value_u64(&item["size128"]),
+            mp3_320: value_u64(&item["size320"]),
+            flac: value_u64(&item["sizeflac"]),
+            hires: 0,
+        },
+    })
+}
+
 /// 系统目录的 `dirid`：201 = 我喜欢（曲目走单独的接口）。
 const DIRID_FAVORITES: u64 = 201;
 
@@ -153,6 +186,36 @@ mod tests {
         let song = parse_song(&item).unwrap();
         assert_eq!(song.duration_secs, 210);
         assert_eq!(song.sizes.best_label(), "Hi-Res");
+    }
+
+    #[test]
+    fn parses_a_search_result() {
+        // 实测响应（2026-10-09，搜索「晴天 周杰伦」）。
+        let item = json!({
+            "songname": "晴天",
+            "songmid": "0039MnYb0qxYhV",
+            "songid": 1050326,
+            "singer": [{ "id": 4558, "mid": "0025NhlN2yWrP4", "name": "周杰伦" }],
+            "albumname": "叶惠美",
+            "albummid": "000MkMni19ClKG",
+            "interval": 269,
+            "media_mid": "003Qui1q2u1Zho",
+            "size128": 4317292,
+            "size320": 10792943,
+            "sizeflac": 0
+        });
+        let song = parse_search_song(&item).expect("搜索结果要能解析出来");
+        assert_eq!(song.mid, "0039MnYb0qxYhV");
+        assert_eq!(song.song_id, Some(1050326));
+        assert_eq!(song.media_mid.as_deref(), Some("003Qui1q2u1Zho"));
+        assert_eq!(song.title, "晴天");
+        assert_eq!(song.singers, "周杰伦");
+        assert_eq!(song.album_name, "叶惠美");
+        assert_eq!(song.duration_secs, 269);
+        assert_eq!(song.sizes.mp3_320, 10792943);
+        assert_eq!(song.sizes.best_label(), "320k");
+
+        assert!(parse_search_song(&json!({ "songname": "没有 mid" })).is_none());
     }
 
     #[test]
