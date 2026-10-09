@@ -494,6 +494,57 @@ mod tests {
         assert_eq!(resolve("https://a.qq.com/x/y", "z"), "https://a.qq.com/z");
     }
 
+    /// 本地三跳服务器：`/start` → 相对跳转 `/mid`（下发 cookie）→ `/end?code=XYZ`（下发 cookie）→ 200。
+    ///
+    /// 验的正是登录链里最容易写错的一段：手动跟着 `Location` 走、每跳的
+    /// `Set-Cookie` 都要收下。voicefox 当年用自动跟随的客户端，这一段全丢了。
+    #[test]
+    fn follow_walks_the_chain_and_keeps_hop_cookies() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("测试服务要能监听");
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let mut raw = [0_u8; 2048];
+                let read = stream.read(&mut raw).unwrap_or(0);
+                let request = String::from_utf8_lossy(&raw[..read]).to_string();
+                let path = request.split_whitespace().nth(1).unwrap_or("/").to_string();
+                let response = match path.as_str() {
+                    "/start" => {
+                        "HTTP/1.1 302 Found\r\nLocation: /mid\r\nSet-Cookie: hop=one; Path=/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    }
+                    "/mid" => {
+                        "HTTP/1.1 302 Found\r\nLocation: /end?code=XYZ\r\nSet-Cookie: p_skey=test-pskey; Path=/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    }
+                    _ => "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                };
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+
+        let runtime = tokio::runtime::Runtime::new().expect("测试要能起运行时");
+        let start = format!("http://127.0.0.1:{port}/start");
+        let code = runtime.block_on(follow(&start));
+        assert_eq!(
+            code.as_deref(),
+            Some("XYZ"),
+            "链上带 code 的 Location 要认出来"
+        );
+
+        // 这里往全局 jar 里写的只有 127.0.0.1 的 cookie，不落盘（测试不调用 save）。
+        let jar = session::jar();
+        let origin = format!("http://127.0.0.1:{port}/");
+        assert_eq!(jar.cookie_for(&origin, "hop").as_deref(), Some("one"));
+        assert_eq!(
+            jar.cookie_for(&origin, "p_skey").as_deref(),
+            Some("test-pskey"),
+            "中间那跳下发的 p_skey 必须留下——换 code 就靠它"
+        );
+    }
+
     #[test]
     fn pseudo_uuid_is_v4_shaped() {
         let uuid = pseudo_uuid();
