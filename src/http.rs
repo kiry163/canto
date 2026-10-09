@@ -27,3 +27,21 @@ pub fn client() -> &'static Client {
     });
     &CLIENT
 }
+
+/// 不自动跟随跳转的客户端（cookie 仍然照收）。
+///
+/// 登录链路必须用它：`Location` 要自己读、中间各跳下发的 `Set-Cookie`
+/// （`p_skey` / `skey`）不能丢——自动跟随时 reqwest 把 302 吃掉，这些全没了。
+pub fn client_without_redirect() -> &'static Client {
+    static CLIENT: LazyLock<Client> = LazyLock::new(|| {
+        Client::builder()
+            .user_agent(UA)
+            .timeout(Duration::from_secs(20))
+            .connect_timeout(Duration::from_secs(8))
+            .redirect(reqwest::redirect::Policy::none())
+            .cookie_provider(session::jar())
+            .build()
+            .expect("HTTP 客户端必须能建起来")
+    });
+    &CLIENT
+}

@@ -6,6 +6,7 @@
 //! 栽在这里）。这里用 `cookie_store` 按 domain/path/expires 存取，
 //! 请求时再按 URL 取该带的那些。
 
+use std::collections::BTreeMap;
 use std::io::BufReader;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -79,6 +80,36 @@ impl Jar {
         })
     }
 
+    /// 某个地址会带上来的 cookie 值（按 jar 的域名/路径作用域取）。
+    pub fn cookie_for(&self, url: &str, name: &str) -> Option<String> {
+        let url = Url::parse(url).ok()?;
+        self.with_store(|store| {
+            store
+                .get_request_values(&url)
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.to_string())
+        })
+    }
+
+    /// 把一组 cookie 写进 jar：统一挂 `.qq.com`、给 30 天有效期。
+    ///
+    /// `url` 只用来决定默认的域/路径（必须与 [`COOKIE_DOMAIN`] 相容）。
+    pub fn store_cookies(&self, url: &str, cookies: &BTreeMap<String, String>) {
+        let Ok(url) = Url::parse(url) else {
+            return;
+        };
+        self.with_store(|store| {
+            for (name, value) in cookies {
+                let raw = format!(
+                    "{name}={value}; Domain={COOKIE_DOMAIN}; Path=/; Max-Age={COOKIE_MAX_AGE_SECS}"
+                );
+                if store.parse(&raw, &url).err().is_some() {
+                    tracing::debug!("cookie {name} 未能写入 jar（形状非法？）");
+                }
+            }
+        });
+    }
+
     /// 把粘贴的 cookie 写进 jar。
     ///
     /// 只改内存，不落盘——落盘由调用方显式调用 [`Jar::save`]（也让测试可以
@@ -95,17 +126,7 @@ impl Jar {
             bail!("cookie 里没有音乐凭证（{}）", KEY_COOKIES.join(" 或 "));
         }
 
-        let url = Url::parse(COOKIE_URL).expect("内置 URL 必须可解析");
-        self.with_store(|store| {
-            for (name, value) in &cookies {
-                let raw = format!(
-                    "{name}={value}; Domain={COOKIE_DOMAIN}; Path=/; Max-Age={COOKIE_MAX_AGE_SECS}"
-                );
-                if store.parse(&raw, &url).err().is_some() {
-                    tracing::debug!("cookie {name} 未能写入 jar（形状非法？）");
-                }
-            }
-        });
+        self.store_cookies(COOKIE_URL, &cookies);
         let state = self.state();
         if !state.logged_in {
             bail!("cookie 写入后仍不完整，请确认复制的是整串（含 qqmusic_key）");

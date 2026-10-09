@@ -11,6 +11,7 @@ mod media;
 mod model;
 mod player;
 mod qq;
+mod qr;
 mod session;
 mod tui;
 
@@ -44,7 +45,7 @@ fn main() -> Result<()> {
             let engine = Engine::start()?;
             tui::run(runtime.handle().clone(), engine)?;
         }
-        Command::Login { cookie } => login(&cookie)?,
+        Command::Login { cookie } => login(&runtime, cookie.as_deref())?,
         Command::Whoami => whoami(),
         Command::Logout => {
             session::jar().clear()?;
@@ -262,7 +263,16 @@ async fn load_tracks(id: &str) -> Result<(Playlist, Vec<Song>)> {
     qq::playlist_tracks(id).await
 }
 
-fn login(cookie: &str) -> Result<()> {
+/// 二维码最多重新取几次（每次过期算一轮）。
+const QR_ATTEMPTS: usize = 3;
+/// 轮询间隔：够灵敏又不至于把接口刷爆。
+const QR_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// 登录：给了 cookie 就粘贴，没给就走扫码。
+fn login(runtime: &tokio::runtime::Runtime, cookie: Option<&str>) -> Result<()> {
+    let Some(cookie) = cookie else {
+        return qr_login(runtime);
+    };
     let raw = if cookie == "-" {
         let mut raw = String::new();
         std::io::stdin()
@@ -281,6 +291,49 @@ fn login(cookie: &str) -> Result<()> {
         config::session_path().display()
     );
     Ok(())
+}
+
+/// 扫码登录：取二维码 → 画到终端 → 轮询到成功（过期就换一张）。
+fn qr_login(runtime: &tokio::runtime::Runtime) -> Result<()> {
+    let jar = session::jar();
+    for attempt in 1..=QR_ATTEMPTS {
+        let png = runtime.block_on(qq::login::create())?;
+        let png_path = config::data_dir().join("login-qr.png");
+        match qr::show(&png, &png_path)? {
+            Some(path) => println!(
+                "终端装不下二维码，已存成文件：{}\n用手机 QQ 扫描它。",
+                path.display()
+            ),
+            None => println!("用手机 QQ 扫描上面的二维码。"),
+        }
+        if attempt > 1 {
+            println!("（第 {attempt} 张二维码）");
+        }
+        println!("等待扫码…");
+        loop {
+            match runtime.block_on(qq::login::poll())? {
+                qq::login::Poll::Waiting => std::thread::sleep(QR_POLL_INTERVAL),
+                qq::login::Poll::Scanned => {
+                    println!("已扫码，请在手机上确认登录…");
+                    std::thread::sleep(QR_POLL_INTERVAL);
+                }
+                qq::login::Poll::Expired => {
+                    println!("二维码已过期，重新获取…");
+                    break;
+                }
+                qq::login::Poll::Success(identity) => {
+                    jar.save()?;
+                    println!(
+                        "已登录：uin={identity}（会话已保存到 {}）",
+                        config::session_path().display()
+                    );
+                    return Ok(());
+                }
+                qq::login::Poll::Failed(message) => bail!("{message}"),
+            }
+        }
+    }
+    bail!("扫码登录未完成（二维码多次过期，请重跑 `canto login`）");
 }
 
 fn whoami() {

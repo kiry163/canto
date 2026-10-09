@@ -6,7 +6,7 @@
 
 | 能力 | 状态 |
 |---|---|
-| 粘贴 cookie 登录（域名感知会话，跨进程保留） | ✅ |
+| 登录：粘贴 cookie / **扫码**（二维码画在终端里） | ✅ |
 | 我的歌单 / 我喜欢 / 歌单曲目（含音质档位） | ✅ |
 | 播放：vkey 取流 → 边下边解码出声 | ✅ |
 | 终端界面（歌单/曲目/播放条/歌词） | ✅ |
@@ -18,6 +18,7 @@
 ## 用法
 
 ```bash
+cargo run -- login               # 扫码登录：二维码画在终端里（装不下就存成 PNG 文件）
 cargo run                        # 直接进终端界面（默认命令）
 cargo run -- --help              # 子命令仍是排查入口
 ```
@@ -65,7 +66,10 @@ stdout/stderr 打印会糊屏；`cargo run -- -l info` 可以把播放细节记�
 ## 命令行子命令
 
 ```bash
-# 登录：浏览器打开 y.qq.com，DevTools → Network → 任一请求 → Request Headers → Cookie，
+# 扫码登录（推荐）：手机 QQ 扫终端里的二维码
+cargo run -- login
+
+# 或者粘贴 cookie：浏览器打开 y.qq.com，DevTools → Network → 任一请求 → Request Headers → Cookie，
 # 复制整串（至少要含 uin 和 qqmusic_key）
 cargo run -- login --cookie 'uin=o0123456789; qqmusic_key=…; login_type=1'
 # 不想留在 shell 历史里：
@@ -108,7 +112,7 @@ cookie 就是账号凭据：**别提交、别分享这个文件**。
 
 ## 已知限制
 
-- **歌单写入（收藏/加歌单）暂时不可用**：经典写入接口
+- **歌单写入（收藏/加歌单）暂时不可用**（扫码登录已实现，写入是否随之解锁待实测）：经典写入接口
   `fcg_music_add2songdir.fcg` 对当前会话一律回 `{"code":403,"title":"no permit"}`，
   试过 `g_tk=5381` 与按各 cookie 算出的 hash33 全都不行；而 `create_playlist.fcg`
   的请求形状能被接受（空名字返回的是「参数非法」业务错误）。判断是写入需要
@@ -137,6 +141,10 @@ cookie 就是账号凭据：**别提交、别分享这个文件**。
   解码器当成音频播出去。
 - 下载复用播放用的 `MediaStream`（同一套魔数嗅探与 `Range` 逻辑）：先写 `.part`
   再改名，中途失败不会留下坏文件；同名 `.lrc`（有翻译再写 `.trans.lrc`）一起落盘。
+- 扫码登录的每一跳都靠会话 jar 自动收 `Set-Cookie`；跟跳转链用的是**不自动跟随**的
+  客户端（`http::client_without_redirect`）——自动跟随时 reqwest 把 302 吃掉，
+  `Location` 与中间各跳（`p_skey`/`skey`）的 cookie 全丢，这正是 voicefox 当初
+  「扫码成功但拿不到音乐凭证」的结构性原因。
 - 歌词走 `musicu.fcg` 的 `PlayLyricInfo`，参数里 **`crypt=0` + `qrc=0`** 时返回的是
   明文 base64 的 LRC（正文 `lyric`、翻译 `trans`）。传 `qrc=1` 会换成 QQ 自己的加密
   QRC（hex 密文），要多一整套解密——行级歌词不需要它。

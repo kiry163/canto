@@ -27,9 +27,10 @@ pub enum Command {
     Tui,
     /// 用浏览器里复制的 cookie 登录
     Login {
-        /// cookie 文本；传 `-` 表示从标准输入读（避免留在 shell 历史里）
+        /// cookie 文本；传 `-` 表示从标准输入读（避免留在 shell 历史里）。
+        /// 省略则走扫码登录（二维码直接画在终端里）
         #[arg(long, value_name = "COOKIE")]
-        cookie: String,
+        cookie: Option<String>,
     },
     /// 查看当前会话状态
     Whoami,
