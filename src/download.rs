@@ -1,0 +1,225 @@
+//! 下载：把候选档位里第一个能打开的存成文件，顺带把歌词写在旁边。
+//!
+//! 传输直接用 [`MediaStream`]：它已经处理了"服务端给 purl 但文件其实不存在"
+//! （嗅探魔数）与 `Range` 重连，下载等于把它拷到磁盘。
+//! 先写 `.part` 再改名，中途失败不会留下坏文件。
+
+use std::fs::File;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail};
+
+use crate::media::MediaStream;
+use crate::model::{Lyric, Quality, Song};
+use crate::qq::vkey::Candidate;
+
+/// 下载结果。
+pub struct Saved {
+    pub path: PathBuf,
+    pub quality: Quality,
+    pub bytes: u64,
+    /// 一起写下的歌词文件（`.lrc` / `.trans.lrc`）。
+    pub lyrics: Vec<PathBuf>,
+    /// 文件本来就在，跳过了。
+    pub existed: bool,
+}
+
+/// 默认下载目录：`<系统音乐目录>/canto`。
+pub fn default_dir() -> PathBuf {
+    dirs::audio_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("canto")
+}
+
+/// 下载第一个能打开的候选；`progress` 每读完一块回调一次（已收字节、总长）。
+pub fn save(
+    song: &Song,
+    candidates: &[Candidate],
+    dir: &Path,
+    lyric: Option<&Lyric>,
+    progress: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<Saved> {
+    std::fs::create_dir_all(dir).with_context(|| format!("创建下载目录失败：{}", dir.display()))?;
+    let stem = file_stem(song);
+    let mut failures = Vec::new();
+
+    for candidate in candidates {
+        let path = dir.join(format!("{stem}.{}", candidate.ext));
+        if path.exists() {
+            return Ok(Saved {
+                path,
+                quality: candidate.quality,
+                bytes: 0,
+                lyrics: Vec::new(),
+                existed: true,
+            });
+        }
+        let mut stream = match MediaStream::open(&candidate.url) {
+            Ok(stream) => stream,
+            Err(error) => {
+                tracing::debug!("{} 档打不开：{error}", candidate.quality.label());
+                failures.push(format!("{} 档打不开：{error}", candidate.quality.label()));
+                continue;
+            }
+        };
+        let total = stream.total();
+        let part = path.with_extension(format!("{}.part", candidate.ext));
+        let mut file =
+            File::create(&part).with_context(|| format!("创建文件失败：{}", part.display()))?;
+        let mut buffer = vec![0_u8; 256 * 1024];
+        let mut received = 0_u64;
+        let copied = (|| -> std::io::Result<()> {
+            loop {
+                let read = stream.read(&mut buffer)?;
+                if read == 0 {
+                    break;
+                }
+                file.write_all(&buffer[..read])?;
+                received += read as u64;
+                progress(received, total);
+            }
+            file.flush()
+        })();
+        if let Err(error) = copied {
+            // 半截文件立刻删掉，别让它看起来像下好了。
+            let _ = std::fs::remove_file(&part);
+            failures.push(format!("{} 档写盘失败：{error}", candidate.quality.label()));
+            continue;
+        }
+        std::fs::rename(&part, &path).with_context(|| format!("改名失败：{}", path.display()))?;
+        let lyrics = write_lyrics(&stem, dir, lyric)?;
+        return Ok(Saved {
+            path,
+            quality: candidate.quality,
+            bytes: received,
+            lyrics,
+            existed: false,
+        });
+    }
+    bail!("没有能下载的档位：{}", failures.join("；"))
+}
+
+/// 文件名用 `歌手 - 标题`，把路径分隔符等非法字符换掉；空名退回 mid。
+fn file_stem(song: &Song) -> String {
+    let sanitize = |text: &str| -> String {
+        text.chars()
+            .map(|character| match character {
+                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+                _ => character,
+            })
+            .collect()
+    };
+    let stem = format!("{} - {}", sanitize(&song.singers), sanitize(&song.title))
+        .trim()
+        .trim_matches('-')
+        .trim()
+        .to_string();
+    if stem.is_empty() {
+        song.mid.clone()
+    } else {
+        stem
+    }
+}
+
+/// 歌词落地：正文 `.lrc`；有翻译再写一份 `.trans.lrc`。
+fn write_lyrics(stem: &str, dir: &Path, lyric: Option<&Lyric>) -> Result<Vec<PathBuf>> {
+    let Some(lyric) = lyric.filter(|lyric| !lyric.lines.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let mut written = Vec::new();
+    let main = dir.join(format!("{stem}.lrc"));
+    std::fs::write(&main, render(lyric, false))
+        .with_context(|| format!("写歌词失败：{}", main.display()))?;
+    written.push(main);
+    if lyric.lines.iter().any(|line| line.translation.is_some()) {
+        let translated = dir.join(format!("{stem}.trans.lrc"));
+        std::fs::write(&translated, render(lyric, true))
+            .with_context(|| format!("写翻译歌词失败：{}", translated.display()))?;
+        written.push(translated);
+    }
+    Ok(written)
+}
+
+/// 把解析后的歌词写回 LRC（时间戳已换算成绝对值，offset 也应用过了）。
+fn render(lyric: &Lyric, translation: bool) -> String {
+    let mut out = String::new();
+    for line in &lyric.lines {
+        let text = if translation {
+            line.translation.as_deref()
+        } else {
+            Some(line.text.as_str())
+        };
+        let Some(text) = text else { continue };
+        let seconds = line.at.as_secs();
+        out.push_str(&format!(
+            "[{:02}:{:02}.{:02}]{text}\n",
+            seconds / 60,
+            seconds % 60,
+            line.at.subsec_millis() / 10
+        ));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn song(title: &str, singers: &str) -> Song {
+        Song {
+            mid: "000CbUE00I998M".to_string(),
+            song_id: None,
+            media_mid: None,
+            title: title.to_string(),
+            singers: singers.to_string(),
+            album_mid: String::new(),
+            album_name: String::new(),
+            duration_secs: 236,
+            sizes: crate::model::FileSizes::default(),
+        }
+    }
+
+    #[test]
+    fn file_names_drop_path_hostile_characters() {
+        assert_eq!(file_stem(&song("晴天", "周杰伦")), "周杰伦 - 晴天");
+        // 标题里的 `/`、`:` 会让路径跑偏，必须换掉。
+        assert_eq!(
+            file_stem(&song("AC/DC: Live", "群星")),
+            "群星 - AC_DC_ Live"
+        );
+        // 标题与歌手都空 → 退回 mid，不能生成 ".flac" 这种文件。
+        assert_eq!(file_stem(&song("", "")), "000CbUE00I998M");
+    }
+
+    #[test]
+    fn rendered_lrc_survives_a_round_trip() {
+        // 翻译文件带同样的 offset，两边换算后时间一致 → 会配对。
+        let lyric = Lyric::parse(
+            "[offset:500]\n[00:01.00]第一句\n[01:02.50]第二句\n",
+            Some("[offset:500]\n[00:01.00]first\n[01:02.50]second\n"),
+        );
+        let rendered = render(&lyric, false);
+        assert_eq!(
+            rendered, "[00:00.50]第一句\n[01:02.00]第二句\n",
+            "offset 已经算进时间戳了"
+        );
+        let again = Lyric::parse(&rendered, None);
+        assert_eq!(again.lines, {
+            let mut expected = lyric.lines.clone();
+            for line in &mut expected {
+                line.translation = None;
+            }
+            expected
+        });
+        assert_eq!(render(&lyric, true), "[00:00.50]first\n[01:02.00]second\n");
+
+        // 翻译文件若没带同样的 offset，两边绝对时间对不上 → 不配对、不写翻译文件。
+        let mismatched = Lyric::parse(
+            "[offset:500]\n[00:01.00]第一句\n",
+            Some("[00:01.00]first\n"),
+        );
+        assert!(mismatched.lines[0].translation.is_none());
+        assert_eq!(render(&mismatched, true), "");
+    }
+}

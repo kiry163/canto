@@ -52,6 +52,19 @@ pub enum Command {
         #[arg(long)]
         quality: Option<String>,
     },
+    /// 下载一首歌（同名歌词一起落盘）
+    Download {
+        /// 歌单 id，或 `favorites`
+        id: String,
+        /// 第几首，从 1 开始
+        index: usize,
+        /// 音质：hires / flac / 320 / 128；默认无损立体声优先
+        #[arg(long)]
+        quality: Option<String>,
+        /// 下载目录（默认 `<系统音乐目录>/canto`）
+        #[arg(long)]
+        dir: Option<std::path::PathBuf>,
+    },
     /// 搜索歌曲（界面上是 `/`）
     Search {
         /// 关键词

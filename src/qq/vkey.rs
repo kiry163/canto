@@ -31,6 +31,8 @@ struct Entry {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     pub quality: Quality,
+    /// 容器后缀（`flac`/`mp3`/`ogg`）。下载时要用它定文件名，播放用不到。
+    pub ext: &'static str,
     /// `sip + purl`。purl 自带 `guid`/`vkey`/`uin`/`fromtag`，不要另拼参数。
     pub url: String,
 }
@@ -119,6 +121,7 @@ pub async fn candidates(song: &Song, quality: Option<Quality>) -> Result<Vec<Can
         }
         candidates.push(Candidate {
             quality: entry.quality,
+            ext: entry.ext,
             url: format!("{sip}{purl}"),
         });
     }

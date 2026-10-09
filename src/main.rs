@@ -5,6 +5,7 @@
 
 mod cli;
 mod config;
+mod download;
 mod http;
 mod media;
 mod model;
@@ -57,6 +58,58 @@ fn main() -> Result<()> {
         Command::Tracks { id } => {
             let (playlist, songs) = runtime.block_on(load_tracks(&id))?;
             print_tracks(&playlist, &songs);
+        }
+        Command::Download {
+            id,
+            index,
+            quality,
+            dir,
+        } => {
+            let quality = quality.as_deref().map(parse_quality).transpose()?;
+            let (_, songs) = runtime.block_on(load_tracks(&id))?;
+            let song = songs
+                .get(index.saturating_sub(1))
+                .with_context(|| format!("歌单里没有第 {index} 首（共 {} 首）", songs.len()))?
+                .clone();
+            let candidates = runtime.block_on(qq::vkey::candidates(&song, quality))?;
+            let lyric = runtime
+                .block_on(qq::lyric::get(&song))
+                .unwrap_or_else(|error| {
+                    tracing::warn!("取歌词失败，只下歌：{error:#}");
+                    None
+                });
+            let dir = dir.unwrap_or_else(download::default_dir);
+            println!("下载 {} — {} → {}", song.title, song.singers, dir.display());
+            let mut reported = 0;
+            let saved = download::save(
+                &song,
+                &candidates,
+                &dir,
+                lyric.as_ref(),
+                &mut |received, total| {
+                    let Some(total) = total.filter(|total| *total > 0) else {
+                        return;
+                    };
+                    let percent = received * 100 / total;
+                    if percent >= reported + 25 {
+                        reported = percent;
+                        println!("  {percent}%");
+                    }
+                },
+            )?;
+            if saved.existed {
+                println!("已存在，跳过：{}", saved.path.display());
+            } else {
+                println!(
+                    "完成：{}（{}，{:.1} MB）",
+                    saved.path.display(),
+                    saved.quality.label(),
+                    saved.bytes as f64 / 1_048_576.0
+                );
+                for lrc in &saved.lyrics {
+                    println!("  歌词：{}", lrc.display());
+                }
+            }
         }
         Command::Search { keyword, limit } => {
             let songs = runtime.block_on(qq::search::songs(&keyword, limit))?;

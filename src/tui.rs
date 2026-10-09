@@ -10,8 +10,11 @@
 //! - `Space` 播放/暂停，`n`/`b` 下一首/上一首，`←`/`→`（或 `h`/`l`）±10 秒，`+`/`-` 音量
 //! - `y` 开/关歌词面板（跟着播放位置高亮当前行，带翻译）
 //! - `/` 搜索（回车搜、Esc 取消；结果显示在曲目栏，直接回车播放）
+//! - `d` 下载选中的那首（含同名歌词）到默认目录，进度显示在状态栏
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 
 use anyhow::{Context, Result};
@@ -22,6 +25,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Gauge, List, ListItem, ListState, Paragraph};
 
+use crate::download;
 use crate::model::{Lyric, Playlist, Song};
 use crate::player::{Engine, Phase, Track};
 use crate::qq;
@@ -102,6 +106,15 @@ fn event_loop(
     Ok(())
 }
 
+/// 后台下载的进度（界面每帧读一次）。
+struct Transfer {
+    label: String,
+    received: Arc<AtomicU64>,
+    total: Arc<AtomicU64>,
+    /// 完成后写上结果文案。
+    outcome: Option<String>,
+}
+
 struct App {
     handle: tokio::runtime::Handle,
     engine: Engine,
@@ -132,6 +145,8 @@ struct App {
     lyric_state: ListState,
     /// `Some` 表示正在输入搜索词。
     input: Option<String>,
+    /// 正在跑的下载。
+    transfer: Option<Arc<Mutex<Transfer>>>,
 
     /// 正在后台做的事（状态栏）。
     loading: Option<String>,
@@ -162,6 +177,7 @@ impl App {
             show_lyric: true,
             lyric_state: ListState::default(),
             input: None,
+            transfer: None,
             loading: None,
             status: "正在加载歌单…".to_string(),
             quit: false,
@@ -192,6 +208,66 @@ impl App {
                 playlist_id: task_id,
                 result,
             });
+        });
+    }
+
+    /// 下载右栏里选中的那首（含歌词），进度走状态栏。
+    fn download_selected(&mut self) {
+        if self.transfer.is_some() {
+            self.status = "已经有一个下载在跑".to_string();
+            return;
+        }
+        let Some(song) = self
+            .tracks
+            .get(self.track_state.selected().unwrap_or(0))
+            .cloned()
+        else {
+            return;
+        };
+        let dir = download::default_dir();
+        let received = Arc::new(AtomicU64::new(0));
+        let total = Arc::new(AtomicU64::new(0));
+        let transfer = Arc::new(Mutex::new(Transfer {
+            label: format!("{} — {}", song.title, song.singers),
+            received: received.clone(),
+            total: total.clone(),
+            outcome: None,
+        }));
+        self.transfer = Some(transfer.clone());
+        self.loading = Some(format!("下载《{}》…", song.title));
+        // 下载是阻塞 I/O（`reqwest::blocking`），放独立线程；取候选/歌词走运行时。
+        let handle = self.handle.clone();
+        std::thread::spawn(move || {
+            let outcome = match handle.block_on(async {
+                let candidates = qq::vkey::candidates(&song, None).await?;
+                let lyric = qq::lyric::get(&song).await.ok().flatten();
+                Ok::<_, anyhow::Error>((candidates, lyric))
+            }) {
+                Ok((candidates, lyric)) => {
+                    let (received, total) = (received.clone(), total.clone());
+                    let mut on_progress = move |progress: u64, size: Option<u64>| {
+                        received.store(progress, Ordering::Relaxed);
+                        total.store(size.unwrap_or(0), Ordering::Relaxed);
+                    };
+                    match download::save(&song, &candidates, &dir, lyric.as_ref(), &mut on_progress)
+                    {
+                        Ok(saved) if saved.existed => {
+                            format!("已存在：{}", saved.path.display())
+                        }
+                        Ok(saved) => format!(
+                            "已下载：{}（{:.1} MB，{}）",
+                            saved.path.display(),
+                            saved.bytes as f64 / 1_048_576.0,
+                            saved.quality.label()
+                        ),
+                        Err(error) => format!("下载失败：{error:#}"),
+                    }
+                }
+                Err(error) => format!("下载失败：{error:#}"),
+            };
+            if let Ok(mut transfer) = transfer.lock() {
+                transfer.outcome = Some(outcome);
+            }
         });
     }
 
@@ -412,6 +488,7 @@ impl App {
                 }
             },
             KeyCode::Char('/') => self.input = Some(String::new()),
+            KeyCode::Char('d') => self.download_selected(),
             KeyCode::Char('y') => self.show_lyric = !self.show_lyric,
             KeyCode::Char(' ') => self.engine.toggle_pause(),
             KeyCode::Char('n') => self.play_relative(1),
@@ -476,8 +553,9 @@ impl App {
         }
     }
 
-    /// 每帧收尾：引擎死了要报，播完了要接上下一首。
+    /// 每帧收尾：引擎死了要报，播完了要接上下一首，下载进度刷到状态栏。
     fn tick(&mut self) {
+        self.poll_transfer();
         if !self.engine.is_alive() {
             self.status = "音频线程已退出，重启 canto".to_string();
             return;
@@ -498,6 +576,34 @@ impl App {
     }
 
     // -- 渲染 ---------------------------------------------------------------
+
+    fn poll_transfer(&mut self) {
+        let Some(transfer) = self.transfer.clone() else {
+            return;
+        };
+        let Ok(state) = transfer.lock() else { return };
+        if let Some(outcome) = &state.outcome {
+            let outcome = outcome.clone();
+            drop(state);
+            self.transfer = None;
+            self.loading = None;
+            self.status = outcome;
+            return;
+        }
+        let (received, total) = (
+            state.received.load(Ordering::Relaxed),
+            state.total.load(Ordering::Relaxed),
+        );
+        self.loading = Some(
+            match received
+                .checked_mul(100)
+                .and_then(|scaled| scaled.checked_div(total))
+            {
+                Some(percent) => format!("下载《{}》… {percent}%", state.label),
+                None => format!("下载《{}》…", state.label),
+            },
+        );
+    }
 
     fn draw(&mut self, frame: &mut Frame) {
         let rows = Layout::vertical([

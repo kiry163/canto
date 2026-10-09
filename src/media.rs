@@ -71,6 +71,11 @@ impl MediaStream {
         Ok(stream)
     }
 
+    /// 文件总长（`Content-Length` 或 `Content-Range` 里的总数）。
+    pub fn total(&self) -> Option<u64> {
+        self.len
+    }
+
     /// 从 `bytes={start}-` 开始取（`start == 0` 时用普通 GET，顺便拿到总长）。
     fn request_from(&mut self, start: u64) -> io::Result<()> {
         self.peek.clear();
