@@ -39,6 +39,16 @@ pub enum Command {
         /// 歌单 id，或 `favorites`
         id: String,
     },
+    /// 播放某个歌单里的第 N 首
+    Play {
+        /// 歌单 id，或 `favorites`
+        id: String,
+        /// 第几首，从 1 开始（用 `tracks` 看到的序号）
+        index: usize,
+        /// 音质：hires / flac / 320 / 128；默认无损立体声优先
+        #[arg(long)]
+        quality: Option<String>,
+    },
     /// 清除本地会话
     Logout,
 }

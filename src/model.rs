@@ -3,6 +3,39 @@
 //! 只保留列表展示与播放取流要用的字段：接口里其它字段一律不落地，
 //! 免得变成"看起来有用、实际没人读"的包袱。
 
+/// 音质档位。声明顺序就是高低顺序，便于比较（`want >= Quality::Flac`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Quality {
+    Low128,
+    High320,
+    Flac,
+    Hires,
+}
+
+impl Quality {
+    /// 展示与 `--quality` 用的短名。
+    pub fn label(self) -> &'static str {
+        match self {
+            Quality::Low128 => "128k",
+            Quality::High320 => "320k",
+            Quality::Flac => "无损",
+            Quality::Hires => "Hi-Res",
+        }
+    }
+
+    /// 解析 `--quality`。接受 `128`/`128k`、`320`/`320k`、`flac`/`lossless`/`无损`、
+    /// `hires`/`hi-res`/`母带`。
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "128" | "128k" | "low" => Some(Quality::Low128),
+            "320" | "320k" | "high" => Some(Quality::High320),
+            "flac" | "lossless" | "无损" => Some(Quality::Flac),
+            "hires" | "hi-res" | "hi_res" | "master" | "母带" => Some(Quality::Hires),
+            _ => None,
+        }
+    }
+}
+
 /// 一首歌。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Song {

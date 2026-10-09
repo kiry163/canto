@@ -1,12 +1,14 @@
 //! canto —— 自用的 QQ 音乐播放器。
 //!
-//! 当前是 M1：登录（粘贴浏览器 cookie）与歌单数据链路，先命令行跑通。
-//! 播放与 TUI 在后续里程碑接上，命令行子命令保留为排查入口。
+//! 里程碑：M1 数据链路（登录/歌单/曲目）+ 播放引擎（取流出声）。
+//! 命令行子命令之后仍然保留为排查入口。
 
 mod cli;
 mod config;
 mod http;
+mod media;
 mod model;
+mod player;
 mod qq;
 mod session;
 
@@ -17,32 +19,57 @@ use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::{Cli, Command};
-use crate::model::{Playlist, Song};
+use crate::model::{Playlist, Quality, Song};
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// 这里**不用** `#[tokio::main]`：播放要在主线程上同步跑（音频与 `reqwest::blocking`
+/// 的媒体流都不该待在异步上下文里），所以只把网络请求交给运行时。
+fn main() -> Result<()> {
     restore_sigpipe();
     let cli = Cli::parse();
     init_tracing(&cli.log);
+    let runtime = tokio::runtime::Runtime::new().context("创建异步运行时失败")?;
+
     match cli.command {
         Command::Login { cookie } => login(&cookie)?,
         Command::Whoami => whoami(),
-        Command::Playlists => print_playlists(&qq::user_playlists().await?),
-        Command::Favorites => {
-            let (playlist, songs) = qq::favorites().await?;
-            print_tracks(&playlist, &songs);
-        }
-        Command::Tracks { id } if id == Playlist::FAVORITES_ID => {
-            let (playlist, songs) = qq::favorites().await?;
-            print_tracks(&playlist, &songs);
-        }
-        Command::Tracks { id } => {
-            let (playlist, songs) = qq::playlist_tracks(&id).await?;
-            print_tracks(&playlist, &songs);
-        }
         Command::Logout => {
             session::jar().clear()?;
             println!("已清除本地会话");
+        }
+        Command::Playlists => print_playlists(&runtime.block_on(qq::user_playlists())?),
+        Command::Favorites => {
+            let (playlist, songs) = runtime.block_on(qq::favorites())?;
+            print_tracks(&playlist, &songs);
+        }
+        Command::Tracks { id } => {
+            let (playlist, songs) = runtime.block_on(load_tracks(&id))?;
+            print_tracks(&playlist, &songs);
+        }
+        Command::Play { id, index, quality } => {
+            let quality = quality.as_deref().map(parse_quality).transpose()?;
+            let (_, songs) = runtime.block_on(load_tracks(&id))?;
+            let song = songs
+                .get(index.saturating_sub(1))
+                .with_context(|| format!("歌单里没有第 {index} 首（共 {} 首）", songs.len()))?;
+            let candidates = runtime.block_on(qq::vkey::candidates(song, quality))?;
+            println!(
+                "{} — {}  [{} 个候选档位]",
+                song.title,
+                song.singers,
+                candidates.len()
+            );
+            let played = player::play(&candidates)?;
+            let short = match played.expected {
+                Some(expected) if !played.completed() => {
+                    format!("（应为 {:.1}s，流被中断）", expected.as_secs_f64())
+                }
+                _ => String::new(),
+            };
+            println!(
+                "播放结束：{} · 已播 {:.1}s{short}",
+                played.quality.label(),
+                played.position.as_secs_f64(),
+            );
         }
     }
     Ok(())
@@ -64,12 +91,36 @@ fn restore_sigpipe() {
 #[cfg(not(unix))]
 fn restore_sigpipe() {}
 
+/// 日志过滤：裸级别（`-l debug`）只作用于 canto 自己，其它库保持 `warn`。
+///
+/// 否则 reqwest/h2 在 debug 上会把每条连接、每个 TLS/HTTP2 帧都打出来，
+/// 真正想看的日志全被淹掉（实测）。要看它们的日志就写完整指令
+/// （`-l debug,h2=debug`）。
 fn init_tracing(level: &str) {
-    let filter = EnvFilter::try_new(level).unwrap_or_else(|_| EnvFilter::new("warn"));
+    let filter = if level.contains('=') {
+        EnvFilter::try_new(level).unwrap_or_else(|_| EnvFilter::new("warn"))
+    } else {
+        EnvFilter::builder()
+            .with_default_directive(tracing_subscriber::filter::LevelFilter::WARN.into())
+            .parse_lossy(format!("canto={level}"))
+    };
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
         .init();
+}
+
+fn parse_quality(text: &str) -> Result<Quality> {
+    Quality::parse(text)
+        .with_context(|| format!("不认识的音质 {text:?}（可用：hires / flac / 320 / 128）"))
+}
+
+/// 歌单 id（或 `favorites`）→ 歌单与曲目。
+async fn load_tracks(id: &str) -> Result<(Playlist, Vec<Song>)> {
+    if id == Playlist::FAVORITES_ID {
+        return qq::favorites().await;
+    }
+    qq::playlist_tracks(id).await
 }
 
 fn login(cookie: &str) -> Result<()> {

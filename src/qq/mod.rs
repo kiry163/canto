@@ -6,6 +6,7 @@
 
 pub mod cookie;
 pub mod parse;
+pub mod vkey;
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};

@@ -8,9 +8,9 @@
 |---|---|
 | 粘贴 cookie 登录（域名感知会话，跨进程保留） | ✅ |
 | 我的歌单 / 我喜欢 / 歌单曲目（含音质档位） | ✅ |
-| 播放（取 vkey + 流式解码） | 未开始（M2） |
-| 终端界面（ratatui） | 未开始（M3） |
-| 下载 / 歌词 / 歌单写入 | 未开始（M4） |
+| 播放：vkey 取流 → 边下边解码出声 | ✅ |
+| 终端界面（ratatui） | 未开始（M1 第 4 步） |
+| 下载 / 歌词 / 歌单写入 | 未开始（M2） |
 
 ## 用法
 
@@ -25,11 +25,33 @@ cargo run -- whoami              # 会话状态
 cargo run -- playlists           # 我的歌单
 cargo run -- favorites           # 我喜欢
 cargo run -- tracks 7412851234   # 某个歌单的曲目（id 用 playlists 打出来的）
+cargo run -- play 7412851234 3   # 播这个歌单的第 3 首
+cargo run -- play favorites 1 --quality hires   # 指定音质
 cargo run -- logout              # 清除本地会话
 ```
 
 会话存在 `<系统配置目录>/canto/session.json`（macOS：`~/Library/Application Support/canto/session.json`）。
 cookie 就是账号凭据：**别提交、别分享这个文件**。
+
+## 音质档位（实测，2026-10-09）
+
+同一首歌在 CDN 上有一组候选文件。`canto` 按「立体声优先、音质降级」排队，逐个**真去开**，
+第一个能解码的胜出——因为服务端对不存在/无版权的文件**也会**返回 `purl` + `vkey`，
+只有真去取才 404（`file not exist`），光看接口结果判断不出来。
+
+| 前缀 | 实测规格 | 体积（4 分钟量级） | 用途 |
+|---|---|---|---|
+| `AI00` | flac 192kHz/24bit 立体声 | ~150MB | 母带，仅 `--quality hires` |
+| `F000` | flac 44.1k/16bit 立体声（个别 48k/24bit） | ~25MB | **默认首选** |
+| `Q000` | flac 44.1k/16bit 立体声 | ~25MB | 默认次选 |
+| `M800` | mp3 320k 立体声 | ~9MB | 无损不可用时 |
+| `M500` | mp3 128k 立体声 | ~3.5MB | 兜底 |
+| `Q001` | flac 44.1k/16bit **6 声道** | ~62MB | 5.1 环绕，排在 mp3 之后 |
+| `O801` | vorbis 44.1k **4 声道** | ~19MB | 环绕，最后兜底 |
+
+`--quality` 语义是「从这一档往下找」：`hires`（母带）→ `flac`（默认）→ `320` → `128`。
+环绕声版本排在立体声之后，是因为它们只会经过 rodio 的降混，白白多花带宽。
+
 
 ## 设计要点
 
@@ -41,6 +63,16 @@ cookie 就是账号凭据：**别提交、别分享这个文件**。
 - 只落模型需要的字段，接口返回的其余字段一律不存。
 - 接口路径、`musicu.fcg` 的模块名、UA 都来自实测（voicefox 的 tx 音源跑通同一套接口），
   不是照文档猜的；改一个字符就可能 404。
+- **边下边播**：`media.rs` 把 HTTP 响应做成 `Read + Seek`（rodio 的解码器要 `Seek`）。
+  CDN 支持 `Accept-Ranges: bytes`，所以往回 seek 就重开一次 `Range` 请求，
+  往前 seek 就近读掉——正常顺序播放只有一次请求，不落盘。
+- 声道数与采样率交给 rodio 的 mixer 归一（它会做 6 声道→立体声、192kHz→设备采样率），
+  但**选档时仍然立体声优先**：多声道版本只会被降混，白多花带宽。
+- 开流时校验**魔数**（`fLaC`/`OggS`/`ID3`/`ftyp`…）：CDN 的 `Content-Type` 不可信
+  （实测 FLAC 被标成 `audio/x-ogg`、错误页标成 `audio/mpeg`），错误页正文不该被
+  解码器当成音频播出去。
+- `--log` 传裸级别（如 `debug`）时只作用于 canto 自己，其它库保持 `warn`
+  ——否则 reqwest/h2 会把每条连接、每个 HTTP/2 帧都打出来，把你的日志淹掉。
 
 ## 代码结构
 
@@ -50,9 +82,12 @@ src/
   config.rs   会话文件路径
   http.rs     HTTP 客户端（UA / 超时 / 挂会话 jar）
   session.rs  登录态：cookie jar、完整性校验、落盘
-  model.rs    Song / Playlist
+  model.rs    Song / Playlist / Quality
+  media.rs    HTTP 流 → Read + Seek（Range 重连）
+  player.rs   候选档位 → rodio 解码 → 默认音频设备
   qq/
     mod.rs    接口：个人歌单、我喜欢、歌单曲目
+    vkey.rs   取播放地址与候选档位顺序
     cookie.rs 粘贴 cookie 的解析
     parse.rs  响应 JSON → 模型
 ```
