@@ -23,7 +23,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Gauge, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, Clear, Gauge, List, ListItem, ListState, Paragraph};
 
 use crate::download;
 use crate::model::{Lyric, Playlist, Song};
@@ -55,6 +55,12 @@ enum Msg {
     Search {
         keyword: String,
         result: Result<Vec<Song>>,
+    },
+    /// 歌单写入（收藏/加歌单/移除）的结果；`refresh` 是要重新拉取的歌单。
+    Wrote {
+        done: String,
+        refresh: Option<(String, String)>,
+        result: Result<()>,
     },
     /// 歌词结果（同样是异步的，同样按 `request` 过滤过期回话）。
     Lyric {
@@ -115,6 +121,23 @@ struct Transfer {
     outcome: Option<String>,
 }
 
+/// 一次歌单写入的意图（界面线程 → 后台任务）。
+struct WriteRequest {
+    /// 进行中时状态栏的文案。
+    busy: String,
+    /// 成功后的文案。
+    done: String,
+    /// 成功后要重新拉取的歌单（移除会改右栏）。
+    refresh: Option<(String, String)>,
+    song: Song,
+    /// 写入接口要的目录号（「我喜欢」= 201）。
+    dir_id: u64,
+    /// 写入接口要的 `tid`。
+    tid: u64,
+    /// `true` = 加进去，`false` = 移除。
+    add: bool,
+}
+
 struct App {
     handle: tokio::runtime::Handle,
     engine: Engine,
@@ -145,6 +168,8 @@ struct App {
     lyric_state: ListState,
     /// `Some` 表示正在输入搜索词。
     input: Option<String>,
+    /// `Some` 表示正在挑歌单（`a` 键）：候选歌单、高亮、要加进去的歌。
+    picker: Option<(Vec<Playlist>, ListState, Song)>,
     /// 正在跑的下载。
     transfer: Option<Arc<Mutex<Transfer>>>,
 
@@ -177,6 +202,7 @@ impl App {
             show_lyric: true,
             lyric_state: ListState::default(),
             input: None,
+            picker: None,
             transfer: None,
             loading: None,
             status: "正在加载歌单…".to_string(),
@@ -269,6 +295,127 @@ impl App {
                 transfer.outcome = Some(outcome);
             }
         });
+    }
+
+    /// 右栏当前选中的那首。
+    fn selected_song(&self) -> Option<Song> {
+        self.tracks
+            .get(self.track_state.selected().unwrap_or(0))
+            .cloned()
+    }
+
+    /// 歌单写入统一入口：后台跑，结果回状态栏。
+    fn write_song(&mut self, request: WriteRequest) {
+        let WriteRequest {
+            busy,
+            done,
+            refresh,
+            song,
+            dir_id,
+            tid,
+            add,
+        } = request;
+        self.loading = Some(busy);
+        let tx = self.tx.clone();
+        self.handle.spawn(async move {
+            let songs = std::slice::from_ref(&song);
+            let result = if add {
+                qq::write::add(dir_id, tid, songs).await.map(|_| ())
+            } else {
+                qq::write::remove(dir_id, tid, songs).await.map(|_| ())
+            };
+            let _ = tx.send(Msg::Wrote {
+                done,
+                refresh,
+                result,
+            });
+        });
+    }
+
+    /// `f`：收藏右栏选中的歌。
+    fn favorite_selected(&mut self) {
+        let Some(song) = self.selected_song() else {
+            return;
+        };
+        let request = WriteRequest {
+            busy: format!("收藏《{}》…", song.title),
+            done: format!("已收藏：{} — {}", song.title, song.singers),
+            refresh: None,
+            song,
+            dir_id: qq::write::FAVORITES_DIR_ID,
+            tid: 0,
+            add: true,
+        };
+        self.write_song(request);
+    }
+
+    /// `a`：挑一个歌单把选中的歌加进去。
+    fn open_picker(&mut self) {
+        let Some(song) = self.selected_song() else {
+            return;
+        };
+        if self.playlists.is_empty() {
+            self.status = "歌单还没加载出来".to_string();
+            return;
+        }
+        let mut state = ListState::default();
+        state.select(Some(0));
+        self.picker = Some((self.playlists.clone(), state, song));
+    }
+
+    fn confirm_picker(&mut self) {
+        let Some((playlists, state, song)) = self.picker.take() else {
+            return;
+        };
+        let Some(playlist) = state
+            .selected()
+            .and_then(|index| playlists.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        let request = WriteRequest {
+            busy: format!("加进《{}》…", playlist.name),
+            done: format!(
+                "已把《{} — {}》加进《{}》",
+                song.title, song.singers, playlist.name
+            ),
+            refresh: None,
+            song,
+            dir_id: playlist.dir_id,
+            tid: playlist.id.parse().unwrap_or(0),
+            add: true,
+        };
+        self.write_song(request);
+    }
+
+    /// `x`：从右栏当前显示的歌单里移除选中的歌。
+    fn remove_selected(&mut self) {
+        let Some(song) = self.selected_song() else {
+            return;
+        };
+        let Some((id, name)) = self.shown.clone() else {
+            return;
+        };
+        // 「我喜欢」在服务端走不通（实测 DelSonglist 一律 80105），早点说清楚。
+        if id == Playlist::FAVORITES_ID {
+            self.status = "QQ 服务端不允许接口取消收藏（80105），请在官方客户端操作".to_string();
+            return;
+        }
+        let Some(playlist) = self.playlists.iter().find(|playlist| playlist.id == id) else {
+            self.status = "右栏不是个人歌单，没法移除".to_string();
+            return;
+        };
+        let request = WriteRequest {
+            busy: format!("从《{name}》移除《{}》…", song.title),
+            done: format!("已从《{name}》移除：{} — {}", song.title, song.singers),
+            refresh: Some((id, name)),
+            song,
+            dir_id: playlist.dir_id,
+            tid: playlist.id.parse().unwrap_or(0),
+            add: false,
+        };
+        self.write_song(request);
     }
 
     /// 起一个后台搜索。
@@ -383,6 +530,23 @@ impl App {
                     Err(error) => self.status = format!("{error:#}"),
                 }
             }
+            Msg::Wrote {
+                done,
+                refresh,
+                result,
+            } => {
+                self.loading = None;
+                self.status = match result {
+                    Ok(()) => {
+                        // 移除后右栏就过期了，重新拉一遍。
+                        if let Some((id, name)) = refresh {
+                            self.load_tracks(id, name);
+                        }
+                        done
+                    }
+                    Err(error) => format!("{error:#}"),
+                };
+            }
             Msg::Lyric {
                 request,
                 title,
@@ -468,6 +632,27 @@ impl App {
             }
             return;
         }
+        // 选择框模式优先：这里 `q` 也只是字母。
+        if self.picker.is_some() {
+            match key.code {
+                KeyCode::Esc => self.picker = None,
+                KeyCode::Char('j') | KeyCode::Down => {
+                    if let Some((playlists, state, _)) = self.picker.as_mut() {
+                        let next = state.selected().unwrap_or(0) + 1;
+                        state.select(Some(next.min(playlists.len().saturating_sub(1))));
+                    }
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    if let Some((_, state, _)) = self.picker.as_mut() {
+                        let previous = state.selected().unwrap_or(0).saturating_sub(1);
+                        state.select(Some(previous));
+                    }
+                }
+                KeyCode::Enter => self.confirm_picker(),
+                _ => {}
+            }
+            return;
+        }
         match key.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
@@ -489,6 +674,9 @@ impl App {
             },
             KeyCode::Char('/') => self.input = Some(String::new()),
             KeyCode::Char('d') => self.download_selected(),
+            KeyCode::Char('f') => self.favorite_selected(),
+            KeyCode::Char('a') => self.open_picker(),
+            KeyCode::Char('x') => self.remove_selected(),
             KeyCode::Char('y') => self.show_lyric = !self.show_lyric,
             KeyCode::Char(' ') => self.engine.toggle_pause(),
             KeyCode::Char('n') => self.play_relative(1),
@@ -629,6 +817,34 @@ impl App {
             self.draw_lyric(frame, *area);
         }
         self.draw_status(frame, rows[1], rows[2]);
+        if self.picker.is_some() {
+            self.draw_picker(frame, frame.area());
+        }
+    }
+
+    /// `a` 键弹出的歌单选择框。
+    fn draw_picker(&mut self, frame: &mut Frame, area: Rect) {
+        let Some((playlists, state, song)) = self.picker.as_mut() else {
+            return;
+        };
+        let width = area.width.saturating_sub(4).min(56);
+        let height = (playlists.len() as u16 + 2).min(area.height.saturating_sub(2));
+        let popup = Rect {
+            x: area.x + (area.width.saturating_sub(width)) / 2,
+            y: area.y + (area.height.saturating_sub(height)) / 2,
+            width,
+            height,
+        };
+        frame.render_widget(Clear, popup);
+        let items: Vec<ListItem> = playlists
+            .iter()
+            .map(|playlist| ListItem::new(format!("{:>5}  {}", playlist.song_count, playlist.name)))
+            .collect();
+        let list = List::new(items)
+            .block(Block::bordered().title(format!(" 把《{}》加进 ", song.title)))
+            .highlight_style(highlight())
+            .highlight_symbol("▶ ");
+        frame.render_stateful_widget(list, popup, state);
     }
 
     fn draw_playlists(&mut self, frame: &mut Frame, area: Rect) {
@@ -801,7 +1017,7 @@ impl App {
         let hint = if let Some(loading) = &self.loading {
             format!("⏳ {loading}")
         } else if self.status.is_empty() {
-            "Enter 播放 · Space 暂停 · n/b 切歌 · ←/→ ±10s · +/- 音量 · Tab 切栏 · q 退出"
+            "Enter 播放 · Space 暂停 · n/b 切歌 · f 收藏 · a 加歌单 · x 移除 · Tab 切栏 · q 退出"
                 .to_string()
         } else {
             self.status.clone()

@@ -106,6 +106,7 @@ pub fn parse_user_playlist(item: &Value) -> Option<Playlist> {
     if dirid == DIRID_FAVORITES {
         return Some(Playlist {
             id: Playlist::FAVORITES_ID.to_string(),
+            dir_id: dirid,
             name: value_str(&item["diss_name"]).unwrap_or_else(|| "我喜欢".to_string()),
             song_count: value_u64(&item["song_cnt"]),
             cover_url: None,
@@ -121,6 +122,7 @@ pub fn parse_user_playlist(item: &Value) -> Option<Playlist> {
     }
     Some(Playlist {
         id: tid.to_string(),
+        dir_id: dirid,
         name: value_str(&item["diss_name"])?,
         song_count: value_u64(&item["song_cnt"]),
         cover_url: value_str(&item["diss_cover"]).map(|url| url.replace("http://", "https://")),
@@ -232,6 +234,7 @@ mod tests {
         });
         let playlist = parse_user_playlist(&item).expect("个人歌单要解析出来");
         assert_eq!(playlist.id, "7675761234", "详情接口要的是 tid，不是 dirid");
+        assert_eq!(playlist.dir_id, 2, "写入接口要的是 dirid");
         assert_eq!(playlist.name, "嗯");
         assert_eq!(playlist.song_count, 197);
         assert_eq!(
@@ -254,6 +257,7 @@ mod tests {
         });
         let playlist = parse_user_playlist(&item).expect("我喜欢要单独成行");
         assert_eq!(playlist.id, Playlist::FAVORITES_ID);
+        assert_eq!(playlist.dir_id, 201, "「我喜欢」的目录号固定 201");
         assert!(playlist.is_favorites);
         assert_eq!(playlist.song_count, 488);
         assert_eq!(playlist.cover_url, None, "占位封面（?n=1）不算封面");

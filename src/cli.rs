@@ -53,6 +53,38 @@ pub enum Command {
         #[arg(long)]
         quality: Option<String>,
     },
+    /// 收藏一首歌（加到「我喜欢」）
+    Favorite {
+        /// 歌单 id，或 `favorites`
+        id: String,
+        /// 第几首，从 1 开始
+        index: usize,
+    },
+    /// 取消收藏（从「我喜欢」移除）
+    Unfavorite {
+        /// 歌单 id，或 `favorites`
+        id: String,
+        /// 第几首，从 1 开始
+        index: usize,
+    },
+    /// 把某首歌加进指定歌单
+    Add {
+        /// 目标歌单的 id（用 `playlists` 打出来的；`favorites` 即「我喜欢」）
+        target: String,
+        /// 来源歌单 id，或 `favorites`
+        id: String,
+        /// 第几首，从 1 开始
+        index: usize,
+    },
+    /// 从指定歌单移除某首歌
+    Remove {
+        /// 目标歌单的 id（用 `playlists` 打出来的；`favorites` 即「我喜欢」）
+        target: String,
+        /// 来源歌单 id，或 `favorites`
+        id: String,
+        /// 第几首，从 1 开始
+        index: usize,
+    },
     /// 下载一首歌（同名歌词一起落盘）
     Download {
         /// 歌单 id，或 `favorites`

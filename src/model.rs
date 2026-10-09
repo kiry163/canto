@@ -246,7 +246,10 @@ fn shift(at: Duration, offset_ms: i64) -> Duration {
 /// 一个歌单。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Playlist {
+    /// 详情接口要的 `disstid`（= 服务端的 `tid`）。
     pub id: String,
+    /// 写入接口要的目录号（`dirid`）；「我喜欢」固定 201，未知时 0。
+    pub dir_id: u64,
     pub name: String,
     pub song_count: u64,
     pub cover_url: Option<String>,

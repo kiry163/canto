@@ -10,6 +10,7 @@ pub mod lyric;
 pub mod parse;
 pub mod search;
 pub mod vkey;
+pub mod write;
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -86,6 +87,7 @@ pub async fn favorites() -> Result<(Playlist, Vec<Song>)> {
     let songs = parse_songlist(data)?;
     let playlist = Playlist {
         id: Playlist::FAVORITES_ID.to_string(),
+        dir_id: write::FAVORITES_DIR_ID,
         name: "我喜欢".to_string(),
         song_count: data["total_song_num"]
             .as_u64()
@@ -142,6 +144,8 @@ pub async fn playlist_tracks(id: &str) -> Result<(Playlist, Vec<Song>)> {
         .unwrap_or_else(|| format!("歌单 {id}"));
     let playlist = Playlist {
         id: id.to_string(),
+        // 详情接口只认 tid；写入要的 dirid 得从个人歌单列表里取（`canto playlists`）。
+        dir_id: 0,
         name,
         song_count: data["total_song_num"]
             .as_u64()

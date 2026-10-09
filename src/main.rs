@@ -117,12 +117,45 @@ fn main() -> Result<()> {
             println!("搜索「{keyword}」（{} 首）", songs.len());
             print_song_rows(&songs);
         }
+        Command::Favorite { id, index } => {
+            let song = runtime.block_on(pick_song(&id, index))?;
+            runtime.block_on(qq::write::set_favorite(&song, true))?;
+            println!("已收藏：{} — {}", song.title, song.singers);
+        }
+        Command::Unfavorite { id, index } => {
+            let song = runtime.block_on(pick_song(&id, index))?;
+            runtime.block_on(qq::write::set_favorite(&song, false))?;
+            println!("已取消收藏：{} — {}", song.title, song.singers);
+        }
+        Command::Add { target, id, index } => {
+            let song = runtime.block_on(pick_song(&id, index))?;
+            let (dir_id, tid, name) = if target == Playlist::FAVORITES_ID {
+                (qq::write::FAVORITES_DIR_ID, 0, "我喜欢".to_string())
+            } else {
+                let playlists = runtime.block_on(qq::user_playlists())?;
+                let playlist = playlists
+                    .iter()
+                    .find(|playlist| playlist.id == target)
+                    .with_context(|| {
+                        format!("没有 id 为 {target} 的歌单（用 `canto playlists` 看）")
+                    })?;
+                (
+                    playlist.dir_id,
+                    playlist.id.parse::<u64>().unwrap_or(0),
+                    playlist.name.clone(),
+                )
+            };
+            runtime.block_on(qq::write::add(dir_id, tid, std::slice::from_ref(&song)))?;
+            println!("已把《{} — {}》加进《{name}》", song.title, song.singers);
+        }
+        Command::Remove { target, id, index } => {
+            let song = runtime.block_on(pick_song(&id, index))?;
+            let (dir_id, tid, name) = runtime.block_on(resolve_playlist(&target))?;
+            runtime.block_on(qq::write::remove(dir_id, tid, std::slice::from_ref(&song)))?;
+            println!("已把《{} — {}》从《{name}》移除", song.title, song.singers);
+        }
         Command::Lyric { id, index } => {
-            let (_, songs) = runtime.block_on(load_tracks(&id))?;
-            let song = songs
-                .get(index.saturating_sub(1))
-                .with_context(|| format!("歌单里没有第 {index} 首（共 {} 首）", songs.len()))?
-                .clone();
+            let song = runtime.block_on(pick_song(&id, index))?;
             match runtime.block_on(qq::lyric::get(&song))? {
                 Some(lyric) => {
                     println!(
@@ -152,11 +185,7 @@ fn main() -> Result<()> {
         }
         Command::Play { id, index, quality } => {
             let quality = quality.as_deref().map(parse_quality).transpose()?;
-            let (_, songs) = runtime.block_on(load_tracks(&id))?;
-            let song = songs
-                .get(index.saturating_sub(1))
-                .with_context(|| format!("歌单里没有第 {index} 首（共 {} 首）", songs.len()))?
-                .clone();
+            let song = runtime.block_on(pick_song(&id, index))?;
             let candidates = runtime.block_on(qq::vkey::candidates(&song, quality))?;
             println!(
                 "{} — {}  [{} 个候选档位]",
@@ -253,6 +282,32 @@ fn init_tracing(level: &str, to_file: bool) -> Result<()> {
 fn parse_quality(text: &str) -> Result<Quality> {
     Quality::parse(text)
         .with_context(|| format!("不认识的音质 {text:?}（可用：hires / flac / 320 / 128）"))
+}
+
+/// 把命令行给的歌单标识换成写入接口要的 `(dirId, tid, 名字)`。
+async fn resolve_playlist(target: &str) -> Result<(u64, u64, String)> {
+    if target == Playlist::FAVORITES_ID {
+        return Ok((qq::write::FAVORITES_DIR_ID, 0, "我喜欢".to_string()));
+    }
+    let playlists = qq::user_playlists().await?;
+    let playlist = playlists
+        .iter()
+        .find(|playlist| playlist.id == target)
+        .with_context(|| format!("没有 id 为 {target} 的歌单（用 `canto playlists` 看）"))?;
+    Ok((
+        playlist.dir_id,
+        playlist.id.parse().unwrap_or(0),
+        playlist.name.clone(),
+    ))
+}
+
+/// 取某个歌单里的第 `index` 首（从 1 开始）。
+async fn pick_song(id: &str, index: usize) -> Result<Song> {
+    let (_, songs) = load_tracks(id).await?;
+    songs
+        .get(index.saturating_sub(1))
+        .cloned()
+        .with_context(|| format!("歌单里没有第 {index} 首（共 {} 首）", songs.len()))
 }
 
 /// 歌单 id（或 `favorites`）→ 歌单与曲目。
