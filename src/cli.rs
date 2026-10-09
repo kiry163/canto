@@ -16,12 +16,15 @@ pub struct Cli {
     #[arg(short, long, default_value = "warn", global = true)]
     pub log: String,
 
+    /// 不带子命令时默认打开终端界面
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// 打开终端界面（歌单 / 曲目 / 播放）
+    Tui,
     /// 用浏览器里复制的 cookie 登录
     Login {
         /// cookie 文本；传 `-` 表示从标准输入读（避免留在 shell 历史里）

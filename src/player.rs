@@ -1,123 +1,422 @@
-//! 播放：候选地址 → 解码 → 输出设备。
+//! 播放引擎：一个后台线程持有音频设备与解码器，界面/命令行只发消息、读状态。
 //!
-//! 逐个候选**真去开**：只有能解码的才算数（服务端对不存在的文件也给 purl/vkey，
-//! 见 [`crate::qq::vkey`]）。开出来就播到底，并且把"实际播了多久"和"应该多久"
-//! 报出来——流中途断了只会在音频线程里静默结束，这是唯一能发现它的地方。
+//! 为什么要有这一层：rodio 的播放是阻塞的（`Player` 要一直拿着），而界面必须保持
+//! 响应。所以设备与解码器都归音频线程，外面通过 [`Engine::play`] 之类的消息指挥，
+//! 通过 [`Engine::snapshot`] 拿到进度——状态是普通的 `Arc<Mutex<..>>` 快照，
+//! 界面每帧读一次，不需要异步。
+//!
+//! 候选地址在这里逐个**真去开**：只有能解码的才算数（服务端对不存在的文件也会
+//! 返回 purl/vkey，见 [`crate::qq::vkey`]）。
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use rodio::source::Source;
-use rodio::stream::DeviceSinkBuilder;
+use rodio::stream::{DeviceSinkBuilder, MixerDeviceSink};
 use rodio::{Decoder, Player};
 
 use crate::media::MediaStream;
-use crate::model::Quality;
+use crate::model::{Quality, Song};
 use crate::qq::vkey::Candidate;
 
-/// 实际播完（或流中断）之后的交代。
-pub struct Played {
-    pub quality: Quality,
-    /// 实际推进的播放位置。
-    pub position: Duration,
-    /// 容器声明的总时长（拿不到就是 `None`）。
-    pub expected: Option<Duration>,
+/// 状态刷新间隔：够进度条平滑，也不会白烧 CPU。
+const TICK: Duration = Duration::from_millis(150);
+
+/// 一次播放请求：歌 + 已按偏好排好序的候选地址。
+#[derive(Debug, Clone)]
+pub struct Track {
+    pub song: Song,
+    pub candidates: Vec<Candidate>,
 }
 
-impl Played {
-    /// 是否完整播完。差得超过 5 秒就算中断。
-    pub fn completed(&self) -> bool {
-        match self.expected {
-            Some(expected) => self.position + Duration::from_secs(5) >= expected,
-            None => true,
+impl Track {
+    /// 列表里显示用的「标题 — 歌手」。
+    pub fn label(&self) -> String {
+        format!("{} — {}", self.song.title, self.song.singers)
+    }
+}
+
+/// 播放阶段。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Phase {
+    /// 没在播；可能是刚开机，也可能是上一首播完了（看 `just_finished`）。
+    Idle,
+    /// 正在取第一个能解码的候选。
+    Buffering,
+    Playing,
+    Paused,
+    /// 所有候选都开不了，附带原因。
+    Failed(String),
+}
+
+/// 状态快照，界面每帧读一次。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Snapshot {
+    /// 「标题 — 歌手」。
+    pub title: Option<String>,
+    /// 实际开出来的档位（`Buffering` 时还是 `None`）。
+    pub quality: Option<Quality>,
+    pub phase: Phase,
+    pub position: Duration,
+    /// 容器声明的总时长，拿不到就是 `None`（部分 MP3）。
+    pub duration: Option<Duration>,
+    /// 音量百分比。
+    pub volume: u8,
+    /// 刚刚播完（自动续播用）。界面读走后由引擎清零。
+    pub just_finished: bool,
+}
+
+impl Default for Snapshot {
+    fn default() -> Self {
+        Self {
+            title: None,
+            quality: None,
+            phase: Phase::Idle,
+            position: Duration::ZERO,
+            duration: None,
+            volume: 100,
+            just_finished: false,
         }
     }
 }
 
-/// 播第一个能打开的候选，阻塞到放完。
-pub fn play(candidates: &[Candidate]) -> Result<Played> {
-    let mut sink = DeviceSinkBuilder::open_default_sink()
-        .context("打开默认音频设备失败（有别的程序独占音频设备？）")?;
-    sink.log_on_drop(false);
+impl Snapshot {
+    /// 上一首是否完整播完（差 5 秒以内算播完）。流中断时音频线程只会静默结束，
+    /// 这里是唯一能发现的地方。
+    pub fn completed(&self) -> bool {
+        match self.duration {
+            Some(duration) => self.position + Duration::from_secs(5) >= duration,
+            None => true,
+        }
+    }
 
+    /// 进度 0.0~1.0。
+    pub fn progress(&self) -> f64 {
+        match self.duration {
+            Some(duration) if duration > Duration::ZERO => {
+                (self.position.as_secs_f64() / duration.as_secs_f64()).clamp(0.0, 1.0)
+            }
+            _ => 0.0,
+        }
+    }
+}
+
+enum Cmd {
+    Play(Box<Track>),
+    TogglePause,
+    SeekBy(i64),
+    AdjustVolume(i8),
+}
+
+/// 播放引擎句柄。可以随便克隆？不需要——一个进程一个，放在 `App` 里。
+pub struct Engine {
+    tx: Sender<Cmd>,
+    state: Arc<Mutex<Snapshot>>,
+    running: Arc<AtomicBool>,
+}
+
+impl Engine {
+    /// 打开默认音频设备并启动音频线程。设备打不开会立刻报错（而不是等第一次播放）。
+    pub fn start() -> Result<Self> {
+        let mut sink = DeviceSinkBuilder::open_default_sink()
+            .context("打开默认音频设备失败（是不是有别的程序独占？）")?;
+        sink.log_on_drop(false);
+        let state = Arc::new(Mutex::new(Snapshot::default()));
+        let running = Arc::new(AtomicBool::new(true));
+        let (tx, rx) = channel();
+        let thread_state = state.clone();
+        let thread_running = running.clone();
+        std::thread::Builder::new()
+            .name("canto-audio".to_string())
+            .spawn(move || run(rx, thread_state, sink, thread_running))
+            .context("启动音频线程失败")?;
+        Ok(Self { tx, state, running })
+    }
+
+    pub fn snapshot(&self) -> Snapshot {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    /// 音频线程还活着吗。
+    pub fn is_alive(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+
+    pub fn play(&self, track: Track) {
+        self.send(Cmd::Play(Box::new(track)));
+    }
+
+    pub fn toggle_pause(&self) {
+        self.send(Cmd::TogglePause);
+    }
+
+    /// 相对当前位置跳转（秒，可为负）。
+    pub fn seek_by(&self, seconds: i64) {
+        self.send(Cmd::SeekBy(seconds));
+    }
+
+    /// 音量加减（百分点）。
+    pub fn adjust_volume(&self, delta: i8) {
+        self.send(Cmd::AdjustVolume(delta));
+    }
+
+    /// 界面读走「刚播完」标记。
+    pub fn take_finished(&self) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        std::mem::take(&mut state.just_finished)
+    }
+
+    fn send(&self, cmd: Cmd) {
+        if self.tx.send(cmd).is_err() {
+            tracing::warn!("音频线程已退出，命令被丢弃");
+        }
+    }
+}
+
+/// 音频线程主循环：处理命令 + 定时刷新状态快照。
+fn run(
+    rx: Receiver<Cmd>,
+    state: Arc<Mutex<Snapshot>>,
+    sink: MixerDeviceSink,
+    running: Arc<AtomicBool>,
+) {
+    let mixer = sink.mixer().clone();
+    let mut player: Option<Player> = None;
+    let mut volume = 1.0_f32;
+    // 连续快进/快退的锚点，见 `Cmd::SeekBy` 的说明。
+    let mut seek_anchor: Option<Duration> = None;
+
+    loop {
+        match rx.recv_timeout(TICK) {
+            Ok(cmd) => {
+                handle(
+                    cmd,
+                    &mixer,
+                    &state,
+                    &mut player,
+                    &mut volume,
+                    &mut seek_anchor,
+                );
+                // 连按按键时一次收干净，别让命令排队等下一个 tick。
+                while let Ok(cmd) = rx.try_recv() {
+                    handle(
+                        cmd,
+                        &mixer,
+                        &state,
+                        &mut player,
+                        &mut volume,
+                        &mut seek_anchor,
+                    );
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+        if let Some(player) = &player {
+            refresh(player, &state, &mut seek_anchor);
+        }
+    }
+    running.store(false, Ordering::SeqCst);
+    tracing::debug!("音频线程退出");
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle(
+    cmd: Cmd,
+    mixer: &rodio::mixer::Mixer,
+    state: &Arc<Mutex<Snapshot>>,
+    player: &mut Option<Player>,
+    volume: &mut f32,
+    seek_anchor: &mut Option<Duration>,
+) {
+    match cmd {
+        Cmd::Play(track) => {
+            // 丢掉旧的播放器就是「停掉上一首」。
+            *player = None;
+            *seek_anchor = None;
+            let title = track.label();
+            tracing::info!("开始播放：{title}");
+            update(state, |snapshot| {
+                snapshot.title = Some(title);
+                snapshot.quality = None;
+                snapshot.phase = Phase::Buffering;
+                snapshot.position = Duration::ZERO;
+                snapshot.duration = None;
+                snapshot.just_finished = false;
+            });
+            match open(&track.candidates) {
+                Ok((decoder, quality, duration)) => {
+                    let new_player = Player::connect_new(mixer);
+                    new_player.set_volume(*volume);
+                    new_player.append(decoder);
+                    tracing::info!("播放中：{}", quality.label());
+                    update(state, |snapshot| {
+                        snapshot.quality = Some(quality);
+                        snapshot.phase = Phase::Playing;
+                        snapshot.duration = duration;
+                    });
+                    *player = Some(new_player);
+                }
+                Err(error) => {
+                    let message = format!("{error:#}");
+                    tracing::warn!("播放失败：{message}");
+                    update(state, |snapshot| {
+                        snapshot.phase = Phase::Failed(message);
+                    });
+                }
+            }
+        }
+        Cmd::TogglePause => {
+            if let Some(player) = player {
+                if player.is_paused() {
+                    player.play();
+                } else {
+                    player.pause();
+                }
+                refresh(player, state, seek_anchor);
+            }
+        }
+        Cmd::SeekBy(seconds) => {
+            if let Some(player) = player {
+                // 不能只看 `get_pos()`：它每 5ms 音频才更新一次，连按快进的一批
+                // 命令会读到同一个位置，最后只前进一格。用上次的目标当锚点。
+                let reported = player.get_pos();
+                let from = seek_anchor.unwrap_or(reported).max(reported);
+                let delta = Duration::from_secs(seconds.unsigned_abs());
+                let target = if seconds >= 0 {
+                    from + delta
+                } else {
+                    from.saturating_sub(delta)
+                };
+                let target = match duration_of(state) {
+                    Some(duration) => target.min(duration),
+                    None => target,
+                };
+                *seek_anchor = Some(target);
+                if let Err(error) = player.try_seek(target) {
+                    tracing::debug!("跳转失败（{target:?}）：{error}");
+                }
+            }
+        }
+        Cmd::AdjustVolume(delta) => {
+            let percent = (*volume * 100.0).round() as i32 + i32::from(delta);
+            let percent = percent.clamp(0, 100);
+            *volume = percent as f32 / 100.0;
+            if let Some(player) = player {
+                player.set_volume(*volume);
+            }
+            update(state, |snapshot| snapshot.volume = percent as u8);
+        }
+    }
+}
+
+/// 当前这首声明的总时长。
+fn duration_of(state: &Arc<Mutex<Snapshot>>) -> Option<Duration> {
+    state
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .duration
+}
+
+/// 从当前播放器读一次进度。
+fn refresh(player: &Player, state: &Arc<Mutex<Snapshot>>, seek_anchor: &mut Option<Duration>) {
+    let position = player.get_pos();
+    let paused = player.is_paused();
+    let ended = player.empty();
+    // 播放位置追上了跳转目标，锚点就没用了（不清掉会一直压着后续快退）。
+    if seek_anchor.is_some_and(|anchor| position >= anchor) {
+        *seek_anchor = None;
+    }
+    update(state, |snapshot| {
+        if ended {
+            if snapshot.phase != Phase::Idle {
+                snapshot.phase = Phase::Idle;
+                snapshot.just_finished = true;
+                if let Some(duration) = snapshot.duration {
+                    snapshot.position = duration.max(position);
+                } else {
+                    snapshot.position = position;
+                }
+            }
+        } else {
+            snapshot.position = position;
+            snapshot.phase = if paused {
+                Phase::Paused
+            } else {
+                Phase::Playing
+            };
+        }
+    });
+}
+
+fn update(state: &Arc<Mutex<Snapshot>>, act: impl FnOnce(&mut Snapshot)) {
+    let mut snapshot = state.lock().unwrap_or_else(|error| error.into_inner());
+    act(&mut snapshot);
+}
+
+/// 逐个候选去开，返回第一个能解码的。
+fn open(candidates: &[Candidate]) -> Result<(Decoder<MediaStream>, Quality, Option<Duration>)> {
+    // 逐个候选真去开，第一个能解码的胜出（服务端对不存在的文件也会给 purl）。
     let mut failures = Vec::new();
     for candidate in candidates {
         let stream = match MediaStream::open(&candidate.url) {
             Ok(stream) => stream,
             Err(error) => {
-                tracing::debug!(
-                    "{} 档打不开（{}），换下一个候选",
-                    candidate.quality.label(),
-                    error
-                );
-                failures.push(format!("{:?} 打不开：{error}", candidate.quality));
+                tracing::debug!("{} 档打不开：{error}", candidate.quality.label());
+                failures.push(format!("{} 档打不开：{error}", candidate.quality.label()));
                 continue;
             }
         };
-        let decoder = match Decoder::new(stream) {
-            Ok(decoder) => decoder,
+        match Decoder::new(stream) {
+            Ok(decoder) => {
+                let duration = decoder.total_duration();
+                return Ok((decoder, candidate.quality, duration));
+            }
             Err(error) => {
-                tracing::debug!(
-                    "{} 档解不了码（{error}），换下一个候选",
-                    candidate.quality.label()
-                );
-                failures.push(format!("{:?} 解不了码：{error}", candidate.quality));
-                continue;
+                tracing::debug!("{} 档解不了码：{error}", candidate.quality.label());
+                failures.push(format!("{} 档解不了码：{error}", candidate.quality.label()));
             }
-        };
-        let expected = decoder.total_duration();
-        let channels = decoder.channels();
-        let sample_rate = decoder.sample_rate();
-        // 只要求 `Source + Send`：`Player::append` 会在音频线程上按输出设备
-        // 的声道/采样率归一（rodio 的 mixer 负责转换）。
-        let player = Player::connect_new(sink.mixer());
-        player.append(decoder);
-        tracing::info!(
-            "播放中：{:?} · {sample_rate}Hz · {channels} 声道",
-            candidate.quality
-        );
-        player.sleep_until_end();
-        let played = Played {
-            quality: candidate.quality,
-            position: player.get_pos(),
-            expected,
-        };
-        if !played.completed() {
-            tracing::warn!(
-                "流提前结束：只播了 {:.1}s（应为 {}）——网络或 CDN 断了",
-                played.position.as_secs_f64(),
-                played
-                    .expected
-                    .map(|expected| format!("{:.1}s", expected.as_secs_f64()))
-                    .unwrap_or_else(|| "未知".to_string()),
-            );
         }
-        return Ok(played);
     }
-    bail!("没有能播的档位：{}", failures.join("；"));
+    bail!("没有能播的档位：{}", failures.join("；"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn played(position_secs: u64, expected: Option<u64>) -> Played {
-        Played {
-            quality: Quality::Flac,
+    fn snapshot(position_secs: u64, duration: Option<u64>) -> Snapshot {
+        Snapshot {
+            phase: Phase::Idle,
             position: Duration::from_secs(position_secs),
-            expected: expected.map(Duration::from_secs),
+            duration: duration.map(Duration::from_secs),
+            ..Snapshot::default()
         }
     }
 
     #[test]
     fn short_streams_are_reported_as_interrupted() {
         // 播到底：位置与声明时长一致。
-        assert!(played(236, Some(236)).completed());
+        assert!(snapshot(236, Some(236)).completed());
         // 播放器收尾时会差个零点几秒，5 秒容差要能容忍。
-        assert!(played(235, Some(236)).completed());
+        assert!(snapshot(235, Some(236)).completed());
         // 中途断了：音频线程只会静默结束，靠这个判定才能发现。
-        assert!(!played(30, Some(236)).completed());
+        assert!(!snapshot(30, Some(236)).completed());
         // 声明时长拿不到（部分 MP3）就没法判定，不误报。
-        assert!(played(30, None).completed());
+        assert!(snapshot(30, None).completed());
+    }
+
+    #[test]
+    fn progress_is_a_ratio_and_survives_missing_duration() {
+        assert_eq!(snapshot(118, Some(236)).progress(), 0.5);
+        assert_eq!(snapshot(118, None).progress(), 0.0);
+        // 位置超过声明时长（有些文件头不准）也要夹在 1.0 以内。
+        assert_eq!(snapshot(300, Some(236)).progress(), 1.0);
     }
 }

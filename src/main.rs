@@ -1,7 +1,7 @@
 //! canto —— 自用的 QQ 音乐播放器。
 //!
-//! 里程碑：M1 数据链路（登录/歌单/曲目）+ 播放引擎（取流出声）。
-//! 命令行子命令之后仍然保留为排查入口。
+//! 里程碑：M1 数据链路（登录/歌单/曲目）+ 播放引擎 + 终端界面。
+//! 命令行子命令保留为排查入口（界面里出问题可以照着复现）。
 
 mod cli;
 mod config;
@@ -11,25 +11,38 @@ mod model;
 mod player;
 mod qq;
 mod session;
+mod tui;
 
 use std::io::Read;
+use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 use crate::cli::{Cli, Command};
 use crate::model::{Playlist, Quality, Song};
+use crate::player::{Engine, Phase, Snapshot};
 
-/// 这里**不用** `#[tokio::main]`：播放要在主线程上同步跑（音频与 `reqwest::blocking`
-/// 的媒体流都不该待在异步上下文里），所以只把网络请求交给运行时。
+/// 这里**不用** `#[tokio::main]`：播放与 `reqwest::blocking` 的媒体流都在自己的
+/// 线程上同步跑，只有网络请求交给运行时。
 fn main() -> Result<()> {
     restore_sigpipe();
     let cli = Cli::parse();
-    init_tracing(&cli.log);
+    let command = cli.command.unwrap_or(Command::Tui);
+    // 界面模式下 stdout/stderr 就是屏幕，日志必须落文件，否则糊屏。
+    let to_file = matches!(command, Command::Tui);
+    init_tracing(&cli.log, to_file)?;
     let runtime = tokio::runtime::Runtime::new().context("创建异步运行时失败")?;
 
-    match cli.command {
+    match command {
+        Command::Tui => {
+            if !session::jar().state().logged_in {
+                bail!("未登录：先 `canto login --cookie '<从浏览器复制的 cookie>'`");
+            }
+            let engine = Engine::start()?;
+            tui::run(runtime.handle().clone(), engine)?;
+        }
         Command::Login { cookie } => login(&cookie)?,
         Command::Whoami => whoami(),
         Command::Logout => {
@@ -50,29 +63,51 @@ fn main() -> Result<()> {
             let (_, songs) = runtime.block_on(load_tracks(&id))?;
             let song = songs
                 .get(index.saturating_sub(1))
-                .with_context(|| format!("歌单里没有第 {index} 首（共 {} 首）", songs.len()))?;
-            let candidates = runtime.block_on(qq::vkey::candidates(song, quality))?;
+                .with_context(|| format!("歌单里没有第 {index} 首（共 {} 首）", songs.len()))?
+                .clone();
+            let candidates = runtime.block_on(qq::vkey::candidates(&song, quality))?;
             println!(
                 "{} — {}  [{} 个候选档位]",
                 song.title,
                 song.singers,
                 candidates.len()
             );
-            let played = player::play(&candidates)?;
-            let short = match played.expected {
-                Some(expected) if !played.completed() => {
-                    format!("（应为 {:.1}s，流被中断）", expected.as_secs_f64())
-                }
-                _ => String::new(),
+            let engine = Engine::start()?;
+            engine.play(player::Track { song, candidates });
+            let snapshot = wait_until_finished(&engine)?;
+            let short = if snapshot.completed() {
+                String::new()
+            } else {
+                format!(
+                    "（应为 {:.0}s，流被中断）",
+                    snapshot.duration.unwrap_or_default().as_secs_f64()
+                )
             };
             println!(
                 "播放结束：{} · 已播 {:.1}s{short}",
-                played.quality.label(),
-                played.position.as_secs_f64(),
+                snapshot.quality.map(Quality::label).unwrap_or("未知档位"),
+                snapshot.position.as_secs_f64(),
             );
         }
     }
     Ok(())
+}
+
+/// 命令行播放：等这一首播完（或失败），返回最终快照。
+fn wait_until_finished(engine: &Engine) -> Result<Snapshot> {
+    loop {
+        let snapshot = engine.snapshot();
+        if let Phase::Failed(message) = &snapshot.phase {
+            bail!("{message}");
+        }
+        if snapshot.just_finished {
+            return Ok(snapshot);
+        }
+        if !engine.is_alive() {
+            bail!("音频线程已退出");
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
 }
 
 /// 恢复 SIGPIPE 的系统默认行为。
@@ -96,7 +131,7 @@ fn restore_sigpipe() {}
 /// 否则 reqwest/h2 在 debug 上会把每条连接、每个 TLS/HTTP2 帧都打出来，
 /// 真正想看的日志全被淹掉（实测）。要看它们的日志就写完整指令
 /// （`-l debug,h2=debug`）。
-fn init_tracing(level: &str) {
+fn init_tracing(level: &str, to_file: bool) -> Result<()> {
     let filter = if level.contains('=') {
         EnvFilter::try_new(level).unwrap_or_else(|_| EnvFilter::new("warn"))
     } else {
@@ -104,10 +139,23 @@ fn init_tracing(level: &str) {
             .with_default_directive(tracing_subscriber::filter::LevelFilter::WARN.into())
             .parse_lossy(format!("canto={level}"))
     };
-    tracing_subscriber::fmt()
+    let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_target(false)
-        .init();
+        .with_target(false);
+    if to_file {
+        // 界面模式下日志写文件（`-l info` 之后可以翻它看播放细节）。
+        let path = config::data_dir().join("canto.log");
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("创建日志目录失败：{}", parent.display()))?;
+        }
+        let file = std::fs::File::create(&path)
+            .with_context(|| format!("写入日志文件失败：{}", path.display()))?;
+        builder.with_writer(std::sync::Mutex::new(file)).init();
+    } else {
+        builder.init();
+    }
+    Ok(())
 }
 
 fn parse_quality(text: &str) -> Result<Quality> {
