@@ -25,6 +25,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Gauge, List, ListItem, ListState, Paragraph};
 
+use crate::config::Config;
 use crate::download;
 use crate::model::{Lyric, Playlist, Song};
 use crate::player::{Engine, Phase, Track};
@@ -76,9 +77,17 @@ enum Focus {
     Tracks,
 }
 
-pub fn run(handle: tokio::runtime::Handle, engine: Engine) -> Result<()> {
+pub fn run(
+    handle: tokio::runtime::Handle,
+    engine: Engine,
+    config: Config,
+    warning: Option<String>,
+) -> Result<()> {
     let (tx, rx) = channel();
-    let mut app = App::new(handle, engine, tx);
+    let mut app = App::new(handle, engine, config, tx);
+    if let Some(warning) = warning {
+        app.status = warning;
+    }
     app.reload_playlists();
 
     let mut terminal = ratatui::init();
@@ -142,6 +151,8 @@ struct App {
     handle: tokio::runtime::Handle,
     engine: Engine,
     tx: Sender<Msg>,
+    /// 启动时载入的配置（音质下限、下载目录、历史上限）。
+    config: Config,
 
     playlists: Vec<Playlist>,
     playlist_state: ListState,
@@ -181,11 +192,17 @@ struct App {
 }
 
 impl App {
-    fn new(handle: tokio::runtime::Handle, engine: Engine, tx: Sender<Msg>) -> Self {
+    fn new(
+        handle: tokio::runtime::Handle,
+        engine: Engine,
+        config: Config,
+        tx: Sender<Msg>,
+    ) -> Self {
         Self {
             handle,
             engine,
             tx,
+            config,
             playlists: Vec::new(),
             playlist_state: ListState::default(),
             tracks: Vec::new(),
@@ -250,7 +267,8 @@ impl App {
         else {
             return;
         };
-        let dir = download::default_dir();
+        let dir = self.config.download_dir.clone();
+        let quality = self.config.quality;
         let received = Arc::new(AtomicU64::new(0));
         let total = Arc::new(AtomicU64::new(0));
         let transfer = Arc::new(Mutex::new(Transfer {
@@ -265,7 +283,7 @@ impl App {
         let handle = self.handle.clone();
         std::thread::spawn(move || {
             let outcome = match handle.block_on(async {
-                let candidates = qq::vkey::candidates(&song, None).await?;
+                let candidates = qq::vkey::candidates(&song, Some(quality)).await?;
                 let lyric = qq::lyric::get(&song).await.ok().flatten();
                 Ok::<_, anyhow::Error>((candidates, lyric))
             }) {
@@ -442,8 +460,9 @@ impl App {
         self.lyric_loading = true;
         let tx = self.tx.clone();
         let handle_song = song.clone();
+        let quality = self.config.quality;
         self.handle.spawn(async move {
-            let result = qq::vkey::candidates(&handle_song, None).await;
+            let result = qq::vkey::candidates(&handle_song, Some(quality)).await;
             let playable = result.is_ok();
             let _ = tx.send(Msg::Candidates {
                 request,

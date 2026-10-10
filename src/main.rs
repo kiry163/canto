@@ -4,6 +4,7 @@
 //! 命令行子命令保留为排查入口（界面里出问题可以照着复现）。
 
 mod cli;
+mod config;
 mod download;
 mod http;
 mod media;
@@ -42,8 +43,9 @@ fn main() -> Result<()> {
             if !session::jar().state().logged_in {
                 bail!("未登录：先 `canto login --cookie '<从浏览器复制的 cookie>'`");
             }
+            let (config, warning) = config::load();
             let engine = Engine::start()?;
-            tui::run(runtime.handle().clone(), engine)?;
+            tui::run(runtime.handle().clone(), engine, config, warning)?;
         }
         Command::Login { cookie } => login(&runtime, cookie.as_deref())?,
         Command::Whoami => whoami(),
