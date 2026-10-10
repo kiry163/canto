@@ -175,6 +175,41 @@ impl Jar {
     }
 }
 
+/// 登录已失效。界面收到它就清本地会话、切回登录屏。
+#[derive(Debug)]
+pub struct SessionExpired;
+
+impl std::fmt::Display for SessionExpired {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "登录已失效，请重新登录")
+    }
+}
+
+impl std::error::Error for SessionExpired {}
+
+/// 响应里出现这些码 / 文案就判定「登录已失效」。
+///
+/// ⚠️ 待实测收紧：这些值是按已知的凭据错误与 401 写的，**还没有**真的等来一次
+/// 会话过期去核对。真实过期响应长什么样，要等下次失效时把 `--log debug` 日志里的
+/// body 补进来（spec 的待验证项 1）——瞎猜码值比漏判更糟，所以这里宁窄勿宽。
+const EXPIRED_CODES: [i64; 1] = [1000];
+const EXPIRED_MARKERS: [&str; 4] = ["not login", "未登录", "登录已失效", "登录态失效"];
+
+/// 这个响应是不是「未登录」？
+pub fn looks_expired(body: &str, status: u16) -> bool {
+    if status == 401 {
+        return true;
+    }
+    if EXPIRED_MARKERS.iter().any(|marker| body.contains(marker)) {
+        return true;
+    }
+    // 码值从 JSON 里取：字符串搜 `"code":1000` 会把 `10001` 也算进来（前缀相同）。
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|json| json["code"].as_i64())
+        .is_some_and(|code| EXPIRED_CODES.contains(&code))
+}
+
 /// 当前登录态快照。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionState {
@@ -305,5 +340,19 @@ mod tests {
         let header = header.to_str().unwrap();
         assert!(header.contains("qqmusic_key=K"), "实际：{header}");
         assert!(header.contains("uin=o123"), "实际：{header}");
+    }
+
+    #[test]
+    fn expired_detection_catches_401_markers_and_codes_but_not_normal_bodies() {
+        assert!(looks_expired("", 401));
+        assert!(looks_expired("{\"code\":1000,\"subcode\":0}", 200));
+        assert!(looks_expired("please not login", 200));
+        assert!(looks_expired("登录已失效", 200));
+        assert!(!looks_expired("{\"code\":0,\"data\":{}}", 200), "正常响应不能误判");
+        assert!(!looks_expired("{\"code\":80092}", 200), "无权不是未登录");
+        assert!(
+            !looks_expired("{\"code\":10001}", 200),
+            "码值要精确匹配，别把 10001 当成 1000"
+        );
     }
 }

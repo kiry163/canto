@@ -15,16 +15,6 @@ use crate::model::Song;
 /// 「我喜欢」对应的目录号（QQ 把它当成一个特殊歌单）。
 pub const FAVORITES_DIR_ID: u64 = 201;
 
-/// 收藏或取消收藏一首歌。
-pub async fn set_favorite(song: &Song, favorite: bool) -> Result<()> {
-    if favorite {
-        add(FAVORITES_DIR_ID, 0, std::slice::from_ref(song)).await?;
-    } else {
-        remove(FAVORITES_DIR_ID, 0, std::slice::from_ref(song)).await?;
-    }
-    Ok(())
-}
-
 /// 往歌单加歌；返回写进去的条数。
 pub async fn add(dir_id: u64, tid: u64, songs: &[Song]) -> Result<usize> {
     write("AddSonglist", dir_id, tid, songs).await

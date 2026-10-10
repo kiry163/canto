@@ -164,7 +164,7 @@ mod tests {
         assert_eq!(song.singers, "周杰伦、袁咏琳");
         assert_eq!(song.album_name, "叶惠美");
         assert_eq!(song.duration_secs, 269);
-        assert_eq!(song.duration_display(), "04:29");
+        assert_eq!(song.duration_secs, 4 * 60 + 29, "04:29");
         assert_eq!(song.sizes.flac, 29532253);
         assert_eq!(song.sizes.best_label(), "FLAC", "没有 hires 就该退到 FLAC");
     }

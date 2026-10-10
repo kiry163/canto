@@ -26,17 +26,13 @@ pub async fn songs(keyword: &str, limit: u32) -> Result<Vec<Song>> {
     let url = format!(
         "https://c.y.qq.com/soso/fcgi-bin/client_search_cp?w={encoded}&format=json&n={limit}&p=1&cr=1&t=0"
     );
-    let json: Value = crate::http::client()
+    let response = crate::http::client()
         .get(&url)
         .header("Referer", "https://y.qq.com/portal/player.html")
         .send()
         .await
-        .context("搜索请求失败")?
-        .error_for_status()
-        .context("搜索接口返回非 2xx")?
-        .json()
-        .await
-        .context("搜索响应不是 JSON")?;
+        .context("搜索请求失败")?;
+    let json: Value = super::read_json(response, "搜索").await?;
     if json["code"].as_i64().unwrap_or(-1) != 0 {
         anyhow::bail!("搜索失败（code={}）", json["code"]);
     }

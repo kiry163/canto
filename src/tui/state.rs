@@ -550,10 +550,16 @@ impl App {
                             format!("已存在：{}", saved.path.display())
                         }
                         Ok(saved) => format!(
-                            "已下载：{}（{:.1} MB，{}）",
+                            "已下载：{}（{:.1} MB，{}{}）",
                             saved.path.display(),
                             saved.bytes as f64 / 1_048_576.0,
-                            saved.quality.label()
+                            saved.quality.label(),
+                            // 歌词落盘了就说一声：使用者不必去目录里翻。
+                            if saved.lyrics.is_empty() {
+                                String::new()
+                            } else {
+                                "，含歌词".to_string()
+                            }
                         ),
                         Err(error) => format!("下载失败：{error:#}"),
                     }
@@ -861,7 +867,7 @@ impl App {
                     }
                     Err(error) => {
                         self.nav.favorites.error = Some(format!("{error:#}"));
-                        self.status = format!("{error:#}");
+                        self.note_error(&error);
                     }
                 }
             }
@@ -876,7 +882,7 @@ impl App {
                     }
                     Err(error) => {
                         self.nav.playlists.error = Some(format!("{error:#}"));
-                        self.status = format!("{error:#}");
+                        self.note_error(&error);
                     }
                 }
             }
@@ -890,7 +896,7 @@ impl App {
                         self.status = format!("《{}》{} 首", playlist.name, songs.len());
                         self.nav.push_tracks(&playlist_id, &playlist.name, songs);
                     }
-                    Err(error) => self.status = format!("{error:#}"),
+                    Err(error) => self.note_error(&error),
                 }
             }
             Msg::Search { keyword, result } => {
@@ -905,7 +911,7 @@ impl App {
                     }
                     Err(error) => {
                         self.nav.search_results.error = Some(format!("{error:#}"));
-                        self.status = format!("{error:#}");
+                        self.note_error(&error);
                     }
                 }
             }
@@ -1037,7 +1043,7 @@ impl App {
                             self.refresh_history_view();
                             self.status = "已清空播放历史".to_string();
                         }
-                        Err(error) => self.status = format!("{error:#}"),
+                        Err(error) => self.note_error(&error),
                     }
                 }
             }
@@ -1194,6 +1200,17 @@ impl App {
         self.screen = Screen::Main;
         self.status = format!("已登录：{identity}");
         self.switch_menu(Menu::Favorites);
+    }
+
+    /// 统一处理失败：会话失效就切回登录屏，其余写状态行。
+    ///
+    /// 判定点在 `qq::read_json`（所有接口共用的出口），这里只负责认这个错误类型。
+    fn note_error(&mut self, error: &anyhow::Error) {
+        if error.downcast_ref::<session::SessionExpired>().is_some() {
+            self.sign_out("会话已过期，请重新登录");
+            return;
+        }
+        self.status = format!("{error:#}");
     }
 
     /// 会话失效或被手动登出：清掉本地会话、回登录屏。

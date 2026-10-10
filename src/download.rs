@@ -25,13 +25,6 @@ pub struct Saved {
     pub existed: bool,
 }
 
-/// 默认下载目录：`<系统音乐目录>/canto`。
-pub fn default_dir() -> PathBuf {
-    dirs::audio_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("canto")
-}
-
 /// 下载第一个能打开的候选；`progress` 每读完一块回调一次（已收字节、总长）。
 pub fn save(
     song: &Song,

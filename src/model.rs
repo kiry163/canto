@@ -91,17 +91,6 @@ impl FileSizes {
     }
 }
 
-impl Song {
-    /// `mm:ss`，列表展示用。
-    pub fn duration_display(&self) -> String {
-        format!(
-            "{:02}:{:02}",
-            self.duration_secs / 60,
-            self.duration_secs % 60
-        )
-    }
-}
-
 /// 一行歌词。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LyricLine {

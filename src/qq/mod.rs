@@ -16,8 +16,8 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use crate::http;
-use crate::model::{Playlist, Song};
 use crate::session;
+use crate::model::{Playlist, Song};
 
 /// 音乐接口主入口：绝大多数读接口都走这个 POST，靠 body 里的模块名路由。
 const MUSICU: &str = "https://u.y.qq.com/cgi-bin/musicu.fcg";
@@ -168,30 +168,41 @@ fn parse_songlist(data: &Value) -> Result<Vec<Song>> {
 }
 
 async fn get_json(url: &str) -> Result<Value> {
-    http::client()
+    let response = http::client()
         .get(url)
         .header("Referer", REFERER)
         .send()
         .await
-        .with_context(|| format!("请求失败：{url}"))?
-        .error_for_status()
-        .context("接口返回非 2xx")?
-        .json()
-        .await
-        .context("响应不是 JSON")
+        .with_context(|| format!("请求失败：{url}"))?;
+    read_json(response, url).await
 }
 
 async fn post_musicu(body: &Value) -> Result<Value> {
-    http::client()
+    let response = http::client()
         .post(MUSICU)
         .header("Referer", REFERER)
         .json(body)
         .send()
         .await
-        .context("请求 musicu.fcg 失败")?
-        .error_for_status()
-        .context("musicu.fcg 返回非 2xx")?
-        .json()
+        .context("请求 musicu.fcg 失败")?;
+    read_json(response, "musicu.fcg").await
+}
+
+/// 读 JSON 响应，并在这里**统一**判定「登录已失效」——所有接口都从这里过，
+/// 所以「会话过期」这一件事只有一个判定点（界面按 [`crate::session::SessionExpired`]
+/// 切回登录屏）。
+pub(crate) async fn read_json(response: reqwest::Response, what: &str) -> Result<Value> {
+    let status = response.status();
+    let text = response
+        .text()
         .await
-        .context("musicu.fcg 响应不是 JSON")
+        .with_context(|| format!("读 {what} 响应失败"))?;
+    if session::looks_expired(&text, status.as_u16()) {
+        tracing::info!("{what}：登录已失效（HTTP {status}）");
+        return Err(anyhow::Error::new(session::SessionExpired));
+    }
+    if !status.is_success() {
+        bail!("{what} 返回非 2xx：{status}");
+    }
+    serde_json::from_str(&text).with_context(|| format!("{what} 响应不是 JSON"))
 }
