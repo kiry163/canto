@@ -1,45 +1,29 @@
-//! 终端界面（ratatui）。
+//! 界面状态与消息处理。
 //!
-//! 线程模型：本线程只做「画帧 + 读键盘」；网络请求丢给 tokio 运行时（结果用通道送回），
-//! 播放交给 [`crate::player::Engine`]。三者之间没有共享可变状态，只有状态快照与消息。
-//!
-//! 键位：
-//! - `q` / `Ctrl-C` 退出，`Tab` 切换左右栏
-//! - `j`/`k`（或方向键上下）移动，`g`/`G` 首尾
-//! - `Enter` 左栏=加载该歌单，右栏=播放该首
-//! - `Space` 播放/暂停，`n`/`b` 下一首/上一首，`←`/`→`（或 `h`/`l`）±10 秒，`+`/`-` 音量
-//! - `y` 开/关歌词面板（跟着播放位置高亮当前行，带翻译）
-//! - `/` 搜索（回车搜、Esc 取消；结果显示在曲目栏，直接回车播放）
-//! - `d` 下载选中的那首（含同名歌词）到默认目录，进度显示在状态栏
+//! 这里只有「状态 + 网络消息 + 按键派发」，不画一帧（绘制在 [`super::draw`]）。
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
-use std::time::Duration as StdDuration;
 
-use anyhow::{Context, Result};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui::Frame;
-use ratatui::layout::{Alignment, Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Gauge, List, ListItem, ListState, Paragraph};
+use anyhow::Result;
+use crossterm::event::KeyEvent;
+use ratatui::widgets::ListState;
 
 use crate::config::Config;
 use crate::download;
 use crate::model::{Lyric, Playlist, Song};
-use crate::player::{Engine, Phase, Track};
+use crate::player::{Engine, Track};
 use crate::qq;
 use crate::qq::vkey::Candidate;
 
-/// 界面刷新间隔，同时也是按键与后台消息的最长等待。
-const TICK: StdDuration = StdDuration::from_millis(150);
+use super::keys;
 
 /// 连续遇到不可播曲目时最多自动跳几首——整个歌单都没版权时别一路刷到底。
 const MAX_AUTO_SKIPS: u32 = 3;
 
 /// 后台任务的回话。
-enum Msg {
+pub(super) enum Msg {
     Playlists(Result<Vec<Playlist>>),
     Tracks {
         playlist_id: String,
@@ -72,57 +56,13 @@ enum Msg {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Focus {
+pub(super) enum Focus {
     Playlists,
     Tracks,
 }
 
-pub fn run(
-    handle: tokio::runtime::Handle,
-    engine: Engine,
-    config: Config,
-    warning: Option<String>,
-) -> Result<()> {
-    let (tx, rx) = channel();
-    let mut app = App::new(handle, engine, config, tx);
-    if let Some(warning) = warning {
-        app.status = warning;
-    }
-    app.reload_playlists();
-
-    let mut terminal = ratatui::init();
-    let outcome = event_loop(&mut terminal, &mut app, &rx);
-    ratatui::restore();
-    outcome
-}
-
-fn event_loop(
-    terminal: &mut ratatui::DefaultTerminal,
-    app: &mut App,
-    rx: &Receiver<Msg>,
-) -> Result<()> {
-    while !app.quit {
-        terminal.draw(|frame| app.draw(frame)).context("渲染失败")?;
-        if event::poll(TICK).context("读取键盘事件失败")?
-            && let Event::Key(key) = event::read().context("读取键盘事件失败")?
-            && key.kind == KeyEventKind::Press
-        {
-            app.handle_key(key);
-        }
-        loop {
-            match rx.try_recv() {
-                Ok(message) => app.on_msg(message),
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => break,
-            }
-        }
-        app.tick();
-    }
-    Ok(())
-}
-
 /// 后台下载的进度（界面每帧读一次）。
-struct Transfer {
+pub(super) struct Transfer {
     label: String,
     received: Arc<AtomicU64>,
     total: Arc<AtomicU64>,
@@ -131,7 +71,7 @@ struct Transfer {
 }
 
 /// 一次歌单写入的意图（界面线程 → 后台任务）。
-struct WriteRequest {
+pub(super) struct WriteRequest {
     /// 进行中时状态栏的文案。
     busy: String,
     /// 成功后的文案。
@@ -147,52 +87,52 @@ struct WriteRequest {
     add: bool,
 }
 
-struct App {
-    handle: tokio::runtime::Handle,
-    engine: Engine,
-    tx: Sender<Msg>,
+pub(super) struct App {
+    pub(super) handle: tokio::runtime::Handle,
+    pub(super) engine: Engine,
+    pub(super) tx: Sender<Msg>,
     /// 启动时载入的配置（音质下限、下载目录、历史上限）。
-    config: Config,
+    pub(super) config: Config,
 
-    playlists: Vec<Playlist>,
-    playlist_state: ListState,
-    tracks: Vec<Song>,
-    track_state: ListState,
+    pub(super) playlists: Vec<Playlist>,
+    pub(super) playlist_state: ListState,
+    pub(super) tracks: Vec<Song>,
+    pub(super) track_state: ListState,
     /// 右栏当前显示的是哪个歌单（id, 名字）。
-    shown: Option<(String, String)>,
-    focus: Focus,
+    pub(super) shown: Option<(String, String)>,
+    pub(super) focus: Focus,
 
     /// 播放队列 = 按下播放那一刻的曲目快照；换歌单不影响它。
-    queue: Vec<Song>,
-    queue_index: usize,
-    queue_name: String,
+    pub(super) queue: Vec<Song>,
+    pub(super) queue_index: usize,
+    pub(super) queue_name: String,
     /// 取流请求序号，用于丢弃过期回话。
-    request: u64,
+    pub(super) request: u64,
     /// 连续自动跳过的不可播曲目数（手动播放或成功播放后清零）。
-    skipped: u32,
+    pub(super) skipped: u32,
 
     /// 当前这首歌的歌词（`None` = 还没拿到或确实没有）。
-    lyric: Option<Lyric>,
-    lyric_loading: bool,
+    pub(super) lyric: Option<Lyric>,
+    pub(super) lyric_loading: bool,
     /// 歌词面板是否展开。
-    show_lyric: bool,
-    lyric_state: ListState,
+    pub(super) show_lyric: bool,
+    pub(super) lyric_state: ListState,
     /// `Some` 表示正在输入搜索词。
-    input: Option<String>,
+    pub(super) input: Option<String>,
     /// `Some` 表示正在挑歌单（`a` 键）：候选歌单、高亮、要加进去的歌。
-    picker: Option<(Vec<Playlist>, ListState, Song)>,
+    pub(super) picker: Option<(Vec<Playlist>, ListState, Song)>,
     /// 正在跑的下载。
-    transfer: Option<Arc<Mutex<Transfer>>>,
+    pub(super) transfer: Option<Arc<Mutex<Transfer>>>,
 
     /// 正在后台做的事（状态栏）。
-    loading: Option<String>,
+    pub(super) loading: Option<String>,
     /// 一次性提示（错误、结果）。
-    status: String,
-    quit: bool,
+    pub(super) status: String,
+    pub(super) quit: bool,
 }
 
 impl App {
-    fn new(
+    pub(super) fn new(
         handle: tokio::runtime::Handle,
         engine: Engine,
         config: Config,
@@ -229,7 +169,7 @@ impl App {
 
     // -- 数据加载（都在后台线程，结果走通道回来） ----------------------------
 
-    fn reload_playlists(&mut self) {
+    pub(super) fn reload_playlists(&mut self) {
         self.loading = Some("加载歌单…".to_string());
         let tx = self.tx.clone();
         self.handle.spawn(async move {
@@ -500,7 +440,7 @@ impl App {
 
     // -- 消息与按键 ---------------------------------------------------------
 
-    fn on_msg(&mut self, message: Msg) {
+    pub(super) fn on_msg(&mut self, message: Msg) {
         match message {
             Msg::Playlists(result) => {
                 self.loading = None;
@@ -625,87 +565,93 @@ impl App {
         }
     }
 
-    fn handle_key(&mut self, key: KeyEvent) {
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            self.quit = true;
+    /// 按键入口：先问上下文，再交给纯函数映射表，最后派发。
+    pub(super) fn handle_key(&mut self, key: KeyEvent) {
+        let Some(action) = keys::resolve(self.context(), key) else {
             return;
-        }
-        // 输入模式优先：这里 `q` 是字母，不是退出。
-        if let Some(buffer) = self.input.as_mut() {
-            match key.code {
-                KeyCode::Enter => {
-                    let keyword = buffer.trim().to_string();
-                    self.input = None;
-                    if !keyword.is_empty() {
-                        self.search(keyword);
-                    }
-                }
-                KeyCode::Esc => self.input = None,
-                KeyCode::Backspace => {
-                    buffer.pop();
-                }
-                KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    buffer.push(character);
-                }
-                _ => {}
-            }
-            return;
-        }
-        // 选择框模式优先：这里 `q` 也只是字母。
+        };
+        self.apply(action);
+    }
+
+    /// 当前按键上下文：模态 > 输入态 > 焦点所在。
+    fn context(&self) -> keys::Context {
         if self.picker.is_some() {
-            match key.code {
-                KeyCode::Esc => self.picker = None,
-                KeyCode::Char('j') | KeyCode::Down => {
-                    if let Some((playlists, state, _)) = self.picker.as_mut() {
-                        let next = state.selected().unwrap_or(0) + 1;
-                        state.select(Some(next.min(playlists.len().saturating_sub(1))));
-                    }
-                }
-                KeyCode::Char('k') | KeyCode::Up => {
-                    if let Some((_, state, _)) = self.picker.as_mut() {
-                        let previous = state.selected().unwrap_or(0).saturating_sub(1);
-                        state.select(Some(previous));
-                    }
-                }
-                KeyCode::Enter => self.confirm_picker(),
-                _ => {}
-            }
-            return;
+            return keys::Context::PlaylistPicker;
         }
-        match key.code {
-            KeyCode::Char('q') => self.quit = true,
-            KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
-            KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
-            KeyCode::Char('g') => self.select_edge(false),
-            KeyCode::Char('G') => self.select_edge(true),
-            KeyCode::Tab | KeyCode::BackTab => {
+        if self.input.is_some() {
+            return keys::Context::SearchInput;
+        }
+        match self.focus {
+            Focus::Playlists => keys::Context::Menu,
+            Focus::Tracks => keys::Context::Content,
+        }
+    }
+
+    fn apply(&mut self, action: keys::Action) {
+        match action {
+            keys::Action::Quit => self.quit = true,
+            keys::Action::Up => self.move_selection(-1),
+            keys::Action::Down => self.move_selection(1),
+            keys::Action::First => self.select_edge(false),
+            keys::Action::Last => self.select_edge(true),
+            keys::Action::PageUp => self.move_selection(-10),
+            keys::Action::PageDown => self.move_selection(10),
+            keys::Action::FocusNext | keys::Action::FocusPrev => {
                 self.focus = match self.focus {
                     Focus::Playlists => Focus::Tracks,
                     Focus::Tracks => Focus::Playlists,
                 };
             }
-            KeyCode::Enter => match self.focus {
-                Focus::Playlists => self.enter_playlist(),
-                Focus::Tracks => {
-                    let index = self.track_state.selected().unwrap_or(0);
-                    self.play_from_tracks(index);
+            keys::Action::Enter => {
+                if self.picker.is_some() {
+                    self.confirm_picker();
+                    return;
                 }
-            },
-            KeyCode::Char('/') => self.input = Some(String::new()),
-            KeyCode::Char('d') => self.download_selected(),
-            KeyCode::Char('f') => self.favorite_selected(),
-            KeyCode::Char('a') => self.open_picker(),
-            KeyCode::Char('x') => self.remove_selected(),
-            KeyCode::Char('y') => self.show_lyric = !self.show_lyric,
-            KeyCode::Char(' ') => self.engine.toggle_pause(),
-            KeyCode::Char('n') => self.play_relative(1),
-            KeyCode::Char('b') => self.play_relative(-1),
-            // `h`/`l` 是 vim 风格的左右，跟上面的 j/k/g/G 一套。
-            KeyCode::Left | KeyCode::Char('h') => self.engine.seek_by(-10),
-            KeyCode::Right | KeyCode::Char('l') => self.engine.seek_by(10),
-            KeyCode::Char('+') | KeyCode::Char('=') => self.engine.adjust_volume(5),
-            KeyCode::Char('-') => self.engine.adjust_volume(-5),
-            _ => {}
+                match self.focus {
+                    Focus::Playlists => self.enter_playlist(),
+                    Focus::Tracks => {
+                        let index = self.track_state.selected().unwrap_or(0);
+                        self.play_from_tracks(index);
+                    }
+                }
+            }
+            keys::Action::Search => self.input = Some(String::new()),
+            keys::Action::Download => self.download_selected(),
+            keys::Action::Favorite => self.favorite_selected(),
+            keys::Action::AddToPlaylist => self.open_picker(),
+            keys::Action::RemoveFromPlaylist => self.remove_selected(),
+            keys::Action::ToggleLyric => self.show_lyric = !self.show_lyric,
+            keys::Action::PlayPause => self.engine.toggle_pause(),
+            keys::Action::Next => self.play_relative(1),
+            keys::Action::Prev => self.play_relative(-1),
+            keys::Action::SeekBack => self.engine.seek_by(-10),
+            keys::Action::SeekForward => self.engine.seek_by(10),
+            keys::Action::VolumeUp => self.engine.adjust_volume(5),
+            keys::Action::VolumeDown => self.engine.adjust_volume(-5),
+            keys::Action::InputChar(character) => {
+                if let Some(buffer) = self.input.as_mut() {
+                    buffer.push(character);
+                }
+            }
+            keys::Action::InputBackspace => {
+                if let Some(buffer) = self.input.as_mut() {
+                    buffer.pop();
+                }
+            }
+            keys::Action::InputSubmit => {
+                let keyword = self.input.take().unwrap_or_default().trim().to_string();
+                if !keyword.is_empty() {
+                    self.search(keyword);
+                }
+            }
+            keys::Action::InputCancel => self.input = None,
+            keys::Action::Back => {
+                if self.picker.is_some() {
+                    self.picker = None;
+                } else if self.input.is_some() {
+                    self.input = None;
+                }
+            }
         }
     }
 
@@ -761,7 +707,7 @@ impl App {
     }
 
     /// 每帧收尾：引擎死了要报，播完了要接上下一首，下载进度刷到状态栏。
-    fn tick(&mut self) {
+    pub(super) fn tick(&mut self) {
         self.poll_transfer();
         if !self.engine.is_alive() {
             self.status = "音频线程已退出，重启 canto".to_string();
@@ -782,9 +728,7 @@ impl App {
         }
     }
 
-    // -- 渲染 ---------------------------------------------------------------
-
-    fn poll_transfer(&mut self) {
+    pub(super) fn poll_transfer(&mut self) {
         let Some(transfer) = self.transfer.clone() else {
             return;
         };
@@ -810,291 +754,5 @@ impl App {
                 None => format!("下载《{}》…", state.label),
             },
         );
-    }
-
-    fn draw(&mut self, frame: &mut Frame) {
-        let rows = Layout::vertical([
-            Constraint::Min(5),
-            // 播放条：上下边框各 1 行 + 标题行 + 进度条行。
-            Constraint::Length(4),
-            Constraint::Length(1),
-        ])
-        .split(frame.area());
-        let columns =
-            Layout::horizontal([Constraint::Length(26), Constraint::Min(20)]).split(rows[0]);
-        self.draw_playlists(frame, columns[0]);
-        // 右栏：曲目 + 歌词（终端太矮时不展开，免得曲目只剩一两行）。
-        let lyric_height = if self.show_lyric && columns[1].height >= 12 {
-            (columns[1].height / 3).max(5)
-        } else {
-            0
-        };
-        let right = Layout::vertical([Constraint::Min(5), Constraint::Length(lyric_height)])
-            .split(columns[1]);
-        self.draw_tracks(frame, right[0]);
-        if let Some(area) = right.get(1).filter(|_| lyric_height > 0) {
-            self.draw_lyric(frame, *area);
-        }
-        self.draw_status(frame, rows[1], rows[2]);
-        if self.picker.is_some() {
-            self.draw_picker(frame, frame.area());
-        }
-    }
-
-    /// `a` 键弹出的歌单选择框。
-    fn draw_picker(&mut self, frame: &mut Frame, area: Rect) {
-        let Some((playlists, state, song)) = self.picker.as_mut() else {
-            return;
-        };
-        let width = area.width.saturating_sub(4).min(56);
-        let height = (playlists.len() as u16 + 2).min(area.height.saturating_sub(2));
-        let popup = Rect {
-            x: area.x + (area.width.saturating_sub(width)) / 2,
-            y: area.y + (area.height.saturating_sub(height)) / 2,
-            width,
-            height,
-        };
-        frame.render_widget(Clear, popup);
-        let items: Vec<ListItem> = playlists
-            .iter()
-            .map(|playlist| ListItem::new(format!("{:>5}  {}", playlist.song_count, playlist.name)))
-            .collect();
-        let list = List::new(items)
-            .block(Block::bordered().title(format!(" 把《{}》加进 ", song.title)))
-            .highlight_style(highlight())
-            .highlight_symbol("▶ ");
-        frame.render_stateful_widget(list, popup, state);
-    }
-
-    fn draw_playlists(&mut self, frame: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self
-            .playlists
-            .iter()
-            .map(|playlist| {
-                let marker = if playlist.is_favorites { "♥" } else { " " };
-                ListItem::new(format!(
-                    "{marker} {:>5}  {}",
-                    playlist.song_count, playlist.name
-                ))
-            })
-            .collect();
-        let list = List::new(items)
-            .block(focused_block(" 歌单 ", self.focus == Focus::Playlists))
-            .highlight_style(highlight())
-            .highlight_symbol("▶ ");
-        frame.render_stateful_widget(list, area, &mut self.playlist_state);
-    }
-
-    fn draw_tracks(&mut self, frame: &mut Frame, area: Rect) {
-        let (title, playing) = (
-            match &self.shown {
-                Some((id, name)) => format!(" {name}（{id}） "),
-                None => " 曲目 ".to_string(),
-            },
-            self.now_playing_label(),
-        );
-        let items: Vec<ListItem> = self
-            .tracks
-            .iter()
-            .map(|song| {
-                let marker = if Some(song_label(song)) == playing {
-                    "♪"
-                } else {
-                    " "
-                };
-                ListItem::new(format!(
-                    "{marker} {:>5}  {:<6} {:>7}  {} — {}",
-                    format_duration(StdDuration::from_secs(song.duration_secs)),
-                    song.sizes.best_label(),
-                    song.sizes
-                        .best_size()
-                        .map_or_else(|| "—".to_string(), format_size),
-                    song.title,
-                    song.singers,
-                ))
-            })
-            .collect();
-        let list = List::new(items)
-            .block(focused_block(&title, self.focus == Focus::Tracks))
-            .highlight_style(highlight())
-            .highlight_symbol("▶ ");
-        frame.render_stateful_widget(list, area, &mut self.track_state);
-    }
-
-    /// 歌词面板：当前行高亮，跟着播放位置走，翻译跟在本行下面。
-    fn draw_lyric(&mut self, frame: &mut Frame, area: Rect) {
-        let title = match &self.lyric {
-            Some(lyric) => format!(" 歌词（{} 行） ", lyric.lines.len()),
-            None => " 歌词 ".to_string(),
-        };
-        let block = Block::bordered().title(title);
-        let Some(lyric) = &self.lyric else {
-            let text = if self.lyric_loading {
-                "歌词加载中…"
-            } else {
-                "暂无歌词"
-            };
-            frame.render_widget(
-                Paragraph::new(text)
-                    .alignment(Alignment::Center)
-                    .style(Style::new().fg(Color::DarkGray))
-                    .block(block),
-                area,
-            );
-            return;
-        };
-        let items: Vec<ListItem> = lyric
-            .lines
-            .iter()
-            .map(|line| {
-                let mut rows = vec![Line::from(line.text.clone()).alignment(Alignment::Center)];
-                if let Some(translation) = &line.translation {
-                    rows.push(
-                        Line::from(translation.clone())
-                            .style(Style::new().fg(Color::DarkGray))
-                            .alignment(Alignment::Center),
-                    );
-                }
-                ListItem::new(rows)
-            })
-            .collect();
-        let current = lyric.line_at(self.engine.snapshot().position);
-        self.lyric_state.select(current);
-        let list = List::new(items)
-            .block(block)
-            .highlight_symbol("")
-            .highlight_style(Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD));
-        frame.render_stateful_widget(list, area, &mut self.lyric_state);
-    }
-
-    /// 正在播的那首的「标题 — 歌手」（没在播/播完就返回 `None`）。
-    fn now_playing_label(&self) -> Option<String> {
-        let snapshot = self.engine.snapshot();
-        if snapshot.phase == Phase::Idle {
-            return None;
-        }
-        snapshot.title
-    }
-
-    fn draw_status(&self, frame: &mut Frame, player_area: Rect, hint_area: Rect) {
-        let snapshot = self.engine.snapshot();
-        let state_text = match &snapshot.phase {
-            Phase::Idle => "已停止".to_string(),
-            Phase::Buffering => "缓冲中…".to_string(),
-            Phase::Playing => "播放中".to_string(),
-            Phase::Paused => "已暂停".to_string(),
-            Phase::Failed(message) => format!("失败：{message}"),
-        };
-        // 档位后面跟实际文件的字节数：同一档位不同歌、不同 CDN 文件大小差很多，
-        // 一眼能看出「这首为什么大」。
-        let quality = match (snapshot.quality, snapshot.size) {
-            (Some(quality), Some(size)) => {
-                format!("[{} {}]", quality.label(), format_size(size))
-            }
-            (Some(quality), None) => format!("[{}]", quality.label()),
-            (None, _) => String::new(),
-        };
-        let queue = if self.queue.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "  {}/{}  ·  音量 {}%",
-                self.queue_index + 1,
-                self.queue.len(),
-                snapshot.volume
-            )
-        };
-        let title = snapshot.title.clone().unwrap_or_else(|| "—".to_string());
-        let colors = Style::new().fg(Color::Cyan);
-        let line = Line::from(vec![
-            Span::styled("♪ ", colors),
-            Span::styled(title, colors.add_modifier(Modifier::BOLD)),
-            Span::raw(format!("  {quality} {state_text}{queue}")),
-        ]);
-        let gauge = Gauge::default()
-            .ratio(snapshot.progress())
-            .label(format!(
-                "{} / {}",
-                format_duration(snapshot.position),
-                snapshot
-                    .duration
-                    .map(format_duration)
-                    .unwrap_or_else(|| "--:--".to_string())
-            ))
-            .gauge_style(Style::new().fg(Color::Green))
-            .use_unicode(true);
-        // 边框归块，里面两行分别给标题行和进度条——不然进度条会盖在标题上。
-        let block = Block::bordered().title(" 播放 ");
-        let inner = block.inner(player_area);
-        frame.render_widget(block, player_area);
-        let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(inner);
-        if let Some(row) = rows.first() {
-            frame.render_widget(Paragraph::new(line), *row);
-        }
-        if let Some(row) = rows.get(1) {
-            frame.render_widget(gauge, *row);
-        }
-
-        if let Some(buffer) = &self.input {
-            let line = Line::from(vec![
-                Span::styled("搜索：", Style::new().fg(Color::Yellow)),
-                Span::raw(buffer.clone()),
-                Span::styled("▏", Style::new().fg(Color::Yellow)),
-            ]);
-            frame.render_widget(Paragraph::new(line), hint_area);
-            return;
-        }
-        let hint = if let Some(loading) = &self.loading {
-            format!("⏳ {loading}")
-        } else if self.status.is_empty() {
-            "Enter 播放 · Space 暂停 · n/b 切歌 · f 收藏 · a 加歌单 · x 移除 · Tab 切栏 · q 退出"
-                .to_string()
-        } else {
-            self.status.clone()
-        };
-        frame.render_widget(
-            Paragraph::new(hint).style(Style::new().fg(Color::DarkGray)),
-            hint_area,
-        );
-    }
-}
-
-fn focused_block(title: &str, focused: bool) -> Block<'static> {
-    let block = Block::bordered().title(title.to_string());
-    if focused {
-        block.border_style(Style::new().fg(Color::Yellow))
-    } else {
-        block
-    }
-}
-
-fn highlight() -> Style {
-    Style::new()
-        .bg(Color::Indexed(236))
-        .add_modifier(Modifier::BOLD)
-}
-
-/// 列表行与引擎快照共用的显示串（用来对齐"正在播的是哪一行"）。
-fn song_label(song: &Song) -> String {
-    format!("{} — {}", song.title, song.singers)
-}
-
-/// 文件大小（十进制 MB，跟下载进度的写法一致）。
-fn format_size(bytes: u64) -> String {
-    const MIB: f64 = 1_048_576.0;
-    if bytes as f64 >= MIB {
-        format!("{:.1}MB", bytes as f64 / MIB)
-    } else {
-        format!("{}KB", bytes / 1024)
-    }
-}
-
-fn format_duration(duration: StdDuration) -> String {
-    let seconds = duration.as_secs();
-    let (hours, minutes, seconds) = (seconds / 3600, (seconds % 3600) / 60, seconds % 60);
-    if hours > 0 {
-        format!("{hours}:{minutes:02}:{seconds:02}")
-    } else {
-        format!("{minutes:02}:{seconds:02}")
     }
 }
