@@ -14,6 +14,7 @@
 
 pub mod draw;
 pub mod keys;
+pub mod queue;
 pub mod state;
 
 #[cfg(test)]

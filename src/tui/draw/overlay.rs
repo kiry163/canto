@@ -6,6 +6,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph, Wrap};
 
 use super::super::state::{App, Menu};
+use super::format_duration;
 use super::highlight;
 
 impl App {
@@ -63,4 +64,41 @@ fn help_lines(menu: Menu) -> Vec<Line<'static>> {
     });
     lines.push(Line::from("关闭  Esc 或 ?"));
     lines
+}
+
+impl App {
+    /// 队列浮层：能看到接下来播什么，也能跳播 / 删除 / 清空。
+    pub(super) fn draw_queue(&mut self, frame: &mut Frame, area: Rect) {
+        let playing = self.queue.index();
+        let items: Vec<ListItem> = self
+            .queue
+            .items()
+            .iter()
+            .enumerate()
+            .map(|(index, song)| {
+                let marker = if index == playing { "♪" } else { " " };
+                ListItem::new(format!(
+                    "{marker} {:>5}  {} — {}",
+                    format_duration(std::time::Duration::from_secs(song.duration_secs)),
+                    song.title,
+                    song.singers,
+                ))
+            })
+            .collect();
+        let title = format!(
+            " 队列 {}/{} · 来自《{}》 · {} ",
+            playing + 1,
+            self.queue.len(),
+            self.queue.origin(),
+            self.queue.mode().label()
+        );
+        let height = items.len() as u16 + 2;
+        let popup = super::overlay_rect(area, area.width.saturating_sub(8).min(72), height);
+        frame.render_widget(Clear, popup);
+        let list = List::new(items)
+            .block(Block::bordered().title(title))
+            .highlight_style(highlight())
+            .highlight_symbol("▶ ");
+        frame.render_stateful_widget(list, popup, &mut self.queue_state);
+    }
 }

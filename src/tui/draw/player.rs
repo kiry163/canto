@@ -32,11 +32,12 @@ impl App {
             (None, _) => String::new(),
         };
         let queue = if self.queue.is_empty() {
-            String::new()
+            format!("  ·  {}  ·  无队列", self.queue.mode().label())
         } else {
             format!(
-                "  {}/{}  ·  音量 {}%",
-                self.queue_index + 1,
+                "  ·  {}  ·  {}/{}  ·  音量 {}%",
+                self.queue.mode().label(),
+                self.queue.index() + 1,
                 self.queue.len(),
                 snapshot.volume
             )

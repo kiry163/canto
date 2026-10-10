@@ -34,6 +34,16 @@ pub enum Action {
     SeekForward,
     VolumeUp,
     VolumeDown,
+    /// `a` / `A`：追加到队尾 / 插到下一首。
+    AppendQueue,
+    InsertQueue,
+    /// `m`：切换播放模式（顺序 / 列表循环 / 单曲 / 随机）。
+    CycleMode,
+    /// `u`：队列浮层开 / 关。
+    QueueOverlay,
+    /// 浮层里 `d` / `Shift+D`：删掉选中项 / 清空队列。
+    QueueDelete,
+    QueueClear,
     AddToPlaylist,
     RemoveFromPlaylist,
     Favorite,
@@ -59,6 +69,8 @@ pub enum Context {
     PlaylistPicker,
     /// 帮助浮层。
     HelpOverlay,
+    /// 队列浮层。
+    QueueOverlay,
 }
 
 /// 键位映射。`None` = 这个键在当前上下文没有含义（调用方忽略）。
@@ -78,6 +90,17 @@ pub fn resolve(context: Context, key: KeyEvent) -> Option<Action> {
         },
         Context::HelpOverlay => match key.code {
             KeyCode::Esc | KeyCode::Char('?') | KeyCode::F(1) => Some(Action::Help),
+            _ => None,
+        },
+        Context::QueueOverlay => match key.code {
+            KeyCode::Esc | KeyCode::Char('u') => Some(Action::QueueOverlay),
+            KeyCode::Enter => Some(Action::Enter),
+            KeyCode::Char('j') | KeyCode::Down => Some(Action::Down),
+            KeyCode::Char('k') | KeyCode::Up => Some(Action::Up),
+            KeyCode::Char('g') | KeyCode::Home => Some(Action::First),
+            KeyCode::Char('G') | KeyCode::End => Some(Action::Last),
+            KeyCode::Char('d') => Some(Action::QueueDelete),
+            KeyCode::Char('D') => Some(Action::QueueClear),
             _ => None,
         },
         Context::PlaylistPicker => match key.code {
@@ -117,8 +140,11 @@ fn common(key: KeyEvent, context: Context) -> Option<Action> {
         KeyCode::Right | KeyCode::Char('l') => Some(Action::SeekForward),
         KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Char('.') => Some(Action::VolumeUp),
         KeyCode::Char('-') | KeyCode::Char(',') => Some(Action::VolumeDown),
-        // `a`/`A` 留给队列（追加 / 插队，Task 11 接上）；加进歌单搬到 `p`。
+        KeyCode::Char('a') => Some(Action::AppendQueue),
+        KeyCode::Char('A') => Some(Action::InsertQueue),
+        KeyCode::Char('m') => Some(Action::CycleMode),
         KeyCode::Char('p') => Some(Action::AddToPlaylist),
+        KeyCode::Char('u') => Some(Action::QueueOverlay),
         KeyCode::Char('x') => Some(Action::RemoveFromPlaylist),
         KeyCode::Char('f') => Some(Action::Favorite),
         KeyCode::Char('d') => Some(Action::Download),
@@ -149,6 +175,8 @@ mod tests {
             Context::Content,
             Context::SearchInput,
             Context::PlaylistPicker,
+            Context::QueueOverlay,
+            Context::HelpOverlay,
         ] {
             let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
             assert_eq!(resolve(context, event), Some(Action::Quit), "{context:?}");
@@ -191,6 +219,10 @@ mod tests {
             assert_eq!(press(context, KeyCode::Char('n')), Some(Action::Next));
             assert_eq!(press(context, KeyCode::Char(' ')), Some(Action::PlayPause));
             assert_eq!(press(context, KeyCode::Enter), Some(Action::Enter));
+            assert_eq!(press(context, KeyCode::Char('a')), Some(Action::AppendQueue));
+            assert_eq!(press(context, KeyCode::Char('A')), Some(Action::InsertQueue));
+            assert_eq!(press(context, KeyCode::Char('m')), Some(Action::CycleMode));
+            assert_eq!(press(context, KeyCode::Char('u')), Some(Action::QueueOverlay));
             assert_eq!(press(context, KeyCode::Char('p')), Some(Action::AddToPlaylist));
             assert_eq!(press(context, KeyCode::Tab), Some(Action::FocusNext));
         }
@@ -239,8 +271,13 @@ mod tests {
     #[test]
     fn unbound_keys_stay_unbound() {
         assert_eq!(press(Context::Content, KeyCode::Char('z')), None);
-        assert_eq!(press(Context::Content, KeyCode::Char('m')), None, "播放模式随队列一起接");
-        assert_eq!(press(Context::Content, KeyCode::Char('a')), None, "a 留给队列，Task 11 接");
+        assert_eq!(press(Context::QueueOverlay, KeyCode::Char('u')), Some(Action::QueueOverlay));
+        assert_eq!(press(Context::QueueOverlay, KeyCode::Enter), Some(Action::Enter));
+        assert_eq!(press(Context::QueueOverlay, KeyCode::Char('d')), Some(Action::QueueDelete));
+        assert_eq!(press(Context::QueueOverlay, KeyCode::Char('D')), Some(Action::QueueClear));
+        assert_eq!(press(Context::QueueOverlay, KeyCode::Char('p')), None, "浮层吞键");
         assert_eq!(press(Context::PlaylistPicker, KeyCode::Char('?')), None, "选择框里不开帮助");
+        assert_eq!(press(Context::Content, KeyCode::Char('z')), None);
+        assert_eq!(press(Context::QueueOverlay, KeyCode::Char('z')), None);
     }
 }

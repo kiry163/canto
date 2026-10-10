@@ -131,6 +131,8 @@ impl App {
         self.draw_status(frame, areas.status);
         if self.help_open {
             self.draw_help(frame, area);
+        } else if self.queue_open {
+            self.draw_queue(frame, area);
         } else if self.picker.is_some() {
             self.draw_picker(frame, area);
         }
@@ -152,6 +154,9 @@ pub fn hints(context: keys::Context) -> &'static str {
         keys::Context::SearchInput => "输入关键词 · Enter 搜索 · Esc 退出输入",
         keys::Context::PlaylistPicker => "j/k 选歌单 · Enter 确认 · Esc 取消",
         keys::Context::HelpOverlay => "Esc 或 ? 关闭帮助",
+        keys::Context::QueueOverlay => {
+            "Enter 跳播 · d 删除 · Shift+D 清空 · j/k 选择 · Esc 关闭"
+        }
     }
 }
 

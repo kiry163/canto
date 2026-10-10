@@ -18,6 +18,7 @@ use crate::qq;
 use crate::qq::vkey::Candidate;
 
 use super::keys;
+use super::queue;
 
 /// 连续遇到不可播曲目时最多自动跳几首——整个歌单都没版权时别一路刷到底。
 const MAX_AUTO_SKIPS: u32 = 3;
@@ -355,10 +356,9 @@ pub(super) struct App {
     /// 菜单、焦点、四屏列表与选中位置。
     pub(super) nav: Nav,
 
-    /// 播放队列 = 按下播放那一刻的曲目快照；换歌单不影响它。
-    pub(super) queue: Vec<Song>,
-    pub(super) queue_index: usize,
-    pub(super) queue_name: String,
+    /// 播放队列。按 Enter 把当前列表灌进来，之后增删插改的都是它；
+    /// 换歌单、重新搜索都不影响已经在队列里的歌。
+    pub(super) queue: queue::Queue,
     /// 取流请求序号，用于丢弃过期回话。
     pub(super) request: u64,
     /// 连续自动跳过的不可播曲目数（手动播放或成功播放后清零）。
@@ -372,6 +372,10 @@ pub(super) struct App {
     pub(super) lyric_state: ListState,
     /// 帮助浮层开着（`?`）。
     pub(super) help_open: bool,
+    /// 队列浮层开着（`u`）。
+    pub(super) queue_open: bool,
+    /// 队列浮层里的高亮位置。
+    pub(super) queue_state: ListState,
     /// `Some` 表示正在挑歌单（`p` 键）：候选歌单、高亮、要加进去的歌。
     pub(super) picker: Option<(Vec<Playlist>, ListState, Song)>,
     /// 正在跑的下载。
@@ -398,9 +402,7 @@ impl App {
             config,
             menu_state: ListState::default(),
             nav: Nav::new(),
-            queue: Vec::new(),
-            queue_index: 0,
-            queue_name: String::new(),
+            queue: queue::Queue::new(Vec::new(), 0, String::new()),
             request: 0,
             skipped: 0,
             lyric: None,
@@ -408,6 +410,8 @@ impl App {
             show_lyric: true,
             lyric_state: ListState::default(),
             help_open: false,
+            queue_open: false,
+            queue_state: ListState::default(),
             picker: None,
             transfer: None,
             loading: None,
@@ -665,12 +669,11 @@ impl App {
 
     /// 从队列里播第 `index` 首：先取候选地址（后台），拿到就交给引擎。
     fn play_index(&mut self, index: usize) {
-        let Some(song) = self.queue.get(index).cloned() else {
+        let Some(song) = self.queue.items().get(index).cloned() else {
             return;
         };
         self.request += 1;
         let request = self.request;
-        self.queue_index = index;
         self.loading = Some(format!("取流《{}》…", song.title));
         // 换歌先把旧歌词撤掉，免得新旧串行显示。
         self.lyric = None;
@@ -700,19 +703,62 @@ impl App {
     }
 
     /// 用当前右栏的歌单开一个队列并从 `index` 开始播。
-    /// 用当前焦点列表开一个队列并从 `index` 开始播。
-    fn play_from_tracks(&mut self, index: usize) {
+    /// 用某个列表开新队列并从 `index` 播（`Enter` 就是这个语义）。
+    fn open_queue(&mut self, songs: Vec<Song>, index: usize, origin: String) {
+        if songs.is_empty() {
+            return;
+        }
+        self.queue = queue::Queue::new(songs, index, origin);
+        self.skipped = 0;
+        self.start(self.queue.index());
+    }
+
+    /// `Enter`：当前焦点列表 → 新队列。
+    fn open_queue_from_focus(&mut self) {
         let origin = self.nav.origin_name();
         let Some(view) = self.nav.focused_songs() else {
             return;
         };
-        if view.items.is_empty() {
+        let index = view.state.selected().unwrap_or(0);
+        let songs = view.items.clone();
+        self.open_queue(songs, index, origin);
+    }
+
+    /// `a` / `A`：把焦点列表里选中的那首加进队列（队列空时等价于开新队列）。
+    fn push_to_queue(&mut self, front: bool) {
+        let Some(song) = self.selected_song() else {
+            return;
+        };
+        if self.queue.is_empty() {
+            let origin = self.nav.origin_name();
+            self.open_queue(vec![song], 0, origin);
             return;
         }
-        let index = index.min(view.items.len() - 1);
-        self.skipped = 0;
-        self.queue = view.items.clone();
-        self.queue_name = origin;
+        if front {
+            self.queue.insert_next(song.clone());
+            self.status = format!("已插队：{} — {}", song.title, song.singers);
+        } else {
+            self.queue.push_back(song.clone());
+            self.status = format!("已加进队列：{} — {}", song.title, song.singers);
+        }
+    }
+
+    /// 按 `Step` 继续播：`Play` 去取流，`Stop` 停播并说清为什么。
+    fn step(&mut self, step: queue::Step) {
+        match step {
+            queue::Step::Play(index) => self.start(index),
+            queue::Step::Stop => {
+                self.status = if self.queue.is_empty() {
+                    "队列已空".to_string()
+                } else {
+                    "队列播完".to_string()
+                };
+            }
+        }
+    }
+
+    /// 取流并开始播队列里的第 `index` 首。
+    fn start(&mut self, index: usize) {
         self.play_index(index);
     }
 
@@ -816,24 +862,23 @@ impl App {
                     Ok(candidates) => {
                         tracing::info!("取到 {} 个候选档位：{}", candidates.len(), song.title);
                         self.skipped = 0;
-                        self.queue_index = index;
+                        // `index` 是队列下标：从这里起，`queue.current()` 就对得上了。
+                        self.queue.jump(index);
                         self.engine.play(Track { song, candidates });
                     }
                     Err(error) => {
                         // 队列里夹着没版权的歌（实测常见）：跳过去接着放，
                         // 但连跳太多就停下报错，免得把整个歌单刷一遍。
                         let reason = format!("{error:#}");
-                        if self.skipped < MAX_AUTO_SKIPS && self.queue_index + 1 < self.queue.len()
-                        {
+                        if self.skipped < MAX_AUTO_SKIPS {
                             self.skipped += 1;
                             self.status = format!("{reason}（已跳到下一首）");
                             tracing::info!("跳过不可播的《{}》：{reason}", song.title);
-                            self.play_index(self.queue_index + 1);
-                        } else if self.skipped >= MAX_AUTO_SKIPS {
+                            let step = self.queue.advance();
+                            self.step(step);
+                        } else {
                             self.status =
                                 format!("{reason}（连续 {MAX_AUTO_SKIPS} 首不可播，已停下）");
-                        } else {
-                            self.status = reason;
                         }
                     }
                 }
@@ -869,6 +914,9 @@ impl App {
         if self.help_open {
             return keys::Context::HelpOverlay;
         }
+        if self.queue_open {
+            return keys::Context::QueueOverlay;
+        }
         if self.picker.is_some() {
             return keys::Context::PlaylistPicker;
         }
@@ -885,6 +933,13 @@ impl App {
         match action {
             keys::Action::Quit => self.quit = true,
             keys::Action::Help => self.help_open = !self.help_open,
+            keys::Action::QueueOverlay => self.toggle_queue_overlay(),
+            keys::Action::QueueDelete => self.delete_queue_item(),
+            keys::Action::QueueClear => {
+                self.queue.clear();
+                self.queue_state.select(None);
+                self.status = "队列已清空（当前这首不受影响）".to_string();
+            }
             keys::Action::Menu(index) => {
                 if let Some(menu) = Menu::ALL.get(index).copied() {
                     self.switch_menu(menu);
@@ -907,6 +962,10 @@ impl App {
                     self.confirm_picker();
                     return;
                 }
+                if self.queue_open {
+                    self.jump_in_queue();
+                    return;
+                }
                 self.enter_selected();
             }
             keys::Action::Search => self.nav.begin_search_input(),
@@ -916,8 +975,14 @@ impl App {
             keys::Action::RemoveFromPlaylist => self.remove_selected(),
             keys::Action::ToggleLyric => self.show_lyric = !self.show_lyric,
             keys::Action::PlayPause => self.engine.toggle_pause(),
-            keys::Action::Next => self.play_relative(1),
-            keys::Action::Prev => self.play_relative(-1),
+            keys::Action::Next => self.play_relative(true),
+            keys::Action::Prev => self.play_relative(false),
+            keys::Action::AppendQueue => self.push_to_queue(false),
+            keys::Action::InsertQueue => self.push_to_queue(true),
+            keys::Action::CycleMode => {
+                let mode = self.queue.cycle_mode();
+                self.status = format!("播放模式：{}", mode.label());
+            }
             keys::Action::SeekBack => self.engine.seek_by(-10),
             keys::Action::SeekForward => self.engine.seek_by(10),
             keys::Action::VolumeUp => self.engine.adjust_volume(5),
@@ -940,6 +1005,8 @@ impl App {
                 // 顺序：先关模态，再退输入态，最后退一层视图。
                 if self.help_open {
                     self.help_open = false;
+                } else if self.queue_open {
+                    self.queue_open = false;
                 } else if self.picker.is_some() {
                     self.picker = None;
                 } else if self.nav.search_input {
@@ -949,6 +1016,53 @@ impl App {
                 }
             }
         }
+    }
+
+    /// `u`：开 / 关队列浮层。打开时高亮落在正在播的那首上。
+    fn toggle_queue_overlay(&mut self) {
+        if self.queue_open {
+            self.queue_open = false;
+            return;
+        }
+        if self.queue.is_empty() {
+            self.status = "队列是空的".to_string();
+            return;
+        }
+        self.queue_state.select(Some(self.queue.index()));
+        self.queue_open = true;
+    }
+
+    /// 浮层里回车：跳播（只挪指针，不动队列顺序）。
+    fn jump_in_queue(&mut self) {
+        let Some(index) = self.queue_state.selected() else {
+            return;
+        };
+        if index < self.queue.len() {
+            self.skipped = 0;
+            self.step(queue::Step::Play(index));
+        }
+    }
+
+    /// 浮层里 `d`：从队列里删掉选中项。删到当前项就顺势播下一首。
+    fn delete_queue_item(&mut self) {
+        let Some(index) = self.queue_state.selected() else {
+            return;
+        };
+        let Some(step) = self.queue.remove(index) else {
+            // 删的不是当前项：队列短了一格，高亮跟着收一下。
+            let next = index.min(self.queue.len().saturating_sub(1));
+            self.queue_state.select((!self.queue.is_empty()).then_some(next));
+            return;
+        };
+        if self.queue.is_empty() {
+            self.queue_state.select(None);
+            self.queue_open = false;
+            self.status = "队列已空".to_string();
+            return;
+        }
+        let next = index.min(self.queue.len() - 1);
+        self.queue_state.select(Some(next));
+        self.step(step);
     }
 
     /// `Enter`：歌单列表 = 往下进一层；曲目列表 = 以此列表开队列并从该首播。
@@ -961,29 +1075,31 @@ impl App {
             self.load_tracks(playlist.id, playlist.name);
             return;
         }
-        let index = self
-            .nav
-            .focused_songs()
-            .and_then(|view| view.state.selected())
-            .unwrap_or(0);
-        self.play_from_tracks(index);
+        self.open_queue_from_focus();
     }
 
-    fn play_relative(&mut self, delta: isize) {
+    /// `n` / `b`：按当前模式在队列里前进 / 后退。
+    fn play_relative(&mut self, forward: bool) {
         if self.queue.is_empty() {
+            self.status = "队列是空的".to_string();
             return;
         }
         self.skipped = 0;
-        let next = self.queue_index as isize + delta;
-        if next < 0 {
-            self.status = "已经是第一首".to_string();
-            return;
+        let step = if forward {
+            self.queue.next_manual()
+        } else {
+            self.queue.prev_manual()
+        };
+        match step {
+            queue::Step::Play(index) => self.start(index),
+            queue::Step::Stop => {
+                self.status = if forward {
+                    "已经是最后一首".to_string()
+                } else {
+                    "已经是第一首".to_string()
+                };
+            }
         }
-        if next as usize >= self.queue.len() {
-            self.status = "已经是最后一首".to_string();
-            return;
-        }
-        self.play_index(next as usize);
     }
 
     /// `j`/`k`：焦点在菜单上就是换菜单项（后台菜单的行为），在主区就是挪选中行。
@@ -1021,9 +1137,8 @@ impl App {
                     snapshot.position.as_secs_f64()
                 );
             }
-            if self.queue_index + 1 < self.queue.len() {
-                self.play_index(self.queue_index + 1);
-            }
+            let step = self.queue.advance();
+            self.step(step);
         }
     }
 
@@ -1220,5 +1335,88 @@ mod tests {
         assert_eq!(app.context(), keys::Context::PlaylistPicker);
         app.apply(keys::Action::Back);
         assert!(app.picker.is_none(), "Esc 关掉选择框");
+    }
+
+    /// `a`：选中那首进队尾（这里直接给一个已有队列，避开「空队列 = 开新队列并播放」那条路）。
+    #[test]
+    fn appending_puts_the_picked_song_at_the_tail() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.nav.switch_menu(Menu::Favorites);
+        app.nav.favorites.items = vec![test_song("a"), test_song("b")];
+        app.nav.favorites.select_first();
+        app.queue = queue::Queue::new(Vec::new(), 0, String::new());
+        app.queue.push_back(test_song("seed"));
+        app.push_to_queue(false);
+        assert_eq!(app.queue.len(), 2);
+        assert_eq!(app.queue.items()[0].mid, "seed");
+        assert_eq!(app.queue.items()[1].mid, "a");
+    }
+
+    #[test]
+    fn insert_next_lands_right_after_the_current_song() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.nav.switch_menu(Menu::Favorites);
+        app.nav.favorites.items = vec![test_song("c")];
+        app.nav.favorites.select_first();
+        app.queue = queue::Queue::new(vec![test_song("a"), test_song("b")], 0, "嗯");
+        app.push_to_queue(true);
+        assert_eq!(app.queue.items()[1].mid, "c", "A 插到当前项后面");
+        assert_eq!(app.queue.index(), 0, "插队不动当前项");
+        assert!(app.status.contains("已插队"), "状态行要说明做了什么：{}", app.status);
+    }
+
+    /// 删队列里「不是当前项」的那首：队列短一格，播放不动（也不去取流）。
+    #[test]
+    fn deleting_a_queued_song_that_is_not_playing_keeps_the_current_one() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.queue = queue::Queue::new(
+            vec![test_song("a"), test_song("b"), test_song("c")],
+            0,
+            "嗯",
+        );
+        app.queue_state.select(Some(2));
+        app.delete_queue_item();
+        assert_eq!(app.queue.len(), 2);
+        assert_eq!(app.queue.items()[app.queue.index()].mid, "a", "当前这首没被换掉");
+        assert_eq!(app.queue_state.selected(), Some(1), "高亮跟着收一格");
+    }
+
+    #[test]
+    fn clearing_the_queue_keeps_playing_but_forgets_the_rest() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.queue = queue::Queue::new(vec![test_song("a"), test_song("b")], 0, "嗯");
+        app.apply(keys::Action::QueueClear);
+        assert!(app.queue.is_empty());
+        assert!(app.status.contains("已清空"), "{}", app.status);
+    }
+
+    #[test]
+    fn the_queue_overlay_opens_on_the_current_song_and_closes_with_escape() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.queue = queue::Queue::new(vec![test_song("a"), test_song("b")], 1, "嗯");
+        app.apply(keys::Action::QueueOverlay);
+        assert!(app.queue_open);
+        assert_eq!(app.context(), keys::Context::QueueOverlay);
+        assert_eq!(app.queue_state.selected(), Some(1), "高亮落在正在播的那首上");
+        app.apply(keys::Action::Back);
+        assert!(!app.queue_open);
+    }
+
+    #[test]
+    fn an_empty_queue_does_not_open_the_overlay() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.apply(keys::Action::QueueOverlay);
+        assert!(!app.queue_open);
+        assert_eq!(app.status, "队列是空的");
+    }
+
+    #[test]
+    fn cycling_the_mode_walks_the_four_modes_and_says_so() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        for expected in ["列表循环", "单曲", "随机", "顺序"] {
+            app.apply(keys::Action::CycleMode);
+            assert_eq!(app.queue.mode().label(), expected);
+            assert!(app.status.contains(expected), "{}", app.status);
+        }
     }
 }
