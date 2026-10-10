@@ -16,7 +16,7 @@ use cookie_store::CookieStore;
 use reqwest::header::HeaderValue;
 use url::Url;
 
-use crate::config;
+use crate::paths;
 use crate::qq::cookie::parse_cookie_header;
 
 /// 粘贴进来的 cookie 统一挂到 `.qq.com`：QQ 音乐的接口分布在
@@ -42,7 +42,7 @@ pub struct Jar(Mutex<CookieStore>);
 impl Jar {
     /// 从默认位置载入。
     fn load() -> Self {
-        Self::load_from(&config::session_path())
+        Self::load_from(&paths::session_path())
     }
 
     /// 从指定文件载入；文件不存在或坏了都退回空 jar（坏文件不阻断启动，只提示）。
@@ -136,7 +136,7 @@ impl Jar {
 
     /// 落盘到默认位置。
     pub fn save(&self) -> Result<()> {
-        self.save_to(&config::session_path())
+        self.save_to(&paths::session_path())
     }
 
     /// 落盘：`cookie_store` 自带的 JSON 序列化。
@@ -164,7 +164,7 @@ impl Jar {
     /// 清空会话（含磁盘文件）。
     pub fn clear(&self) -> Result<()> {
         self.with_store(|store| store.clear());
-        let path = config::session_path();
+        let path = paths::session_path();
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),

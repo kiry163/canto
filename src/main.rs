@@ -4,11 +4,11 @@
 //! 命令行子命令保留为排查入口（界面里出问题可以照着复现）。
 
 mod cli;
-mod config;
 mod download;
 mod http;
 mod media;
 mod model;
+mod paths;
 mod player;
 mod qq;
 mod qr;
@@ -265,7 +265,7 @@ fn init_tracing(level: &str, to_file: bool) -> Result<()> {
         .with_target(false);
     if to_file {
         // 界面模式下日志写文件（`-l info` 之后可以翻它看播放细节）。
-        let path = config::data_dir().join("canto.log");
+        let path = paths::log_path();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("创建日志目录失败：{}", parent.display()))?;
@@ -343,7 +343,7 @@ fn login(runtime: &tokio::runtime::Runtime, cookie: Option<&str>) -> Result<()> 
     println!(
         "已登录：uin={}（会话已保存到 {}）",
         state.identity.unwrap_or_default(),
-        config::session_path().display()
+        paths::session_path().display()
     );
     Ok(())
 }
@@ -353,7 +353,7 @@ fn qr_login(runtime: &tokio::runtime::Runtime) -> Result<()> {
     let jar = session::jar();
     for attempt in 1..=QR_ATTEMPTS {
         let png = runtime.block_on(qq::login::create())?;
-        let png_path = config::data_dir().join("login-qr.png");
+        let png_path = paths::qr_png_path();
         match qr::show(&png, &png_path)? {
             Some(path) => println!(
                 "终端装不下二维码，已存成文件：{}\n用手机 QQ 扫描它。",
@@ -380,7 +380,7 @@ fn qr_login(runtime: &tokio::runtime::Runtime) -> Result<()> {
                     jar.save()?;
                     println!(
                         "已登录：uin={identity}（会话已保存到 {}）",
-                        config::session_path().display()
+                        paths::session_path().display()
                     );
                     return Ok(());
                 }
@@ -393,7 +393,7 @@ fn qr_login(runtime: &tokio::runtime::Runtime) -> Result<()> {
 
 fn whoami() {
     let state = session::jar().state();
-    println!("会话文件：{}", config::session_path().display());
+    println!("会话文件：{}", paths::session_path().display());
     if state.logged_in {
         println!("登录状态：已登录");
         println!("账号：{}", state.identity.as_deref().unwrap_or("（未知）"));
