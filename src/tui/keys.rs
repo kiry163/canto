@@ -44,6 +44,8 @@ pub enum Action {
     /// 浮层里 `d` / `Shift+D`：删掉选中项 / 清空队列。
     QueueDelete,
     QueueClear,
+    /// 历史屏里 `Shift+D`：清空整份播放历史。
+    HistoryClear,
     AddToPlaylist,
     RemoveFromPlaylist,
     Favorite,
@@ -145,6 +147,7 @@ fn common(key: KeyEvent, context: Context) -> Option<Action> {
         KeyCode::Char('m') => Some(Action::CycleMode),
         KeyCode::Char('p') => Some(Action::AddToPlaylist),
         KeyCode::Char('u') => Some(Action::QueueOverlay),
+        KeyCode::Char('D') => Some(Action::HistoryClear),
         KeyCode::Char('x') => Some(Action::RemoveFromPlaylist),
         KeyCode::Char('f') => Some(Action::Favorite),
         KeyCode::Char('d') => Some(Action::Download),
@@ -223,6 +226,7 @@ mod tests {
             assert_eq!(press(context, KeyCode::Char('A')), Some(Action::InsertQueue));
             assert_eq!(press(context, KeyCode::Char('m')), Some(Action::CycleMode));
             assert_eq!(press(context, KeyCode::Char('u')), Some(Action::QueueOverlay));
+            assert_eq!(press(context, KeyCode::Char('D')), Some(Action::HistoryClear));
             assert_eq!(press(context, KeyCode::Char('p')), Some(Action::AddToPlaylist));
             assert_eq!(press(context, KeyCode::Tab), Some(Action::FocusNext));
         }

@@ -37,10 +37,12 @@ pub fn run(
     handle: tokio::runtime::Handle,
     engine: Engine,
     config: Config,
+    history_path: std::path::PathBuf,
     warning: Option<String>,
 ) -> Result<()> {
     let (tx, rx) = channel();
-    let mut app = App::new(handle, engine, config, tx);
+    let mut app = App::new(handle, engine, config, history_path, tx);
+    app.history = crate::history::History::load(&app.history_path.clone(), app.config.history_limit);
     if let Some(warning) = warning {
         app.status = warning;
     }

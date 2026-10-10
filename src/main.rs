@@ -6,6 +6,7 @@
 mod cli;
 mod config;
 mod download;
+mod history;
 mod http;
 mod media;
 mod model;
@@ -45,7 +46,7 @@ fn main() -> Result<()> {
             }
             let (config, warning) = config::load();
             let engine = Engine::start()?;
-            tui::run(runtime.handle().clone(), engine, config, warning)?;
+            tui::run(runtime.handle().clone(), engine, config, paths::history_path(), warning)?;
         }
         Command::Login { cookie } => login(&runtime, cookie.as_deref())?,
         Command::Whoami => whoami(),

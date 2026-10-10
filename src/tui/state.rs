@@ -11,6 +11,7 @@ use crossterm::event::KeyEvent;
 use ratatui::widgets::ListState;
 
 use crate::config::Config;
+use crate::history::{self, History};
 use crate::download;
 use crate::model::{Lyric, Playlist, Song};
 use crate::player::{Engine, Track};
@@ -91,13 +92,16 @@ impl Menu {
     }
 }
 
-/// 一屏列表的通用状态：条目 + 选中位置 + 这一屏的错误。
+/// 一屏列表的通用状态：条目 + 选中位置 + 这一屏的错误 + 可选的右侧副标题。
 #[derive(Debug)]
 pub(super) struct ListView<T> {
     pub items: Vec<T>,
     pub state: ListState,
     /// 这一屏自己的错误（别的屏没事）。
     pub error: Option<String>,
+    /// 每行的右侧副标题（历史屏放「时间 · 来自《来源》」，别的屏留空）。
+    /// 与 `items` 等长，改 `items` 的代码要顺手改它。
+    pub labels: Vec<String>,
 }
 
 impl<T> Default for ListView<T> {
@@ -106,6 +110,7 @@ impl<T> Default for ListView<T> {
             items: Vec::new(),
             state: ListState::default(),
             error: None,
+            labels: Vec::new(),
         }
     }
 }
@@ -224,6 +229,7 @@ impl Nav {
             items: songs,
             state: ListState::default(),
             error: None,
+            labels: Vec::new(),
         };
         self.tracks.select_first();
         self.breadcrumb = vec!["我的歌单".to_string(), name.to_string()];
@@ -349,6 +355,10 @@ pub(super) struct App {
     pub(super) tx: Sender<Msg>,
     /// 启动时载入的配置（音质下限、下载目录、历史上限）。
     pub(super) config: Config,
+    /// 播放历史（内存里这份是权威，落盘在每次追加后同步）。
+    pub(super) history: History,
+    /// 历史文件路径（测试注入临时路径用）。
+    pub(super) history_path: std::path::PathBuf,
 
     /// 菜单列表的高亮位置（每帧跟当前菜单项对齐）。
     pub(super) menu_state: ListState,
@@ -393,6 +403,7 @@ impl App {
         handle: tokio::runtime::Handle,
         engine: Engine,
         config: Config,
+        history_path: std::path::PathBuf,
         tx: Sender<Msg>,
     ) -> Self {
         Self {
@@ -400,6 +411,8 @@ impl App {
             engine,
             tx,
             config,
+            history: History::default(),
+            history_path,
             menu_state: ListState::default(),
             nav: Nav::new(),
             queue: queue::Queue::new(Vec::new(), 0, String::new()),
@@ -452,6 +465,7 @@ impl App {
         match menu {
             Menu::Favorites if !self.nav.favorites_loaded => self.reload_favorites(),
             Menu::Playlists if !self.nav.playlists_loaded => self.reload_playlists(),
+            Menu::History => self.refresh_history_view(),
             _ => {}
         }
     }
@@ -713,14 +727,24 @@ impl App {
         self.start(self.queue.index());
     }
 
+    /// 当前焦点列表 → `(曲目, 选中下标, 来源名)`。`Enter` 与 `a`/`A`（空队列时）都走这里。
+    fn queue_from_focus(&self) -> Option<(Vec<Song>, usize, String)> {
+        let view = self.nav.focused_songs()?;
+        if view.items.is_empty() {
+            return None;
+        }
+        Some((
+            view.items.clone(),
+            view.state.selected().unwrap_or(0),
+            self.nav.origin_name(),
+        ))
+    }
+
     /// `Enter`：当前焦点列表 → 新队列。
     fn open_queue_from_focus(&mut self) {
-        let origin = self.nav.origin_name();
-        let Some(view) = self.nav.focused_songs() else {
+        let Some((songs, index, origin)) = self.queue_from_focus() else {
             return;
         };
-        let index = view.state.selected().unwrap_or(0);
-        let songs = view.items.clone();
         self.open_queue(songs, index, origin);
     }
 
@@ -862,9 +886,13 @@ impl App {
                     Ok(candidates) => {
                         tracing::info!("取到 {} 个候选档位：{}", candidates.len(), song.title);
                         self.skipped = 0;
-                        // `index` 是队列下标：从这里起，`queue.current()` 就对得上了。
+                        // `index` 是队列下标：从这里起，播放条与浮层的「第几首」都对得上。
                         self.queue.jump(index);
-                        self.engine.play(Track { song, candidates });
+                        self.engine.play(Track {
+                            song: song.clone(),
+                            candidates,
+                        });
+                        self.record_history(&song);
                     }
                     Err(error) => {
                         // 队列里夹着没版权的歌（实测常见）：跳过去接着放，
@@ -934,6 +962,18 @@ impl App {
             keys::Action::Quit => self.quit = true,
             keys::Action::Help => self.help_open = !self.help_open,
             keys::Action::QueueOverlay => self.toggle_queue_overlay(),
+            keys::Action::HistoryClear => {
+                // 只在历史屏有意义；别的屏按了不做事（Esc 在没得返回时也一样）。
+                if self.nav.menu == Menu::History {
+                    match self.history.clear(&self.history_path) {
+                        Ok(()) => {
+                            self.refresh_history_view();
+                            self.status = "已清空播放历史".to_string();
+                        }
+                        Err(error) => self.status = format!("{error:#}"),
+                    }
+                }
+            }
             keys::Action::QueueDelete => self.delete_queue_item(),
             keys::Action::QueueClear => {
                 self.queue.clear();
@@ -1063,6 +1103,71 @@ impl App {
         let next = index.min(self.queue.len() - 1);
         self.queue_state.select(Some(next));
         self.step(step);
+    }
+
+    /// 起播那一刻记一条历史（取流成功、交给引擎之后调用）。
+    pub(super) fn record_history(&mut self, song: &Song) {
+        self.history.push(
+            history::Entry {
+                mid: song.mid.clone(),
+                title: song.title.clone(),
+                singers: song.singers.clone(),
+                at: history::now_secs(),
+                origin: self.queue.origin().to_string(),
+            },
+            self.config.history_limit,
+        );
+        if let Err(error) = self.history.save(&self.history_path) {
+            tracing::warn!("写历史失败：{error:#}");
+        }
+        self.refresh_history_view();
+    }
+
+    /// 历史屏：新在前；每行右侧写「时间 · 来自《来源》」。
+    ///
+    /// `history::Entry` 只有 mid / 标题 / 歌手，所以还原出来的 `Song` 没有时长与档位；
+    /// 取流只认 mid（`qq::vkey::candidates` 用 mid 拼文件名，`media_mid` 缺失时回落到
+    /// mid），因此能直接播——这一点由实测确认（见 README 的已知限制）。
+    pub(super) fn refresh_history_view(&mut self) {
+        let selected = self.nav.history_view.state.selected();
+        self.nav.history_view.items = self
+            .history
+            .entries()
+            .iter()
+            .map(|entry| Song {
+                mid: entry.mid.clone(),
+                song_id: None,
+                media_mid: None,
+                title: entry.title.clone(),
+                singers: entry.singers.clone(),
+                album_mid: String::new(),
+                album_name: String::new(),
+                duration_secs: 0,
+                sizes: crate::model::FileSizes::default(),
+            })
+            .collect();
+        self.nav.history_view.labels = self
+            .history
+            .entries()
+            .iter()
+            .map(|entry| {
+                format!(
+                    "{} · 来自《{}》",
+                    history::relative(history::now_secs(), entry.at),
+                    entry.origin
+                )
+            })
+            .collect();
+        self.nav
+            .history_view
+            .state
+            .select(selected.or((!self.history.is_empty()).then_some(0)));
+        // 标题带上条数：一眼知道要不要清。
+        self.nav.breadcrumb = vec![if self.history.is_empty() {
+            "历史".to_string()
+        } else {
+            format!("历史（{} 条）", self.history.len())
+        }];
     }
 
     /// `Enter`：歌单列表 = 往下进一层；曲目列表 = 以此列表开队列并从该首播。
@@ -1418,5 +1523,61 @@ mod tests {
             assert_eq!(app.queue.mode().label(), expected);
             assert!(app.status.contains(expected), "{}", app.status);
         }
+    }
+
+    #[test]
+    fn starting_a_song_records_history_once_and_refreshes_the_view() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        let song = test_song("a");
+        app.queue = queue::Queue::new(vec![song.clone()], 0, "嗯");
+        app.record_history(&song);
+        app.record_history(&song);
+        assert_eq!(app.history.len(), 1, "同一首连着播只记一条");
+        assert_eq!(app.nav.history_view.items.len(), 1, "历史屏立刻能看到");
+        assert_eq!(app.nav.history_view.items[0].mid, "a");
+        assert!(
+            app.nav.history_view.labels[0].contains("来自《嗯》"),
+            "副标题要写来源：{:?}",
+            app.nav.history_view.labels
+        );
+    }
+
+    #[test]
+    fn the_history_screen_plays_from_the_row_the_user_picked() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        for mid in ["a", "b", "c"] {
+            app.record_history(&test_song(mid));
+        }
+        app.switch_menu(Menu::History);
+        app.nav.history_view.state.select(Some(1));
+
+        let (songs, index, origin) = app.queue_from_focus().expect("历史屏有内容");
+        assert_eq!(songs.len(), 3);
+        assert_eq!(songs[index].mid, "b");
+        assert_eq!(origin, "历史");
+        assert!(app.nav.breadcrumb[0].contains("3 条"), "标题带条数：{:?}", app.nav.breadcrumb);
+    }
+
+    #[test]
+    fn clearing_history_empties_the_view_and_the_file() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.record_history(&test_song("a"));
+        assert!(app.history_path.exists(), "记一条就该落盘");
+        app.switch_menu(Menu::History);
+        app.apply(keys::Action::HistoryClear);
+        assert!(app.history.is_empty());
+        assert!(app.nav.history_view.items.is_empty());
+        assert_eq!(app.status, "已清空播放历史");
+        assert!(!app.history_path.exists(), "磁盘上的也清了");
+    }
+
+    /// 历史屏之外按 `Shift+D` 不该动历史（它只在历史屏有意义）。
+    #[test]
+    fn shift_d_outside_the_history_screen_leaves_history_alone() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.record_history(&test_song("a"));
+        app.nav.switch_menu(Menu::Favorites);
+        app.apply(keys::Action::HistoryClear);
+        assert_eq!(app.history.len(), 1);
     }
 }

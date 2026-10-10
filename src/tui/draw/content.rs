@@ -63,11 +63,57 @@ impl App {
                 frame.render_widget(Paragraph::new(prompt), rows[0]);
                 self.draw_songs(frame, rows[1], &title, focused);
             }
+            Menu::History => self.draw_history(frame, area, &title, focused),
             _ => self.draw_songs(frame, area, &title, focused),
         }
     }
 
-    /// 曲目列表：所有「装着一堆歌」的屏共用（收藏 / 歌单曲目 / 搜索 / 历史）。
+    /// 历史屏：行是「标题 — 歌手」，右侧写「时间 · 来自《来源》」。
+    ///
+    /// 不画时长 / 档位 / 体积那三列——历史里只有 mid / 标题 / 歌手，
+    /// 画出来会是假的 00:00。
+    fn draw_history(&mut self, frame: &mut Frame, area: Rect, title: &str, focused: bool) {
+        let block = focused_block(title, focused);
+        if self.history.is_empty() {
+            frame.render_widget(
+                Paragraph::new("暂无播放历史")
+                    .style(Style::new().fg(Color::DarkGray))
+                    .alignment(ratatui::layout::Alignment::Center)
+                    .block(block),
+                area,
+            );
+            return;
+        }
+        let playing = self.now_playing_mid();
+        let view = self.nav.song_view();
+        let items: Vec<ListItem> = view
+            .items
+            .iter()
+            .enumerate()
+            .map(|(index, song)| {
+                let marker = if playing.as_deref() == Some(song.mid.as_str()) {
+                    "♪"
+                } else {
+                    " "
+                };
+                let right = view.labels.get(index).cloned().unwrap_or_default();
+                ListItem::new(Line::from(vec![
+                    Span::raw(format!("{marker} {} — {}", song.title, song.singers)),
+                    Span::raw("  "),
+                    Span::styled(right, Style::new().fg(Color::DarkGray)),
+                ]))
+            })
+            .collect();
+        let mut state = std::mem::take(&mut self.nav.song_view_mut().state);
+        let list = List::new(items)
+            .block(block)
+            .highlight_style(highlight())
+            .highlight_symbol("▶ ");
+        frame.render_stateful_widget(list, area, &mut state);
+        self.nav.song_view_mut().state = state;
+    }
+
+    /// 曲目列表：所有「装着一堆歌」的屏共用（收藏 / 歌单曲目 / 搜索）。
     pub(super) fn draw_songs(&mut self, frame: &mut Frame, area: Rect, title: &str, focused: bool) {
         let playing = self.now_playing_mid();
         let items: Vec<ListItem> = self

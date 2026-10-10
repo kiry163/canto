@@ -22,6 +22,11 @@ pub fn config_path() -> PathBuf {
     data_dir().join("config.toml")
 }
 
+/// 播放历史。
+pub fn history_path() -> PathBuf {
+    data_dir().join("history.json")
+}
+
 /// 日志文件。
 pub fn log_path() -> PathBuf {
     data_dir().join("canto.log")
@@ -40,7 +45,13 @@ mod tests {
     #[test]
     fn all_paths_share_one_directory_and_are_distinct() {
         let dir = data_dir();
-        let paths = [session_path(), config_path(), log_path(), qr_png_path()];
+        let paths = [
+            session_path(),
+            config_path(),
+            history_path(),
+            log_path(),
+            qr_png_path(),
+        ];
         for path in &paths {
             assert_eq!(
                 path.parent(),
