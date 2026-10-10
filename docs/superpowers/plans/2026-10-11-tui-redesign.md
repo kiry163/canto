@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-11-tui-redesign-design.md`（设计与本节冲突时以 spec 为准，本计划负责落地）
 
+**执行顺序（实施时调整过）**：阶段 1（Task 1、2）→ 阶段 2（Task 5–9）→ 阶段 3（Task 3、10–13）→ 阶段 4（Task 14–16）→ **阶段 5（Task 17：CLI 收缩与 README 收尾）**。Task 3 与 Task 17 都从原位置挪了，理由写在各自的小节里；每个任务结束都必须 `cargo test` 全绿且无新增警告（这就是挪动的原因——提前删子命令会让登录与写入路径立刻变成 dead code）。
+
 ## Global Constraints
 
 - 只新增一个依赖：`toml`。**不**引入 `rand` / `chrono` / `time`（洗牌用本地 xorshift64\*，时间格式化用已有 `libc::localtime_r`）。
@@ -45,6 +47,8 @@
 ---
 
 # 阶段 1：管道与收缩（旧界面不动，可独立交付）
+
+> **执行顺序调整（实施时定）**：Task 3（`history.rs`）挪到阶段 3、与它的消费方（Task 13 历史屏）同批提交。理由：整套历史 API（`relative` / `entries` / `clear` …）要等历史屏落地才有人调用，提前提交只会留下 `dead_code` 警告，而用 `#[allow(dead_code)]` 压掉是把警告当解决。阶段 1 = Task 1 / Task 2（Task 4 已挪到阶段 5，见文末）。
 
 ### Task 1: `paths.rs` 收拢所有路径
 
@@ -386,6 +390,8 @@ git commit -m "feat(config): config.toml 承载音质下限/下载目录/历史�
 
 ### Task 3: 播放历史的读写与相对时间
 
+> **在阶段 3 执行**（与 Task 13 同批提交），原因见阶段 1 开头的说明。
+
 **Files:**
 - Create: `src/history.rs`
 - Modify: `src/main.rs`（`mod history;`）
@@ -637,7 +643,13 @@ git commit -m "feat(history): 播放历史读写、上限截断与相对时间�
 
 ---
 
-### Task 4: CLI 收缩到只剩 `--log`，并把 config 接进界面
+# 阶段 5：CLI 收缩与收尾（**在登录屏之后执行**）
+
+> 为什么不在阶段 1 做：删掉子命令的那一刻，`qr::show`、`qq::login::{create, poll}`、`session::Jar::login_with_cookie`、`qq::write::set_favorite` 就没有调用方了——它们的新家分别是登录屏（Task 15）与 TUI 内的收藏/歌单写入。先删就只剩两条路：留一堆 `dead_code` 警告，或者用 `#[allow]` 把警告压掉（那是拿抑制当解决）。所以收缩放在最后，此时 TUI 已经覆盖登录、播放、搜索、下载、收藏、加/移歌单、登出。
+>
+> `config` 的接线（`tui::run` 收 `config`、下载目录与音质取自 config）已在 Task 2 一并完成，本任务只剩删除与收尾。
+
+### Task 17: CLI 收缩到只剩 `--log`
 
 **Files:**
 - Modify: `src/cli.rs`（删到只剩 `log`）、`src/main.rs`（删掉全部子命令分支与辅助函数）、`src/tui.rs`（`run` 增参、下载目录与音质取自 config）、`README.md`
@@ -741,9 +753,13 @@ fn restore_sigpipe() { /* 原样保留 240-253 行 */ }
 fn init_tracing(level: &str) -> Result<()> { /* 原样，只把 to_file 分支转正、路径换 paths::log_path() */ }
 ```
 
-删除：`Command` 的全部匹配分支、`wait_until_finished`、`parse_quality`、`resolve_playlist`、`login`、`qr_login`、`whoami`、`print_playlists`、`print_tracks`、`print_song_rows`，以及不再使用的 `use`（`std::io::Read`、`crate::cli::Command`、`crate::model::{Playlist, Quality, Song}`、`crate::download`、`crate::session`、`qr` 等按编译器报错逐个清）。`QR_ATTEMPTS` / `QR_POLL_INTERVAL` 两个常量在 Task 15 搬进 `tui/login.rs`，本任务先删（`qr_login` 没了就没人用）。
+删除：`Command` 的全部匹配分支、`wait_until_finished`、`parse_quality`、`resolve_playlist`、`login`、`qr_login`、`whoami`、`print_playlists`、`print_tracks`、`print_song_rows`，以及不再使用的 `use`（`std::io::Read`、`crate::cli::Command`、`crate::model::{Playlist, Quality, Song}`、`crate::download`、`crate::session`、`qr` 等按编译器报错逐个清）。`QR_ATTEMPTS` / `QR_POLL_INTERVAL` 两个常量在 Task 15 已搬进 `tui/login.rs`，这里删掉 main.rs 里的副本。
 
-- [ ] **Step 4: `tui::run` 接 config**
+同时删掉三处因为「唯一调用方在命令行」而失去调用方的 API：`qq::write::set_favorite`（`qq/write.rs`，`Favorite` / `Unfavorite` 两个子命令走的都是它；TUI 的收藏走 `add(FAVORITES_DIR_ID, 0, …)`）、`download::default_dir`（TUI 用 `config.download_dir`）、以及 `init_tracing` 的 `to_file: bool` 参数（既然只有 TUI 一种模式，日志恒写文件）。`qq/write.rs` 里钉 `set_favorite` 请求形状的测试一并改成钉 `add`/`remove`。
+
+- [x] **Step 4: `tui::run` 接 config —— 已在 Task 2 完成**
+
+（保留在本节是为了说明签名来源：`tui::run(handle, engine, config, warning)`，`App` 持 `config: Config`，`download_selected` 用 `config.download_dir`、`play_index` 与下载都传 `Some(config.quality)`。）
 
 `src/tui.rs`：
 
@@ -812,8 +828,8 @@ cargo run -- --log info   # 把播放细节写进日志文件
 - [ ] **Step 7: 提交**
 
 ```bash
-git add -A src/cli.rs src/main.rs src/tui.rs src/download.rs README.md
-git commit -m "refactor(cli): 删掉全部数据子命令，只留 --log；配置接进界面"
+git add -A src/cli.rs src/main.rs src/download.rs src/qq/write.rs README.md
+git commit -m "refactor(cli): 删掉全部数据子命令，只留 --log"
 ```
 
 ---
