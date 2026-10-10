@@ -237,9 +237,11 @@ mod tests {
 
     #[test]
     fn a_short_terminal_says_what_size_is_needed_instead_of_drawing_half_a_qr() {
-        let mut state = LoginState::default();
-        state.lines = vec!["█".repeat(111); 56];
-        state.qr_size = (111, 111);
+        let mut state = LoginState {
+            lines: vec!["█".repeat(111); 56],
+            qr_size: (111, 111),
+            ..LoginState::default()
+        };
         let hint = state.size_hint(100, 30).expect("100 列装不下");
         assert!(hint.contains("需要 ≥112×61"), "提示里要有需要的尺寸：{hint}");
         assert!(hint.contains("当前 100×30"), "也要说当前多大：{hint}");
@@ -251,8 +253,10 @@ mod tests {
 
     #[test]
     fn cookie_input_is_kept_but_only_its_tail_is_drawn() {
-        let mut state = LoginState::default();
-        state.input = Some("uin=o1; qqmusic_key=abcdef".to_string());
+        let state = LoginState {
+            input: Some("uin=o1; qqmusic_key=abcdef".to_string()),
+            ..LoginState::default()
+        };
         let tail = state.input_tail(12);
         assert_eq!(tail.chars().count(), 9, "只留尾部 9 个字符");
         assert!(tail.ends_with("abcdef"), "留下的该是结尾：{tail}");

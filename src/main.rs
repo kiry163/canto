@@ -360,7 +360,7 @@ fn qr_login(runtime: &tokio::runtime::Runtime) -> Result<()> {
         let (width, height) = qr::dimensions(&png)?;
         let (columns, rows) = crossterm::terminal::size().unwrap_or((80, 24));
         // 终端装不下就别画残缺码（这段是登录屏接上之前的兜底路径，Task 17 删掉）。
-        if u32::from(columns) >= width + 1 && u32::from(rows) >= height / 2 + 4 {
+        if u32::from(columns) > width && u32::from(rows) >= height / 2 + 4 {
             for line in &lines {
                 println!("{line}");
             }
