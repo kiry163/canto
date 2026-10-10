@@ -133,16 +133,23 @@ impl App {
                 // 输入行占第一行（Task 7 把它做成常驻），结果在下面。
                 let rows =
                     Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area);
-                let prompt = match &self.input {
-                    Some(buffer) => Line::from(vec![
+                let keyword = self.nav.search_text.clone();
+                let prompt = if self.nav.search_input {
+                    Line::from(vec![
                         Span::styled("搜索：", Style::new().fg(Color::Yellow)),
-                        Span::raw(buffer.clone()),
+                        Span::raw(keyword),
                         Span::styled("▏", Style::new().fg(Color::Yellow)),
-                    ]),
-                    None => Line::from(Span::styled(
-                        "按 / 输入关键词",
+                    ])
+                } else if keyword.is_empty() {
+                    Line::from(Span::styled(
+                        "按 / 输入关键词，回车搜索",
                         Style::new().fg(Color::DarkGray),
-                    )),
+                    ))
+                } else {
+                    Line::from(vec![
+                        Span::styled("搜索：", Style::new().fg(Color::DarkGray)),
+                        Span::raw(keyword),
+                    ])
                 };
                 frame.render_widget(Paragraph::new(prompt), rows[0]);
                 self.draw_songs(frame, rows[1], &title, focused);
@@ -303,15 +310,6 @@ impl App {
             frame.render_widget(gauge, *row);
         }
 
-        if let Some(buffer) = &self.input {
-            let line = Line::from(vec![
-                Span::styled("搜索：", Style::new().fg(Color::Yellow)),
-                Span::raw(buffer.clone()),
-                Span::styled("▏", Style::new().fg(Color::Yellow)),
-            ]);
-            frame.render_widget(Paragraph::new(line), hint_area);
-            return;
-        }
         let hint = if let Some(loading) = &self.loading {
             format!("⏳ {loading}")
         } else if self.status.is_empty() {

@@ -159,6 +159,10 @@ pub(super) struct Nav {
     /// 这两屏的数据拉过没有（空列表也可能是「真的没有」，不能靠 `is_empty` 判断）。
     pub favorites_loaded: bool,
     pub playlists_loaded: bool,
+    /// 搜索框里的关键词（退出输入态也不清空，方便改一改再搜）。
+    pub search_text: String,
+    /// 输入框是否正在吃键。
+    pub search_input: bool,
 }
 
 impl Nav {
@@ -175,6 +179,8 @@ impl Nav {
             breadcrumb: vec!["我的收藏".to_string()],
             favorites_loaded: false,
             playlists_loaded: false,
+            search_text: String::new(),
+            search_input: false,
         }
     }
 
@@ -183,6 +189,18 @@ impl Nav {
         self.menu = menu;
         self.focus = Focus::Content;
         self.breadcrumb = vec![menu.title().to_string()];
+        // 搜索屏进来就该能打字，不用先按一下 `/`。
+        self.search_input = menu == Menu::Search;
+    }
+
+    /// `/`：跳到搜索屏并聚焦输入框，任何位置都能用。
+    pub fn begin_search_input(&mut self) {
+        self.switch_menu(Menu::Search);
+    }
+
+    /// 退出输入态。关键词留着——退出输入不等于放弃这次搜索。
+    pub fn end_search_input(&mut self) {
+        self.search_input = false;
     }
 
     /// 主区这一屏的「来源名」，给队列显示用。
@@ -297,118 +315,6 @@ impl Nav {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::model::FileSizes;
-
-    fn test_song(mid: &str) -> Song {
-        Song {
-            mid: mid.to_string(),
-            song_id: None,
-            media_mid: None,
-            title: format!("歌 {mid}"),
-            singers: "歌手".to_string(),
-            album_mid: String::new(),
-            album_name: String::new(),
-            duration_secs: 200,
-            sizes: FileSizes::default(),
-        }
-    }
-
-    fn playlist(id: &str, name: &str) -> Playlist {
-        Playlist {
-            id: id.to_string(),
-            dir_id: 1,
-            name: name.to_string(),
-            song_count: 3,
-            cover_url: None,
-            is_favorites: false,
-        }
-    }
-
-    /// 菜单切换是「换一屏内容」，不是「清空一屏内容」：切走再切回，选中位置要还在。
-    #[test]
-    fn switching_menus_keeps_each_views_selection() {
-        let mut nav = Nav::new();
-        nav.favorites.items = vec![test_song("a"), test_song("b"), test_song("c")];
-        nav.favorites.select_first();
-        nav.switch_menu(Menu::Favorites);
-        nav.favorites.move_by(2);
-        assert_eq!(nav.favorites.selected().map(|s| s.mid.as_str()), Some("c"));
-
-        nav.switch_menu(Menu::Playlists);
-        assert_eq!(nav.breadcrumb, ["我的歌单"]);
-        nav.switch_menu(Menu::Favorites);
-        assert_eq!(
-            nav.favorites.selected().map(|s| s.mid.as_str()),
-            Some("c"),
-            "切回来选中位置该保留"
-        );
-    }
-
-    #[test]
-    fn entering_a_playlist_pushes_a_breadcrumb_and_esc_pops_it() {
-        let mut nav = Nav::new();
-        nav.switch_menu(Menu::Playlists);
-        nav.playlists.items = vec![playlist("1", "嗯"), playlist("2", "循环")];
-        nav.playlists.select_first();
-        assert!(nav.can_enter_depth(), "歌单列表是最上一层，可以往下进");
-        let target = nav.playlists.selected().cloned().expect("选中了歌单");
-        assert_eq!(target.id, "1");
-        nav.begin_tracks(&target.id, &target.name);
-        assert_eq!(nav.breadcrumb, ["我的歌单", "嗯"]);
-        assert!(!nav.can_enter_depth(), "已经在曲目层里了");
-
-        nav.push_tracks("1", "嗯", vec![test_song("a")]);
-        assert_eq!(nav.tracks.items.len(), 1);
-        assert!(nav.pop_tracks(), "Esc 该返回歌单列表");
-        assert_eq!(nav.breadcrumb, ["我的歌单"]);
-        assert_eq!(nav.tracks.items.len(), 0, "退回上一层要清掉曲目");
-        assert!(!nav.pop_tracks(), "已经在最上层，再返回没有动作");
-    }
-
-    #[test]
-    fn paging_moves_ten_rows_and_stops_at_the_end() {
-        let mut nav = Nav::new();
-        nav.switch_menu(Menu::Favorites);
-        nav.favorites.items = (0..25).map(|index| test_song(&format!("m{index}"))).collect();
-        nav.favorites.select_first();
-        nav.page_focus(1);
-        assert_eq!(nav.favorites.state.selected(), Some(10));
-        nav.page_focus(1);
-        nav.page_focus(1);
-        assert_eq!(nav.favorites.state.selected(), Some(24), "到尾就停，不越界");
-        nav.page_focus(-1);
-        assert_eq!(nav.favorites.state.selected(), Some(14));
-    }
-
-    /// 搜索把结果放在自己的列表里，不会把正在看的歌单曲目冲掉。
-    #[test]
-    fn search_results_have_their_own_slot() {
-        let mut nav = Nav::new();
-        nav.switch_menu(Menu::Playlists);
-        nav.push_tracks("1", "嗯", vec![test_song("keep")]);
-        nav.search_results.items = vec![test_song("found")];
-        nav.switch_menu(Menu::Search);
-        assert_eq!(nav.focused_songs().unwrap().items[0].mid, "found");
-        nav.switch_menu(Menu::Playlists);
-        assert_eq!(nav.tracks.items[0].mid, "keep", "歌单曲目没被搜索顶掉");
-    }
-
-    /// 焦点在菜单上时，主区列表不该被 `j`/`k` 动到。
-    #[test]
-    fn movement_only_touches_the_focused_list() {
-        let mut nav = Nav::new();
-        nav.favorites.items = vec![test_song("a"), test_song("b")];
-        nav.favorites.select_first();
-        nav.focus = Focus::Menu;
-        assert!(nav.focused_songs().is_none());
-        nav.focus = Focus::Content;
-        nav.move_focus_by(1);
-        assert_eq!(nav.favorites.state.selected(), Some(1));
-    }
-}
 
 /// 后台下载的进度（界面每帧读一次）。
 pub(super) struct Transfer {
@@ -464,8 +370,6 @@ pub(super) struct App {
     /// 歌词面板是否展开。
     pub(super) show_lyric: bool,
     pub(super) lyric_state: ListState,
-    /// `Some` 表示正在输入搜索词。
-    pub(super) input: Option<String>,
     /// `Some` 表示正在挑歌单（`a` 键）：候选歌单、高亮、要加进去的歌。
     pub(super) picker: Option<(Vec<Playlist>, ListState, Song)>,
     /// 正在跑的下载。
@@ -501,7 +405,6 @@ impl App {
             lyric_loading: false,
             show_lyric: true,
             lyric_state: ListState::default(),
-            input: None,
             picker: None,
             transfer: None,
             loading: None,
@@ -962,7 +865,7 @@ impl App {
         if self.picker.is_some() {
             return keys::Context::PlaylistPicker;
         }
-        if self.input.is_some() {
+        if self.nav.search_input {
             return keys::Context::SearchInput;
         }
         match self.nav.focus {
@@ -998,7 +901,7 @@ impl App {
                 }
                 self.enter_selected();
             }
-            keys::Action::Search => self.input = Some(String::new()),
+            keys::Action::Search => self.nav.begin_search_input(),
             keys::Action::Download => self.download_selected(),
             keys::Action::Favorite => self.favorite_selected(),
             keys::Action::AddToPlaylist => self.open_picker(),
@@ -1012,28 +915,25 @@ impl App {
             keys::Action::VolumeUp => self.engine.adjust_volume(5),
             keys::Action::VolumeDown => self.engine.adjust_volume(-5),
             keys::Action::InputChar(character) => {
-                if let Some(buffer) = self.input.as_mut() {
-                    buffer.push(character);
-                }
+                self.nav.search_text.push(character);
             }
             keys::Action::InputBackspace => {
-                if let Some(buffer) = self.input.as_mut() {
-                    buffer.pop();
-                }
+                self.nav.search_text.pop();
             }
             keys::Action::InputSubmit => {
-                let keyword = self.input.take().unwrap_or_default().trim().to_string();
+                self.nav.end_search_input();
+                let keyword = self.nav.search_text.trim().to_string();
                 if !keyword.is_empty() {
                     self.search(keyword);
                 }
             }
-            keys::Action::InputCancel => self.input = None,
+            keys::Action::InputCancel => self.nav.end_search_input(),
             keys::Action::Back => {
                 // 顺序：先关模态，再退输入态，最后退一层视图。
                 if self.picker.is_some() {
                     self.picker = None;
-                } else if self.input.is_some() {
-                    self.input = None;
+                } else if self.nav.search_input {
+                    self.nav.end_search_input();
                 } else if self.nav.pop_tracks() {
                     self.nav.focus = Focus::Content;
                 }
@@ -1143,5 +1043,159 @@ impl App {
                 None => format!("下载《{}》…", state.label),
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::FileSizes;
+
+    fn test_song(mid: &str) -> Song {
+        Song {
+            mid: mid.to_string(),
+            song_id: None,
+            media_mid: None,
+            title: format!("歌 {mid}"),
+            singers: "歌手".to_string(),
+            album_mid: String::new(),
+            album_name: String::new(),
+            duration_secs: 200,
+            sizes: FileSizes::default(),
+        }
+    }
+
+    fn playlist(id: &str, name: &str) -> Playlist {
+        Playlist {
+            id: id.to_string(),
+            dir_id: 1,
+            name: name.to_string(),
+            song_count: 3,
+            cover_url: None,
+            is_favorites: false,
+        }
+    }
+
+    /// 菜单切换是「换一屏内容」，不是「清空一屏内容」：切走再切回，选中位置要还在。
+    #[test]
+    fn switching_menus_keeps_each_views_selection() {
+        let mut nav = Nav::new();
+        nav.favorites.items = vec![test_song("a"), test_song("b"), test_song("c")];
+        nav.favorites.select_first();
+        nav.switch_menu(Menu::Favorites);
+        nav.favorites.move_by(2);
+        assert_eq!(nav.favorites.selected().map(|s| s.mid.as_str()), Some("c"));
+
+        nav.switch_menu(Menu::Playlists);
+        assert_eq!(nav.breadcrumb, ["我的歌单"]);
+        nav.switch_menu(Menu::Favorites);
+        assert_eq!(
+            nav.favorites.selected().map(|s| s.mid.as_str()),
+            Some("c"),
+            "切回来选中位置该保留"
+        );
+    }
+
+    #[test]
+    fn entering_a_playlist_pushes_a_breadcrumb_and_esc_pops_it() {
+        let mut nav = Nav::new();
+        nav.switch_menu(Menu::Playlists);
+        nav.playlists.items = vec![playlist("1", "嗯"), playlist("2", "循环")];
+        nav.playlists.select_first();
+        assert!(nav.can_enter_depth(), "歌单列表是最上一层，可以往下进");
+        let target = nav.playlists.selected().cloned().expect("选中了歌单");
+        assert_eq!(target.id, "1");
+        nav.begin_tracks(&target.id, &target.name);
+        assert_eq!(nav.breadcrumb, ["我的歌单", "嗯"]);
+        assert!(!nav.can_enter_depth(), "已经在曲目层里了");
+
+        nav.push_tracks("1", "嗯", vec![test_song("a")]);
+        assert_eq!(nav.tracks.items.len(), 1);
+        assert!(nav.pop_tracks(), "Esc 该返回歌单列表");
+        assert_eq!(nav.breadcrumb, ["我的歌单"]);
+        assert_eq!(nav.tracks.items.len(), 0, "退回上一层要清掉曲目");
+        assert!(!nav.pop_tracks(), "已经在最上层，再返回没有动作");
+    }
+
+    #[test]
+    fn paging_moves_ten_rows_and_stops_at_the_end() {
+        let mut nav = Nav::new();
+        nav.switch_menu(Menu::Favorites);
+        nav.favorites.items = (0..25).map(|index| test_song(&format!("m{index}"))).collect();
+        nav.favorites.select_first();
+        nav.page_focus(1);
+        assert_eq!(nav.favorites.state.selected(), Some(10));
+        nav.page_focus(1);
+        nav.page_focus(1);
+        assert_eq!(nav.favorites.state.selected(), Some(24), "到尾就停，不越界");
+        nav.page_focus(-1);
+        assert_eq!(nav.favorites.state.selected(), Some(14));
+    }
+
+    /// 搜索把结果放在自己的列表里，不会把正在看的歌单曲目冲掉。
+    #[test]
+    fn search_results_have_their_own_slot() {
+        let mut nav = Nav::new();
+        nav.switch_menu(Menu::Playlists);
+        nav.push_tracks("1", "嗯", vec![test_song("keep")]);
+        nav.search_results.items = vec![test_song("found")];
+        nav.switch_menu(Menu::Search);
+        assert_eq!(nav.focused_songs().unwrap().items[0].mid, "found");
+        nav.switch_menu(Menu::Playlists);
+        assert_eq!(nav.tracks.items[0].mid, "keep", "歌单曲目没被搜索顶掉");
+    }
+
+    /// 搜完看别的屏、再切回搜索：关键词与结果都还在。
+    #[test]
+    fn search_keeps_its_screen_so_browsing_is_not_lost() {
+        let mut nav = Nav::new();
+        nav.switch_menu(Menu::Favorites);
+        nav.favorites.items = vec![test_song("a"), test_song("b")];
+        nav.favorites.select_first();
+        nav.favorites.move_by(1);
+
+        nav.begin_search_input();
+        nav.search_text = "晴天".to_string();
+        nav.search_results.items = vec![test_song("s1"), test_song("s2")];
+        nav.search_results.select_first();
+
+        nav.switch_menu(Menu::Favorites);
+        assert_eq!(
+            nav.favorites.selected().map(|s| s.mid.as_str()),
+            Some("b"),
+            "浏览上下文没丢"
+        );
+        nav.switch_menu(Menu::Search);
+        assert_eq!(
+            nav.search_results.selected().map(|s| s.mid.as_str()),
+            Some("s1"),
+            "搜索结果也还在"
+        );
+        assert_eq!(nav.search_text, "晴天");
+    }
+
+    /// 进入搜索屏自动聚焦输入框；退出输入态后关键词留在框里。
+    #[test]
+    fn entering_the_search_screen_focuses_the_box_and_leaving_it_keeps_the_keyword() {
+        let mut nav = Nav::new();
+        nav.switch_menu(Menu::Search);
+        assert!(nav.search_input, "进来就能打字");
+        nav.search_text = "晴天".to_string();
+        nav.end_search_input();
+        assert!(!nav.search_input);
+        assert_eq!(nav.search_text, "晴天", "退出输入态不丢关键词");
+    }
+
+    /// 焦点在菜单上时，主区列表不该被 `j`/`k` 动到。
+    #[test]
+    fn movement_only_touches_the_focused_list() {
+        let mut nav = Nav::new();
+        nav.favorites.items = vec![test_song("a"), test_song("b")];
+        nav.favorites.select_first();
+        nav.focus = Focus::Menu;
+        assert!(nav.focused_songs().is_none());
+        nav.focus = Focus::Content;
+        nav.move_focus_by(1);
+        assert_eq!(nav.favorites.state.selected(), Some(1));
     }
 }
