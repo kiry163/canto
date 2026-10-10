@@ -20,7 +20,7 @@ pub mod status;
 use crate::player::Phase;
 
 use super::keys;
-use super::state::App;
+use super::state::{App, Screen};
 
 /// 菜单列宽。
 pub const MENU_WIDTH: u16 = 16;
@@ -104,6 +104,10 @@ pub fn too_small(area: Rect) -> bool {
 impl App {
     pub(super) fn draw(&mut self, frame: &mut Frame) {
         let area = frame.area();
+        if let Screen::Login(state) = &self.screen {
+            super::login::draw(state, frame, area);
+            return;
+        }
         if too_small(area) {
             frame.render_widget(
                 ratatui::widgets::Paragraph::new(format!(
@@ -157,6 +161,7 @@ pub fn hints(context: keys::Context) -> &'static str {
         keys::Context::QueueOverlay => {
             "Enter 跳播 · d 删除 · Shift+D 清空 · j/k 选择 · Esc 关闭"
         }
+        keys::Context::Login => "c 粘贴 cookie · o 打开二维码图片 · r 重新扫码 · q 退出"
     }
 }
 

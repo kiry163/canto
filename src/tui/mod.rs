@@ -14,6 +14,7 @@
 
 pub mod draw;
 pub mod keys;
+pub mod login;
 pub mod queue;
 pub mod state;
 
@@ -43,6 +44,12 @@ pub fn run(
     let (tx, rx) = channel();
     let mut app = App::new(handle, engine, config, history_path, tx);
     app.history = crate::history::History::load(&app.history_path.clone(), app.config.history_limit);
+    // 没登录就先出登录屏：所有功能都在界面里，命令行不再有 login 这条路。
+    if crate::session::jar().state().logged_in {
+        app.load_initial();
+    } else {
+        app.start_login();
+    }
     if let Some(warning) = warning {
         app.status = warning;
     }

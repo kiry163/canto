@@ -11,21 +11,39 @@ use crossterm::event::KeyEvent;
 use ratatui::widgets::ListState;
 
 use crate::config::Config;
+use crate::session;
 use crate::history::{self, History};
 use crate::download;
 use crate::model::{Lyric, Playlist, Song};
 use crate::player::{Engine, Track};
 use crate::qq;
+use crate::paths;
 use crate::qq::vkey::Candidate;
+use crate::qr;
 
 use super::keys;
+use super::login::{self, LoginPhase, LoginState};
 use super::queue;
 
 /// 连续遇到不可播曲目时最多自动跳几首——整个歌单都没版权时别一路刷到底。
 const MAX_AUTO_SKIPS: u32 = 3;
 
+/// 当前在哪一屏。启动时看会话：没登录就先出登录屏。
+pub(super) enum Screen {
+    Login(LoginState),
+    Main,
+}
+
 /// 后台任务的回话。
 pub(super) enum Msg {
+    /// 拿到一张二维码（`attempt` 是第几张）。
+    Qr { png: Vec<u8>, attempt: u32 },
+    /// 已扫码，等手机上确认。
+    QrScanned,
+    /// 扫码登录成功（`identity` 是账号）。
+    LoggedIn(String),
+    /// 登录流程失败（取码失败 / 多次过期 / 服务端拒绝）。
+    LoginFailed(String),
     Playlists(Result<Vec<Playlist>>),
     /// 「我喜欢」的曲目（菜单第一项，启动就拉）。
     Favorites(Result<Vec<Song>>),
@@ -355,6 +373,8 @@ pub(super) struct App {
     pub(super) tx: Sender<Msg>,
     /// 启动时载入的配置（音质下限、下载目录、历史上限）。
     pub(super) config: Config,
+    /// 当前屏幕。
+    pub(super) screen: Screen,
     /// 播放历史（内存里这份是权威，落盘在每次追加后同步）。
     pub(super) history: History,
     /// 历史文件路径（测试注入临时路径用）。
@@ -411,6 +431,8 @@ impl App {
             engine,
             tx,
             config,
+            // 默认主界面；启动时由 `tui::run` 按会话状态决定，测试里也就不用管登录。
+            screen: Screen::Main,
             history: History::default(),
             history_path,
             menu_state: ListState::default(),
@@ -790,6 +812,44 @@ impl App {
 
     pub(super) fn on_msg(&mut self, message: Msg) {
         match message {
+            Msg::Qr { png, attempt } => {
+                // PNG 一律留一份：终端画不下、想用相册扫，都靠它。
+                let saved = qr::save_png(&png, &paths::qr_png_path());
+                let lines = qr::to_lines(&png).unwrap_or_default();
+                let size = qr::dimensions(&png).unwrap_or((0, 0));
+                if let Screen::Login(state) = &mut self.screen {
+                    state.lines = lines;
+                    state.qr_size = size;
+                    state.attempt = attempt;
+                    state.phase = LoginPhase::Ready;
+                    state.message = format!("等待扫码…（第 {attempt} 张）");
+                    if let Err(error) = saved {
+                        state.phase = LoginPhase::Failed(format!("{error:#}"));
+                    }
+                }
+            }
+            Msg::QrScanned => {
+                if let Screen::Login(state) = &mut self.screen {
+                    state.phase = LoginPhase::Scanned;
+                    state.message = "已扫码，请在手机上确认…".to_string();
+                }
+            }
+            Msg::LoggedIn(identity) => {
+                // 扫码成功后 cookie 已经在 jar 里，落盘才算登录完成。
+                match session::jar().save() {
+                    Ok(()) => self.finish_login(identity),
+                    Err(error) => {
+                        if let Screen::Login(state) = &mut self.screen {
+                            state.phase = LoginPhase::Failed(format!("保存会话失败：{error:#}"));
+                        }
+                    }
+                }
+            }
+            Msg::LoginFailed(message) => {
+                if let Screen::Login(state) = &mut self.screen {
+                    state.phase = LoginPhase::Failed(message);
+                }
+            }
             Msg::Favorites(result) => {
                 self.loading = None;
                 self.nav.favorites_loaded = true;
@@ -928,16 +988,22 @@ impl App {
         }
     }
 
-    /// 按键入口：先问上下文，再交给纯函数映射表，最后派发。
+    /// 按键入口：先问上下文，再交给纯函数映射表，最后按屏幕派发。
     pub(super) fn handle_key(&mut self, key: KeyEvent) {
         let Some(action) = keys::resolve(self.context(), key) else {
             return;
         };
-        self.apply(action);
+        match self.screen {
+            Screen::Login(_) => self.apply_login(action),
+            Screen::Main => self.apply(action),
+        }
     }
 
     /// 当前按键上下文：模态 > 输入态 > 焦点所在。
     pub(super) fn context(&self) -> keys::Context {
+        if let Screen::Login(state) = &self.screen {
+            return login::context(state.input.is_some());
+        }
         // 模态优先：帮助在最上层，其次是选择框，再是输入态。
         if self.help_open {
             return keys::Context::HelpOverlay;
@@ -962,6 +1028,7 @@ impl App {
             keys::Action::Quit => self.quit = true,
             keys::Action::Help => self.help_open = !self.help_open,
             keys::Action::QueueOverlay => self.toggle_queue_overlay(),
+            keys::Action::Logout => self.sign_out("已登出，请重新登录"),
             keys::Action::HistoryClear => {
                 // 只在历史屏有意义；别的屏按了不做事（Esc 在没得返回时也一样）。
                 if self.nav.menu == Menu::History {
@@ -1041,6 +1108,10 @@ impl App {
                 }
             }
             keys::Action::InputCancel => self.nav.end_search_input(),
+            // 登录屏那三个动作由 `apply_login` 处理，不会走到这里。
+            keys::Action::LoginCookie
+            | keys::Action::LoginOpenPng
+            | keys::Action::LoginRetry => {}
             keys::Action::Back => {
                 // 顺序：先关模态，再退输入态，最后退一层视图。
                 if self.help_open {
@@ -1055,6 +1126,85 @@ impl App {
                     self.nav.focus = Focus::Content;
                 }
             }
+        }
+    }
+
+    /// 进登录屏并开始扫码流程。
+    pub(super) fn start_login(&mut self) {
+        self.screen = Screen::Login(LoginState::default());
+        login::spawn_qr_login(&self.handle, self.tx.clone());
+    }
+
+    /// 登录屏的按键。
+    fn apply_login(&mut self, action: keys::Action) {
+        match action {
+            keys::Action::Quit => self.quit = true,
+            keys::Action::LoginRetry => self.start_login(),
+            keys::Action::LoginOpenPng => {
+                if let (Err(error), Screen::Login(state)) = (login::open_qr_png(), &mut self.screen) {
+                    state.phase = LoginPhase::Failed(error);
+                }
+            }
+            keys::Action::LoginCookie => {
+                if let Screen::Login(state) = &mut self.screen {
+                    state.input = Some(String::new());
+                }
+            }
+            keys::Action::InputChar(character) => {
+                if let Screen::Login(state) = &mut self.screen
+                    && let Some(buffer) = state.input.as_mut()
+                {
+                    buffer.push(character);
+                }
+            }
+            keys::Action::InputBackspace => {
+                if let Screen::Login(state) = &mut self.screen
+                    && let Some(buffer) = state.input.as_mut()
+                {
+                    buffer.pop();
+                }
+            }
+            keys::Action::InputCancel => {
+                if let Screen::Login(state) = &mut self.screen {
+                    state.input = None;
+                }
+            }
+            keys::Action::InputSubmit => {
+                let raw = match &mut self.screen {
+                    Screen::Login(state) => state.input.take().unwrap_or_default(),
+                    Screen::Main => return,
+                };
+                match login::login_with_cookie(&raw) {
+                    Ok(identity) => self.finish_login(identity),
+                    Err(error) => {
+                        if let Screen::Login(state) = &mut self.screen {
+                            state.phase = LoginPhase::Failed(error);
+                        }
+                    }
+                }
+            }
+            // 登录屏只会产出上面这些动作（`Context::Login` / `SearchInput`）。
+            _ => {}
+        }
+    }
+
+    /// 登录成功：进主界面，从「我的收藏」开始。
+    fn finish_login(&mut self, identity: String) {
+        tracing::info!("登录成功：{identity}");
+        self.screen = Screen::Main;
+        self.status = format!("已登录：{identity}");
+        self.switch_menu(Menu::Favorites);
+    }
+
+    /// 会话失效或被手动登出：清掉本地会话、回登录屏。
+    pub(super) fn sign_out(&mut self, reason: &str) {
+        if let Err(error) = session::jar().clear() {
+            tracing::warn!("清本地会话失败：{error:#}");
+        }
+        self.queue.clear();
+        self.start_login();
+        if let Screen::Login(state) = &mut self.screen {
+            state.phase = LoginPhase::Failed(reason.to_string());
         }
     }
 

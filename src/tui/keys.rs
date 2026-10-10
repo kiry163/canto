@@ -46,6 +46,12 @@ pub enum Action {
     QueueClear,
     /// 历史屏里 `Shift+D`：清空整份播放历史。
     HistoryClear,
+    /// 帮助浮层里 `L`：登出（清本地会话回登录屏）。
+    Logout,
+    /// 登录屏：`c` 粘贴 cookie、`o` 打开二维码图片、`r` 重新扫码。
+    LoginCookie,
+    LoginOpenPng,
+    LoginRetry,
     AddToPlaylist,
     RemoveFromPlaylist,
     Favorite,
@@ -73,6 +79,8 @@ pub enum Context {
     HelpOverlay,
     /// 队列浮层。
     QueueOverlay,
+    /// 登录屏（cookie 输入态复用 `SearchInput`）。
+    Login,
 }
 
 /// 键位映射。`None` = 这个键在当前上下文没有含义（调用方忽略）。
@@ -92,6 +100,14 @@ pub fn resolve(context: Context, key: KeyEvent) -> Option<Action> {
         },
         Context::HelpOverlay => match key.code {
             KeyCode::Esc | KeyCode::Char('?') | KeyCode::F(1) => Some(Action::Help),
+            KeyCode::Char('L') => Some(Action::Logout),
+            _ => None,
+        },
+        Context::Login => match key.code {
+            KeyCode::Char('c') => Some(Action::LoginCookie),
+            KeyCode::Char('o') => Some(Action::LoginOpenPng),
+            KeyCode::Char('r') => Some(Action::LoginRetry),
+            KeyCode::Char('q') => Some(Action::Quit),
             _ => None,
         },
         Context::QueueOverlay => match key.code {
@@ -180,6 +196,7 @@ mod tests {
             Context::PlaylistPicker,
             Context::QueueOverlay,
             Context::HelpOverlay,
+            Context::Login,
         ] {
             let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
             assert_eq!(resolve(context, event), Some(Action::Quit), "{context:?}");
@@ -268,8 +285,19 @@ mod tests {
         }
         assert_eq!(press(Context::HelpOverlay, KeyCode::Esc), Some(Action::Help));
         assert_eq!(press(Context::HelpOverlay, KeyCode::Char('?')), Some(Action::Help));
+        assert_eq!(press(Context::HelpOverlay, KeyCode::Char('L')), Some(Action::Logout));
         assert_eq!(press(Context::HelpOverlay, KeyCode::Char('a')), None, "浮层吞键");
         assert_eq!(press(Context::HelpOverlay, KeyCode::Enter), None, "浮层里的回车也不该穿透");
+    }
+
+    #[test]
+    fn the_login_screen_keeps_its_keys_to_itself() {
+        assert_eq!(press(Context::Login, KeyCode::Char('c')), Some(Action::LoginCookie));
+        assert_eq!(press(Context::Login, KeyCode::Char('o')), Some(Action::LoginOpenPng));
+        assert_eq!(press(Context::Login, KeyCode::Char('r')), Some(Action::LoginRetry));
+        assert_eq!(press(Context::Login, KeyCode::Char('q')), Some(Action::Quit));
+        assert_eq!(press(Context::Login, KeyCode::Char('j')), None, "登录屏没有列表可走");
+        assert_eq!(press(Context::Login, KeyCode::Enter), None, "回车只在输入态里提交");
     }
 
     #[test]

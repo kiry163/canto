@@ -41,9 +41,7 @@ fn main() -> Result<()> {
 
     match command {
         Command::Tui => {
-            if !session::jar().state().logged_in {
-                bail!("未登录：先 `canto login --cookie '<从浏览器复制的 cookie>'`");
-            }
+            // 未登录时不再报错退出：界面自己会先出登录屏（扫码 / 粘贴 cookie）。
             let (config, warning) = config::load();
             let engine = Engine::start()?;
             tui::run(runtime.handle().clone(), engine, config, paths::history_path(), warning)?;
@@ -357,12 +355,21 @@ fn qr_login(runtime: &tokio::runtime::Runtime) -> Result<()> {
     for attempt in 1..=QR_ATTEMPTS {
         let png = runtime.block_on(qq::login::create())?;
         let png_path = paths::qr_png_path();
-        match qr::show(&png, &png_path)? {
-            Some(path) => println!(
+        let lines = qr::to_lines(&png)?;
+        qr::save_png(&png, &png_path)?;
+        let (width, height) = qr::dimensions(&png)?;
+        let (columns, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+        // 终端装不下就别画残缺码（这段是登录屏接上之前的兜底路径，Task 17 删掉）。
+        if u32::from(columns) >= width + 1 && u32::from(rows) >= height / 2 + 4 {
+            for line in &lines {
+                println!("{line}");
+            }
+            println!("用手机 QQ 扫描上面的二维码。");
+        } else {
+            println!(
                 "终端装不下二维码，已存成文件：{}\n用手机 QQ 扫描它。",
-                path.display()
-            ),
-            None => println!("用手机 QQ 扫描上面的二维码。"),
+                png_path.display()
+            );
         }
         if attempt > 1 {
             println!("（第 {attempt} 张二维码）");

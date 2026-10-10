@@ -62,6 +62,7 @@ fn help_lines(menu: Menu) -> Vec<Line<'static>> {
         Menu::Search => Line::from("搜索  Enter 搜 · Esc 取消输入 · 结果里 Enter 播放"),
         Menu::History => Line::from("历史  Enter 从那首重播"),
     });
+    lines.push(Line::from("会话  L 登出（清空本地会话，回登录屏）"));
     lines.push(Line::from("关闭  Esc 或 ?"));
     lines
 }
