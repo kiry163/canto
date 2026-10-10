@@ -884,9 +884,12 @@ impl App {
                     " "
                 };
                 ListItem::new(format!(
-                    "{marker} {:>5}  {:<6}  {} — {}",
+                    "{marker} {:>5}  {:<6} {:>7}  {} — {}",
                     format_duration(StdDuration::from_secs(song.duration_secs)),
                     song.sizes.best_label(),
+                    song.sizes
+                        .best_size()
+                        .map_or_else(|| "—".to_string(), format_size),
                     song.title,
                     song.singers,
                 ))

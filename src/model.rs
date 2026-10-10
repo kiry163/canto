@@ -67,19 +67,27 @@ pub struct FileSizes {
 }
 
 impl FileSizes {
+    /// 最高可用档位：（标签，字节数）。标签和大小必须出自同一档，
+    /// 不然会出现「标着 FLAC、大小却是 Hi-Res 那份」的错位。
+    fn best(&self) -> Option<(&'static str, u64)> {
+        [
+            ("Hi-Res", self.hires),
+            ("FLAC", self.flac),
+            ("320k", self.mp3_320),
+            ("128k", self.mp3_128),
+        ]
+        .into_iter()
+        .find(|(_, size)| *size > 0)
+    }
+
     /// 最高可用档位标签，用于列表里一眼看出有没有无损。
     pub fn best_label(&self) -> &'static str {
-        if self.hires > 0 {
-            "Hi-Res"
-        } else if self.flac > 0 {
-            "FLAC"
-        } else if self.mp3_320 > 0 {
-            "320k"
-        } else if self.mp3_128 > 0 {
-            "128k"
-        } else {
-            "—"
-        }
+        self.best().map_or("—", |(label, _)| label)
+    }
+
+    /// 最高可用档位的字节数（接口一档都没报就是 `None`）。
+    pub fn best_size(&self) -> Option<u64> {
+        self.best().map(|(_, size)| size)
     }
 }
 
@@ -275,6 +283,41 @@ mod tests {
         [00:00.00]天黑黑 - 孙燕姿\n\
         [00:03.11]词：廖莹如/吴依铮\n\
         [00:06.22]曲：李偲菘\n";
+
+    #[test]
+    fn best_quality_keeps_label_and_size_together() {
+        let lossless = FileSizes {
+            mp3_128: 3_500_000,
+            mp3_320: 9_000_000,
+            flac: 25_000_000,
+            hires: 0,
+        };
+        assert_eq!(lossless.best_label(), "FLAC");
+        assert_eq!(
+            lossless.best_size(),
+            Some(25_000_000),
+            "标签是 FLAC，大小也必须是那份"
+        );
+
+        let hires = FileSizes {
+            flac: 25_000_000,
+            hires: 150_000_000,
+            ..Default::default()
+        };
+        assert_eq!(hires.best_label(), "Hi-Res");
+        assert_eq!(hires.best_size(), Some(150_000_000));
+
+        let low = FileSizes {
+            mp3_128: 3_500_000,
+            ..Default::default()
+        };
+        assert_eq!(low.best_label(), "128k");
+        assert_eq!(low.best_size(), Some(3_500_000));
+
+        let unknown = FileSizes::default();
+        assert_eq!(unknown.best_label(), "—");
+        assert_eq!(unknown.best_size(), None);
+    }
 
     #[test]
     fn parses_a_real_lrc() {
