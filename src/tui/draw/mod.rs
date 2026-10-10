@@ -129,7 +129,9 @@ impl App {
         }
         self.draw_player(frame, areas.player);
         self.draw_status(frame, areas.status);
-        if self.picker.is_some() {
+        if self.help_open {
+            self.draw_help(frame, area);
+        } else if self.picker.is_some() {
             self.draw_picker(frame, area);
         }
     }
@@ -143,12 +145,13 @@ impl App {
 /// 状态行左侧的键位提示：按当前上下文给三到五个，只写**真的接了行为**的键。
 pub fn hints(context: keys::Context) -> &'static str {
     match context {
-        keys::Context::Menu => "j/k 选菜单 · Enter 进入 · 1-4 直达 · Tab 到主区 · q 退出",
+        keys::Context::Menu => "j/k 选菜单 · Enter 进入 · 1-4 直达 · Tab 到主区 · ? 帮助",
         keys::Context::Content => {
-            "Enter 播放 · Space 暂停 · n/b 切歌 · f 收藏 · d 下载 · Esc 返回"
+            "Enter 播放 · Space 暂停 · n/b 切歌 · f 收藏 · p 加歌单 · ? 帮助"
         }
         keys::Context::SearchInput => "输入关键词 · Enter 搜索 · Esc 退出输入",
         keys::Context::PlaylistPicker => "j/k 选歌单 · Enter 确认 · Esc 取消",
+        keys::Context::HelpOverlay => "Esc 或 ? 关闭帮助",
     }
 }
 
@@ -270,6 +273,18 @@ mod tests {
         assert_eq!(narrow.menu.height, 1, "窄屏菜单只有一行");
         assert_eq!(narrow.menu.width, 90, "页签行横跨全宽");
         assert_eq!(narrow.content.width, 90, "主区也吃满宽");
+    }
+
+    #[test]
+    fn help_overlay_lists_keys_for_the_current_screen() {
+        let (mut app, _runtime) = test_app();
+        app.nav.switch_menu(Menu::Playlists);
+        app.apply(crate::tui::keys::Action::Help);
+        let text = frame_flat(&mut app, 160, 40);
+        assert!(text.contains("帮助"), "浮层标题");
+        assert!(text.contains("全局Tab焦点"), "全局键位：{text}");
+        assert!(text.contains("歌单Enter进入曲目"), "当前屏那一行要跟着菜单变：{text}");
+        assert!(text.contains("关闭Esc或?"), "关闭方式");
     }
 
     #[test]

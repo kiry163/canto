@@ -13,6 +13,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Quit,
+    /// `?`：帮助浮层开 / 关。
+    Help,
     /// 数字键直达菜单项（下标对应 `Menu::ALL`）。
     Menu(usize),
     Up,
@@ -53,8 +55,10 @@ pub enum Context {
     Content,
     /// 搜索输入框正在吃键。
     SearchInput,
-    /// `a` 弹出的歌单选择框。
+    /// `p` 弹出的歌单选择框。
     PlaylistPicker,
+    /// 帮助浮层。
+    HelpOverlay,
 }
 
 /// 键位映射。`None` = 这个键在当前上下文没有含义（调用方忽略）。
@@ -70,6 +74,10 @@ pub fn resolve(context: Context, key: KeyEvent) -> Option<Action> {
             KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Some(Action::InputChar(character))
             }
+            _ => None,
+        },
+        Context::HelpOverlay => match key.code {
+            KeyCode::Esc | KeyCode::Char('?') | KeyCode::F(1) => Some(Action::Help),
             _ => None,
         },
         Context::PlaylistPicker => match key.code {
@@ -90,6 +98,7 @@ fn common(key: KeyEvent, context: Context) -> Option<Action> {
         // 数字键从任何焦点位置直达菜单项（后台菜单的惯例）。
         KeyCode::Char(digit @ '1'..='4') => Some(Action::Menu(digit as usize - '1' as usize)),
         KeyCode::Char('q') => Some(Action::Quit),
+        KeyCode::Char('?') | KeyCode::F(1) => Some(Action::Help),
         KeyCode::Tab => Some(Action::FocusNext),
         KeyCode::BackTab => Some(Action::FocusPrev),
         KeyCode::Char('j') | KeyCode::Down => Some(Action::Down),
@@ -108,7 +117,8 @@ fn common(key: KeyEvent, context: Context) -> Option<Action> {
         KeyCode::Right | KeyCode::Char('l') => Some(Action::SeekForward),
         KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Char('.') => Some(Action::VolumeUp),
         KeyCode::Char('-') | KeyCode::Char(',') => Some(Action::VolumeDown),
-        KeyCode::Char('a') => Some(Action::AddToPlaylist),
+        // `a`/`A` 留给队列（追加 / 插队，Task 11 接上）；加进歌单搬到 `p`。
+        KeyCode::Char('p') => Some(Action::AddToPlaylist),
         KeyCode::Char('x') => Some(Action::RemoveFromPlaylist),
         KeyCode::Char('f') => Some(Action::Favorite),
         KeyCode::Char('d') => Some(Action::Download),
@@ -181,7 +191,7 @@ mod tests {
             assert_eq!(press(context, KeyCode::Char('n')), Some(Action::Next));
             assert_eq!(press(context, KeyCode::Char(' ')), Some(Action::PlayPause));
             assert_eq!(press(context, KeyCode::Enter), Some(Action::Enter));
-            assert_eq!(press(context, KeyCode::Char('a')), Some(Action::AddToPlaylist));
+            assert_eq!(press(context, KeyCode::Char('p')), Some(Action::AddToPlaylist));
             assert_eq!(press(context, KeyCode::Tab), Some(Action::FocusNext));
         }
     }
@@ -215,9 +225,22 @@ mod tests {
     }
 
     #[test]
+    fn help_overlay_opens_from_both_panes_and_only_esc_or_question_closes_it() {
+        for context in [Context::Menu, Context::Content] {
+            assert_eq!(press(context, KeyCode::Char('?')), Some(Action::Help));
+            assert_eq!(press(context, KeyCode::F(1)), Some(Action::Help));
+        }
+        assert_eq!(press(Context::HelpOverlay, KeyCode::Esc), Some(Action::Help));
+        assert_eq!(press(Context::HelpOverlay, KeyCode::Char('?')), Some(Action::Help));
+        assert_eq!(press(Context::HelpOverlay, KeyCode::Char('a')), None, "浮层吞键");
+        assert_eq!(press(Context::HelpOverlay, KeyCode::Enter), None, "浮层里的回车也不该穿透");
+    }
+
+    #[test]
     fn unbound_keys_stay_unbound() {
         assert_eq!(press(Context::Content, KeyCode::Char('z')), None);
         assert_eq!(press(Context::Content, KeyCode::Char('m')), None, "播放模式随队列一起接");
-        assert_eq!(press(Context::Menu, KeyCode::Char('?')), None, "帮助浮层在 Task 9");
+        assert_eq!(press(Context::Content, KeyCode::Char('a')), None, "a 留给队列，Task 11 接");
+        assert_eq!(press(Context::PlaylistPicker, KeyCode::Char('?')), None, "选择框里不开帮助");
     }
 }

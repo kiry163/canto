@@ -370,7 +370,9 @@ pub(super) struct App {
     /// 歌词面板是否展开。
     pub(super) show_lyric: bool,
     pub(super) lyric_state: ListState,
-    /// `Some` 表示正在挑歌单（`a` 键）：候选歌单、高亮、要加进去的歌。
+    /// 帮助浮层开着（`?`）。
+    pub(super) help_open: bool,
+    /// `Some` 表示正在挑歌单（`p` 键）：候选歌单、高亮、要加进去的歌。
     pub(super) picker: Option<(Vec<Playlist>, ListState, Song)>,
     /// 正在跑的下载。
     pub(super) transfer: Option<Arc<Mutex<Transfer>>>,
@@ -405,6 +407,7 @@ impl App {
             lyric_loading: false,
             show_lyric: true,
             lyric_state: ListState::default(),
+            help_open: false,
             picker: None,
             transfer: None,
             loading: None,
@@ -862,6 +865,10 @@ impl App {
 
     /// 当前按键上下文：模态 > 输入态 > 焦点所在。
     pub(super) fn context(&self) -> keys::Context {
+        // 模态优先：帮助在最上层，其次是选择框，再是输入态。
+        if self.help_open {
+            return keys::Context::HelpOverlay;
+        }
         if self.picker.is_some() {
             return keys::Context::PlaylistPicker;
         }
@@ -874,9 +881,10 @@ impl App {
         }
     }
 
-    fn apply(&mut self, action: keys::Action) {
+    pub(super) fn apply(&mut self, action: keys::Action) {
         match action {
             keys::Action::Quit => self.quit = true,
+            keys::Action::Help => self.help_open = !self.help_open,
             keys::Action::Menu(index) => {
                 if let Some(menu) = Menu::ALL.get(index).copied() {
                     self.switch_menu(menu);
@@ -930,7 +938,9 @@ impl App {
             keys::Action::InputCancel => self.nav.end_search_input(),
             keys::Action::Back => {
                 // 顺序：先关模态，再退输入态，最后退一层视图。
-                if self.picker.is_some() {
+                if self.help_open {
+                    self.help_open = false;
+                } else if self.picker.is_some() {
                     self.picker = None;
                 } else if self.nav.search_input {
                     self.nav.end_search_input();
@@ -1172,5 +1182,43 @@ mod tests {
         nav.focus = Focus::Content;
         nav.move_focus_by(1);
         assert_eq!(nav.favorites.state.selected(), Some(1));
+    }
+
+    #[test]
+    fn help_overlay_toggles_and_swallows_everything_else() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        assert_eq!(app.context(), keys::Context::Menu);
+        app.apply(keys::Action::Help);
+        assert!(app.help_open);
+        assert_eq!(app.context(), keys::Context::HelpOverlay);
+        app.apply(keys::Action::Help);
+        assert!(!app.help_open);
+        assert_eq!(app.context(), keys::Context::Menu, "关掉后回到原来的焦点");
+    }
+
+    #[test]
+    fn digits_switch_menu_and_move_focus_to_content() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.apply(keys::Action::Menu(2));
+        assert_eq!(app.nav.menu, Menu::Search);
+        assert_eq!(app.nav.focus, Focus::Content);
+        assert!(app.nav.search_input, "进搜索屏直接能输入");
+        app.apply(keys::Action::Menu(1));
+        assert_eq!(app.nav.menu, Menu::Playlists);
+        assert!(!app.nav.search_input, "离开搜索屏要退出输入态");
+    }
+
+    #[test]
+    fn p_opens_the_playlist_picker_and_a_stays_unbound_until_the_queue_lands() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.nav.switch_menu(Menu::Favorites);
+        app.nav.favorites.items = vec![test_song("a")];
+        app.nav.favorites.select_first();
+        app.nav.playlists.items = vec![crate::tui::test_support::test_playlist("1", "嗯")];
+        app.apply(keys::Action::AddToPlaylist);
+        assert!(app.picker.is_some(), "p 打开歌单选择框");
+        assert_eq!(app.context(), keys::Context::PlaylistPicker);
+        app.apply(keys::Action::Back);
+        assert!(app.picker.is_none(), "Esc 关掉选择框");
     }
 }
