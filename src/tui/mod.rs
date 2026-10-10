@@ -16,6 +16,9 @@ pub mod draw;
 pub mod keys;
 pub mod state;
 
+#[cfg(test)]
+pub mod test_support;
+
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::time::Duration as StdDuration;
 

@@ -861,7 +861,7 @@ impl App {
     }
 
     /// 当前按键上下文：模态 > 输入态 > 焦点所在。
-    fn context(&self) -> keys::Context {
+    pub(super) fn context(&self) -> keys::Context {
         if self.picker.is_some() {
             return keys::Context::PlaylistPicker;
         }
@@ -1049,32 +1049,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::FileSizes;
-
-    fn test_song(mid: &str) -> Song {
-        Song {
-            mid: mid.to_string(),
-            song_id: None,
-            media_mid: None,
-            title: format!("歌 {mid}"),
-            singers: "歌手".to_string(),
-            album_mid: String::new(),
-            album_name: String::new(),
-            duration_secs: 200,
-            sizes: FileSizes::default(),
-        }
-    }
-
-    fn playlist(id: &str, name: &str) -> Playlist {
-        Playlist {
-            id: id.to_string(),
-            dir_id: 1,
-            name: name.to_string(),
-            song_count: 3,
-            cover_url: None,
-            is_favorites: false,
-        }
-    }
+    use crate::tui::test_support::{test_playlist as playlist, test_song};
 
     /// 菜单切换是「换一屏内容」，不是「清空一屏内容」：切走再切回，选中位置要还在。
     #[test]
