@@ -20,7 +20,7 @@ use std::time::Duration as StdDuration;
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Gauge, List, ListItem, ListState, Paragraph};
@@ -914,6 +914,7 @@ impl App {
             };
             frame.render_widget(
                 Paragraph::new(text)
+                    .alignment(Alignment::Center)
                     .style(Style::new().fg(Color::DarkGray))
                     .block(block),
                 area,
@@ -924,10 +925,12 @@ impl App {
             .lines
             .iter()
             .map(|line| {
-                let mut rows = vec![Line::from(line.text.clone())];
+                let mut rows = vec![Line::from(line.text.clone()).alignment(Alignment::Center)];
                 if let Some(translation) = &line.translation {
                     rows.push(
-                        Line::from(translation.clone()).style(Style::new().fg(Color::DarkGray)),
+                        Line::from(translation.clone())
+                            .style(Style::new().fg(Color::DarkGray))
+                            .alignment(Alignment::Center),
                     );
                 }
                 ListItem::new(rows)
@@ -960,10 +963,15 @@ impl App {
             Phase::Paused => "已暂停".to_string(),
             Phase::Failed(message) => format!("失败：{message}"),
         };
-        let quality = snapshot
-            .quality
-            .map(|quality| format!("[{}]", quality.label()))
-            .unwrap_or_default();
+        // 档位后面跟实际文件的字节数：同一档位不同歌、不同 CDN 文件大小差很多，
+        // 一眼能看出「这首为什么大」。
+        let quality = match (snapshot.quality, snapshot.size) {
+            (Some(quality), Some(size)) => {
+                format!("[{} {}]", quality.label(), format_size(size))
+            }
+            (Some(quality), None) => format!("[{}]", quality.label()),
+            (None, _) => String::new(),
+        };
         let queue = if self.queue.is_empty() {
             String::new()
         } else {
@@ -1047,6 +1055,16 @@ fn highlight() -> Style {
 /// 列表行与引擎快照共用的显示串（用来对齐"正在播的是哪一行"）。
 fn song_label(song: &Song) -> String {
     format!("{} — {}", song.title, song.singers)
+}
+
+/// 文件大小（十进制 MB，跟下载进度的写法一致）。
+fn format_size(bytes: u64) -> String {
+    const MIB: f64 = 1_048_576.0;
+    if bytes as f64 >= MIB {
+        format!("{:.1}MB", bytes as f64 / MIB)
+    } else {
+        format!("{}KB", bytes / 1024)
+    }
 }
 
 fn format_duration(duration: StdDuration) -> String {

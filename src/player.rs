@@ -59,6 +59,8 @@ pub struct Snapshot {
     pub title: Option<String>,
     /// 实际开出来的档位（`Buffering` 时还是 `None`）。
     pub quality: Option<Quality>,
+    /// 实际开出来的那份文件的字节数（拿不到 `Content-Length` 就是 `None`）。
+    pub size: Option<u64>,
     pub phase: Phase,
     pub position: Duration,
     /// 容器声明的总时长，拿不到就是 `None`（部分 MP3）。
@@ -74,6 +76,7 @@ impl Default for Snapshot {
         Self {
             title: None,
             quality: None,
+            size: None,
             phase: Phase::Idle,
             position: Duration::ZERO,
             duration: None,
@@ -245,21 +248,23 @@ fn handle(
             update(state, |snapshot| {
                 snapshot.title = Some(title);
                 snapshot.quality = None;
+                snapshot.size = None;
                 snapshot.phase = Phase::Buffering;
                 snapshot.position = Duration::ZERO;
                 snapshot.duration = None;
                 snapshot.just_finished = false;
             });
             match open(&track.candidates) {
-                Ok((decoder, quality, duration)) => {
+                Ok(opened) => {
                     let new_player = Player::connect_new(mixer);
                     new_player.set_volume(*volume);
-                    new_player.append(decoder);
-                    tracing::info!("播放中：{}", quality.label());
+                    new_player.append(opened.decoder);
+                    tracing::info!("播放中：{}", opened.quality.label());
                     update(state, |snapshot| {
-                        snapshot.quality = Some(quality);
+                        snapshot.quality = Some(opened.quality);
+                        snapshot.size = opened.size;
                         snapshot.phase = Phase::Playing;
-                        snapshot.duration = duration;
+                        snapshot.duration = opened.duration;
                     });
                     *player = Some(new_player);
                 }
@@ -360,8 +365,16 @@ fn update(state: &Arc<Mutex<Snapshot>>, act: impl FnOnce(&mut Snapshot)) {
     act(&mut snapshot);
 }
 
+/// 开出来的那份流：解码器 + 它是哪个档位、多大、多长。
+struct Opened {
+    decoder: Decoder<MediaStream>,
+    quality: Quality,
+    size: Option<u64>,
+    duration: Option<Duration>,
+}
+
 /// 逐个候选去开，返回第一个能解码的。
-fn open(candidates: &[Candidate]) -> Result<(Decoder<MediaStream>, Quality, Option<Duration>)> {
+fn open(candidates: &[Candidate]) -> Result<Opened> {
     // 逐个候选真去开，第一个能解码的胜出（服务端对不存在的文件也会给 purl）。
     let mut failures = Vec::new();
     for candidate in candidates {
@@ -373,10 +386,16 @@ fn open(candidates: &[Candidate]) -> Result<(Decoder<MediaStream>, Quality, Opti
                 continue;
             }
         };
+        let size = stream.total();
         match Decoder::new(stream) {
             Ok(decoder) => {
                 let duration = decoder.total_duration();
-                return Ok((decoder, candidate.quality, duration));
+                return Ok(Opened {
+                    decoder,
+                    quality: candidate.quality,
+                    size,
+                    duration,
+                });
             }
             Err(error) => {
                 tracing::debug!("{} 档解不了码：{error}", candidate.quality.label());
