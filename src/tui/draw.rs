@@ -10,10 +10,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Gauge, List, ListItem, Paragraph};
 
-use crate::model::Song;
 use crate::player::Phase;
 
-use super::state::{App, Focus};
+use super::state::{App, Focus, Menu};
 
 impl App {
 
@@ -27,7 +26,7 @@ impl App {
         .split(frame.area());
         let columns =
             Layout::horizontal([Constraint::Length(26), Constraint::Min(20)]).split(rows[0]);
-        self.draw_playlists(frame, columns[0]);
+        self.draw_menu(frame, columns[0]);
         // 右栏：曲目 + 歌词（终端太矮时不展开，免得曲目只剩一两行）。
         let lyric_height = if self.show_lyric && columns[1].height >= 12 {
             (columns[1].height / 3).max(5)
@@ -36,7 +35,7 @@ impl App {
         };
         let right = Layout::vertical([Constraint::Min(5), Constraint::Length(lyric_height)])
             .split(columns[1]);
-        self.draw_tracks(frame, right[0]);
+        self.draw_content(frame, right[0]);
         if let Some(area) = right.get(1).filter(|_| lyric_height > 0) {
             self.draw_lyric(frame, *area);
         }
@@ -71,38 +70,97 @@ impl App {
         frame.render_stateful_widget(list, popup, state);
     }
 
-    fn draw_playlists(&mut self, frame: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self
-            .playlists
+    /// 左侧菜单：四项 + 底部当前账号。它是「我在哪」，不是歌单列表。
+    fn draw_menu(&mut self, frame: &mut Frame, area: Rect) {
+        let focused = self.nav.focus == Focus::Menu;
+        let items: Vec<ListItem> = Menu::ALL
             .iter()
-            .map(|playlist| {
-                let marker = if playlist.is_favorites { "♥" } else { " " };
-                ListItem::new(format!(
-                    "{marker} {:>5}  {}",
-                    playlist.song_count, playlist.name
-                ))
+            .map(|menu| {
+                let icon = match menu {
+                    Menu::Favorites => "♥",
+                    Menu::Playlists => "≡",
+                    Menu::Search => "⌕",
+                    Menu::History => "↺",
+                };
+                ListItem::new(format!("{icon} {}", menu.title()))
             })
             .collect();
+        let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area);
+        // 高亮跟着当前菜单项走（菜单项就是当前这一屏，不需要单独的选中态）。
+        self.menu_state.select(Some(self.nav.menu.index()));
         let list = List::new(items)
-            .block(focused_block(" 歌单 ", self.focus == Focus::Playlists))
+            .block(focused_block(" 菜单 ", focused))
             .highlight_style(highlight())
             .highlight_symbol("▶ ");
-        frame.render_stateful_widget(list, area, &mut self.playlist_state);
+        frame.render_stateful_widget(list, rows[0], &mut self.menu_state);
+
+        let identity = crate::session::jar()
+            .state()
+            .identity
+            .unwrap_or_else(|| "未登录".to_string());
+        frame.render_widget(
+            Paragraph::new(format!(" {identity}")).style(Style::new().fg(Color::DarkGray)),
+            rows[1],
+        );
     }
 
-    fn draw_tracks(&mut self, frame: &mut Frame, area: Rect) {
-        let (title, playing) = (
-            match &self.shown {
-                Some((id, name)) => format!(" {name}（{id}） "),
-                None => " 曲目 ".to_string(),
-            },
-            self.now_playing_label(),
-        );
+    /// 主区：按菜单项渲染当前这一屏，标题写面包屑。
+    fn draw_content(&mut self, frame: &mut Frame, area: Rect) {
+        let title = format!(" {} ", self.nav.breadcrumb.join(" › "));
+        let focused = self.nav.focus == Focus::Content;
+        match self.nav.menu {
+            Menu::Playlists if self.nav.shown.is_none() => {
+                let items: Vec<ListItem> = self
+                    .nav
+                    .playlists
+                    .items
+                    .iter()
+                    .map(|playlist| {
+                        let marker = if playlist.is_favorites { "♥" } else { " " };
+                        ListItem::new(format!(
+                            "{marker} {:>5}  {}",
+                            playlist.song_count, playlist.name
+                        ))
+                    })
+                    .collect();
+                let list = List::new(items)
+                    .block(focused_block(&title, focused))
+                    .highlight_style(highlight())
+                    .highlight_symbol("▶ ");
+                frame.render_stateful_widget(list, area, &mut self.nav.playlists.state);
+            }
+            Menu::Search => {
+                // 输入行占第一行（Task 7 把它做成常驻），结果在下面。
+                let rows =
+                    Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area);
+                let prompt = match &self.input {
+                    Some(buffer) => Line::from(vec![
+                        Span::styled("搜索：", Style::new().fg(Color::Yellow)),
+                        Span::raw(buffer.clone()),
+                        Span::styled("▏", Style::new().fg(Color::Yellow)),
+                    ]),
+                    None => Line::from(Span::styled(
+                        "按 / 输入关键词",
+                        Style::new().fg(Color::DarkGray),
+                    )),
+                };
+                frame.render_widget(Paragraph::new(prompt), rows[0]);
+                self.draw_songs(frame, rows[1], &title, focused);
+            }
+            _ => self.draw_songs(frame, area, &title, focused),
+        }
+    }
+
+    /// 曲目列表：所有「装着一堆歌」的屏共用（收藏 / 歌单曲目 / 搜索 / 历史）。
+    fn draw_songs(&mut self, frame: &mut Frame, area: Rect, title: &str, focused: bool) {
+        let playing = self.now_playing_mid();
         let items: Vec<ListItem> = self
-            .tracks
+            .nav
+            .song_view()
+            .items
             .iter()
             .map(|song| {
-                let marker = if Some(song_label(song)) == playing {
+                let marker = if Some(song.mid.as_str()) == playing.as_deref() {
                     "♪"
                 } else {
                     " "
@@ -119,11 +177,13 @@ impl App {
                 ))
             })
             .collect();
+        let mut state = std::mem::take(&mut self.nav.song_view_mut().state);
         let list = List::new(items)
-            .block(focused_block(&title, self.focus == Focus::Tracks))
+            .block(focused_block(title, focused))
             .highlight_style(highlight())
             .highlight_symbol("▶ ");
-        frame.render_stateful_widget(list, area, &mut self.track_state);
+        frame.render_stateful_widget(list, area, &mut state);
+        self.nav.song_view_mut().state = state;
     }
 
     /// 歌词面板：当前行高亮，跟着播放位置走，翻译跟在本行下面。
@@ -172,13 +232,16 @@ impl App {
         frame.render_stateful_widget(list, area, &mut self.lyric_state);
     }
 
-    /// 正在播的那首的「标题 — 歌手」（没在播/播完就返回 `None`）。
-    fn now_playing_label(&self) -> Option<String> {
+    /// 正在播的那首的 mid（没在播/播完就是 `None`）。
+    ///
+    /// 按 mid 比对而不是「标题 — 歌手」字符串：QQ 的 mid 全局唯一，同歌手的歌
+    /// 不再互相误标。
+    fn now_playing_mid(&self) -> Option<String> {
         let snapshot = self.engine.snapshot();
         if snapshot.phase == Phase::Idle {
             return None;
         }
-        snapshot.title
+        snapshot.mid
     }
 
     fn draw_status(&self, frame: &mut Frame, player_area: Rect, hint_area: Rect) {
@@ -278,11 +341,6 @@ fn highlight() -> Style {
     Style::new()
         .bg(Color::Indexed(236))
         .add_modifier(Modifier::BOLD)
-}
-
-/// 列表行与引擎快照共用的显示串（用来对齐"正在播的是哪一行"）。
-fn song_label(song: &Song) -> String {
-    format!("{} — {}", song.title, song.singers)
 }
 
 /// 文件大小（十进制 MB，跟下载进度的写法一致）。

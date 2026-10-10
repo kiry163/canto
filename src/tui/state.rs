@@ -25,6 +25,8 @@ const MAX_AUTO_SKIPS: u32 = 3;
 /// 后台任务的回话。
 pub(super) enum Msg {
     Playlists(Result<Vec<Playlist>>),
+    /// 「我喜欢」的曲目（菜单第一项，启动就拉）。
+    Favorites(Result<Vec<Song>>),
     Tracks {
         playlist_id: String,
         result: Result<(Playlist, Vec<Song>)>,
@@ -55,10 +57,357 @@ pub(super) enum Msg {
     },
 }
 
+/// 焦点所在的区域。菜单与主区之外，歌词在 Task 8 加进来。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Focus {
+    Menu,
+    Content,
+}
+
+/// 左侧菜单项。顺序即数字键 `1`–`4` 的顺序。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Menu {
+    Favorites,
     Playlists,
-    Tracks,
+    Search,
+    History,
+}
+
+impl Menu {
+    pub const ALL: [Menu; 4] = [Menu::Favorites, Menu::Playlists, Menu::Search, Menu::History];
+
+    pub fn index(self) -> usize {
+        Menu::ALL.iter().position(|item| *item == self).unwrap_or(0)
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Menu::Favorites => "我的收藏",
+            Menu::Playlists => "我的歌单",
+            Menu::Search => "搜索",
+            Menu::History => "历史",
+        }
+    }
+}
+
+/// 一屏列表的通用状态：条目 + 选中位置 + 这一屏的错误。
+#[derive(Debug)]
+pub(super) struct ListView<T> {
+    pub items: Vec<T>,
+    pub state: ListState,
+    /// 这一屏自己的错误（别的屏没事）。
+    pub error: Option<String>,
+}
+
+impl<T> Default for ListView<T> {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            state: ListState::default(),
+            error: None,
+        }
+    }
+}
+
+impl<T> ListView<T> {
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    pub fn selected(&self) -> Option<&T> {
+        self.state.selected().and_then(|index| self.items.get(index))
+    }
+
+    pub fn select_first(&mut self) {
+        self.state.select((!self.items.is_empty()).then_some(0));
+    }
+
+    pub fn move_by(&mut self, delta: isize) {
+        if self.items.is_empty() {
+            return;
+        }
+        let current = self.state.selected().unwrap_or(0) as isize;
+        let next = (current + delta).clamp(0, self.items.len() as isize - 1);
+        self.state.select(Some(next as usize));
+    }
+
+    pub fn edge(&mut self, last: bool) {
+        if !self.items.is_empty() {
+            self.state.select(Some(if last { self.items.len() - 1 } else { 0 }));
+        }
+    }
+}
+
+/// 界面导航状态：哪个菜单项、焦点在哪、四屏各自的列表与选中位置。
+///
+/// 每个菜单项各存一份列表，所以「切走再切回」不会丢上下文——这正是旧界面
+/// 「搜一下歌单就没了」的修法。
+#[derive(Debug)]
+pub(super) struct Nav {
+    pub menu: Menu,
+    pub focus: Focus,
+    pub favorites: ListView<Song>,
+    pub playlists: ListView<Playlist>,
+    /// 「我的歌单 › 某歌单」这一层的曲目。
+    pub tracks: ListView<Song>,
+    /// 搜索结果单独一份：跟 `tracks` 共用会把正在看的歌单曲目冲掉。
+    pub search_results: ListView<Song>,
+    pub history_view: ListView<Song>,
+    /// 当前曲目层对应的歌单（`None` = 不在嵌套层里）。
+    pub shown: Option<(String, String)>,
+    pub breadcrumb: Vec<String>,
+    /// 这两屏的数据拉过没有（空列表也可能是「真的没有」，不能靠 `is_empty` 判断）。
+    pub favorites_loaded: bool,
+    pub playlists_loaded: bool,
+}
+
+impl Nav {
+    pub fn new() -> Self {
+        Self {
+            menu: Menu::Favorites,
+            focus: Focus::Menu,
+            favorites: ListView::default(),
+            playlists: ListView::default(),
+            tracks: ListView::default(),
+            search_results: ListView::default(),
+            history_view: ListView::default(),
+            shown: None,
+            breadcrumb: vec!["我的收藏".to_string()],
+            favorites_loaded: false,
+            playlists_loaded: false,
+        }
+    }
+
+    /// 切菜单项：内容换屏，但每屏自己的选中位置都留着。
+    pub fn switch_menu(&mut self, menu: Menu) {
+        self.menu = menu;
+        self.focus = Focus::Content;
+        self.breadcrumb = vec![menu.title().to_string()];
+    }
+
+    /// 主区这一屏的「来源名」，给队列显示用。
+    pub fn origin_name(&self) -> String {
+        match (self.menu, &self.shown) {
+            (Menu::Playlists, Some((_, name))) => name.clone(),
+            (menu, _) => menu.title().to_string(),
+        }
+    }
+
+    /// 焦点在主区时，能不能进入下一层（歌单列表 → 曲目）。
+    pub fn can_enter_depth(&self) -> bool {
+        self.menu == Menu::Playlists && self.shown.is_none()
+    }
+
+    /// 进入「我的歌单 › 嗯」这一层：清掉旧曲目、写面包屑。
+    pub fn push_tracks(&mut self, id: &str, name: &str, songs: Vec<Song>) {
+        self.shown = Some((id.to_string(), name.to_string()));
+        self.tracks = ListView {
+            items: songs,
+            state: ListState::default(),
+            error: None,
+        };
+        self.tracks.select_first();
+        self.breadcrumb = vec!["我的歌单".to_string(), name.to_string()];
+    }
+
+    /// 请求已发出、结果还没回来时先进入这一层（曲目留空，等 `Msg::Tracks` 填）。
+    pub fn begin_tracks(&mut self, id: &str, name: &str) {
+        self.push_tracks(id, name, Vec::new());
+    }
+
+    /// 返回上一层。返回 `true` 表示这次的 Esc 被吃掉了。
+    pub fn pop_tracks(&mut self) -> bool {
+        if self.shown.take().is_none() {
+            return false;
+        }
+        self.tracks = ListView::default();
+        self.breadcrumb = vec!["我的歌单".to_string()];
+        true
+    }
+
+    /// 主区这一屏的曲目列表（跟焦点无关，绘制用）。
+    pub fn song_view(&self) -> &ListView<Song> {
+        match self.menu {
+            Menu::Favorites => &self.favorites,
+            Menu::Playlists => &self.tracks,
+            Menu::Search => &self.search_results,
+            Menu::History => &self.history_view,
+        }
+    }
+
+    /// 上面那份列表的可变版本。
+    pub fn song_view_mut(&mut self) -> &mut ListView<Song> {
+        match self.menu {
+            Menu::Favorites => &mut self.favorites,
+            Menu::Playlists => &mut self.tracks,
+            Menu::Search => &mut self.search_results,
+            Menu::History => &mut self.history_view,
+        }
+    }
+
+    /// 焦点在主区时「Enter / a / f / d 作用的那份曲目列表」。
+    pub fn focused_songs(&self) -> Option<&ListView<Song>> {
+        if self.focus != Focus::Content {
+            return None;
+        }
+        match self.menu {
+            Menu::Favorites => Some(&self.favorites),
+            Menu::Playlists => self.shown.as_ref().map(|_| &self.tracks),
+            Menu::Search => Some(&self.search_results),
+            Menu::History => Some(&self.history_view),
+        }
+    }
+
+    /// 上面那份列表的可变版本。
+    pub fn focused_songs_mut(&mut self) -> Option<&mut ListView<Song>> {
+        if self.focus != Focus::Content {
+            return None;
+        }
+        match self.menu {
+            Menu::Favorites => Some(&mut self.favorites),
+            Menu::Playlists => self.shown.as_ref().map(|_| &mut self.tracks),
+            Menu::Search => Some(&mut self.search_results),
+            Menu::History => Some(&mut self.history_view),
+        }
+    }
+
+    pub fn move_focus_by(&mut self, delta: isize) {
+        if self.menu == Menu::Playlists && self.shown.is_none() {
+            self.playlists.move_by(delta);
+            return;
+        }
+        if let Some(view) = self.focused_songs_mut() {
+            view.move_by(delta);
+        }
+    }
+
+    pub fn focus_edge(&mut self, last: bool) {
+        if self.menu == Menu::Playlists && self.shown.is_none() {
+            self.playlists.edge(last);
+            return;
+        }
+        if let Some(view) = self.focused_songs_mut() {
+            view.edge(last);
+        }
+    }
+
+    pub fn page_focus(&mut self, pages: isize) {
+        // 一屏按 10 行挪：终端高度可变，10 行在常见窗口里都不到一屏，够用且不越界。
+        self.move_focus_by(pages * 10);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::FileSizes;
+
+    fn test_song(mid: &str) -> Song {
+        Song {
+            mid: mid.to_string(),
+            song_id: None,
+            media_mid: None,
+            title: format!("歌 {mid}"),
+            singers: "歌手".to_string(),
+            album_mid: String::new(),
+            album_name: String::new(),
+            duration_secs: 200,
+            sizes: FileSizes::default(),
+        }
+    }
+
+    fn playlist(id: &str, name: &str) -> Playlist {
+        Playlist {
+            id: id.to_string(),
+            dir_id: 1,
+            name: name.to_string(),
+            song_count: 3,
+            cover_url: None,
+            is_favorites: false,
+        }
+    }
+
+    /// 菜单切换是「换一屏内容」，不是「清空一屏内容」：切走再切回，选中位置要还在。
+    #[test]
+    fn switching_menus_keeps_each_views_selection() {
+        let mut nav = Nav::new();
+        nav.favorites.items = vec![test_song("a"), test_song("b"), test_song("c")];
+        nav.favorites.select_first();
+        nav.switch_menu(Menu::Favorites);
+        nav.favorites.move_by(2);
+        assert_eq!(nav.favorites.selected().map(|s| s.mid.as_str()), Some("c"));
+
+        nav.switch_menu(Menu::Playlists);
+        assert_eq!(nav.breadcrumb, ["我的歌单"]);
+        nav.switch_menu(Menu::Favorites);
+        assert_eq!(
+            nav.favorites.selected().map(|s| s.mid.as_str()),
+            Some("c"),
+            "切回来选中位置该保留"
+        );
+    }
+
+    #[test]
+    fn entering_a_playlist_pushes_a_breadcrumb_and_esc_pops_it() {
+        let mut nav = Nav::new();
+        nav.switch_menu(Menu::Playlists);
+        nav.playlists.items = vec![playlist("1", "嗯"), playlist("2", "循环")];
+        nav.playlists.select_first();
+        assert!(nav.can_enter_depth(), "歌单列表是最上一层，可以往下进");
+        let target = nav.playlists.selected().cloned().expect("选中了歌单");
+        assert_eq!(target.id, "1");
+        nav.begin_tracks(&target.id, &target.name);
+        assert_eq!(nav.breadcrumb, ["我的歌单", "嗯"]);
+        assert!(!nav.can_enter_depth(), "已经在曲目层里了");
+
+        nav.push_tracks("1", "嗯", vec![test_song("a")]);
+        assert_eq!(nav.tracks.items.len(), 1);
+        assert!(nav.pop_tracks(), "Esc 该返回歌单列表");
+        assert_eq!(nav.breadcrumb, ["我的歌单"]);
+        assert_eq!(nav.tracks.items.len(), 0, "退回上一层要清掉曲目");
+        assert!(!nav.pop_tracks(), "已经在最上层，再返回没有动作");
+    }
+
+    #[test]
+    fn paging_moves_ten_rows_and_stops_at_the_end() {
+        let mut nav = Nav::new();
+        nav.switch_menu(Menu::Favorites);
+        nav.favorites.items = (0..25).map(|index| test_song(&format!("m{index}"))).collect();
+        nav.favorites.select_first();
+        nav.page_focus(1);
+        assert_eq!(nav.favorites.state.selected(), Some(10));
+        nav.page_focus(1);
+        nav.page_focus(1);
+        assert_eq!(nav.favorites.state.selected(), Some(24), "到尾就停，不越界");
+        nav.page_focus(-1);
+        assert_eq!(nav.favorites.state.selected(), Some(14));
+    }
+
+    /// 搜索把结果放在自己的列表里，不会把正在看的歌单曲目冲掉。
+    #[test]
+    fn search_results_have_their_own_slot() {
+        let mut nav = Nav::new();
+        nav.switch_menu(Menu::Playlists);
+        nav.push_tracks("1", "嗯", vec![test_song("keep")]);
+        nav.search_results.items = vec![test_song("found")];
+        nav.switch_menu(Menu::Search);
+        assert_eq!(nav.focused_songs().unwrap().items[0].mid, "found");
+        nav.switch_menu(Menu::Playlists);
+        assert_eq!(nav.tracks.items[0].mid, "keep", "歌单曲目没被搜索顶掉");
+    }
+
+    /// 焦点在菜单上时，主区列表不该被 `j`/`k` 动到。
+    #[test]
+    fn movement_only_touches_the_focused_list() {
+        let mut nav = Nav::new();
+        nav.favorites.items = vec![test_song("a"), test_song("b")];
+        nav.favorites.select_first();
+        nav.focus = Focus::Menu;
+        assert!(nav.focused_songs().is_none());
+        nav.focus = Focus::Content;
+        nav.move_focus_by(1);
+        assert_eq!(nav.favorites.state.selected(), Some(1));
+    }
 }
 
 /// 后台下载的进度（界面每帧读一次）。
@@ -94,13 +443,11 @@ pub(super) struct App {
     /// 启动时载入的配置（音质下限、下载目录、历史上限）。
     pub(super) config: Config,
 
-    pub(super) playlists: Vec<Playlist>,
-    pub(super) playlist_state: ListState,
-    pub(super) tracks: Vec<Song>,
-    pub(super) track_state: ListState,
-    /// 右栏当前显示的是哪个歌单（id, 名字）。
-    pub(super) shown: Option<(String, String)>,
-    pub(super) focus: Focus,
+    /// 菜单列表的高亮位置（每帧跟当前菜单项对齐）。
+    pub(super) menu_state: ListState,
+
+    /// 菜单、焦点、四屏列表与选中位置。
+    pub(super) nav: Nav,
 
     /// 播放队列 = 按下播放那一刻的曲目快照；换歌单不影响它。
     pub(super) queue: Vec<Song>,
@@ -143,12 +490,8 @@ impl App {
             engine,
             tx,
             config,
-            playlists: Vec::new(),
-            playlist_state: ListState::default(),
-            tracks: Vec::new(),
-            track_state: ListState::default(),
-            shown: None,
-            focus: Focus::Playlists,
+            menu_state: ListState::default(),
+            nav: Nav::new(),
             queue: Vec::new(),
             queue_index: 0,
             queue_name: String::new(),
@@ -177,6 +520,32 @@ impl App {
         });
     }
 
+    /// 拉「我喜欢」。它是菜单第一项，启动即拉。
+    pub(super) fn reload_favorites(&mut self) {
+        self.loading = Some("加载「我喜欢」…".to_string());
+        let tx = self.tx.clone();
+        self.handle.spawn(async move {
+            let result = qq::favorites().await.map(|(_, songs)| songs);
+            let _ = tx.send(Msg::Favorites(result));
+        });
+    }
+
+    /// 启动：菜单停在「我的收藏」，并把它拉下来。
+    pub(super) fn load_initial(&mut self) {
+        self.switch_menu(Menu::Favorites);
+    }
+
+    /// 切菜单项。这一屏没拉过数据就顺手拉一次——每屏的选中位置由 `Nav` 留着，
+    /// 所以来回切不会丢上下文。
+    pub(super) fn switch_menu(&mut self, menu: Menu) {
+        self.nav.switch_menu(menu);
+        match menu {
+            Menu::Favorites if !self.nav.favorites_loaded => self.reload_favorites(),
+            Menu::Playlists if !self.nav.playlists_loaded => self.reload_playlists(),
+            _ => {}
+        }
+    }
+
     fn load_tracks(&mut self, id: String, name: String) {
         self.loading = Some(format!("加载《{name}》…"));
         let tx = self.tx.clone();
@@ -194,17 +563,13 @@ impl App {
         });
     }
 
-    /// 下载右栏里选中的那首（含歌词），进度走状态栏。
+    /// 下载选中的那首（含歌词），进度走状态栏。
     fn download_selected(&mut self) {
         if self.transfer.is_some() {
             self.status = "已经有一个下载在跑".to_string();
             return;
         }
-        let Some(song) = self
-            .tracks
-            .get(self.track_state.selected().unwrap_or(0))
-            .cloned()
-        else {
+        let Some(song) = self.selected_song() else {
             return;
         };
         let dir = self.config.download_dir.clone();
@@ -255,11 +620,11 @@ impl App {
         });
     }
 
-    /// 右栏当前选中的那首。
+    /// 焦点所在曲目列表里选中的那首。
     fn selected_song(&self) -> Option<Song> {
-        self.tracks
-            .get(self.track_state.selected().unwrap_or(0))
-            .cloned()
+        self.nav
+            .focused_songs()
+            .and_then(|view| view.selected().cloned())
     }
 
     /// 歌单写入统一入口：后台跑，结果回状态栏。
@@ -312,13 +677,13 @@ impl App {
         let Some(song) = self.selected_song() else {
             return;
         };
-        if self.playlists.is_empty() {
+        if self.nav.playlists.is_empty() {
             self.status = "歌单还没加载出来".to_string();
             return;
         }
         let mut state = ListState::default();
         state.select(Some(0));
-        self.picker = Some((self.playlists.clone(), state, song));
+        self.picker = Some((self.nav.playlists.items.clone(), state, song));
     }
 
     fn confirm_picker(&mut self) {
@@ -352,7 +717,7 @@ impl App {
         let Some(song) = self.selected_song() else {
             return;
         };
-        let Some((id, name)) = self.shown.clone() else {
+        let Some((id, name)) = self.nav.shown.clone() else {
             return;
         };
         // 「我喜欢」在服务端走不通（实测 DelSonglist 一律 80105），早点说清楚。
@@ -360,8 +725,14 @@ impl App {
             self.status = "QQ 服务端不允许接口取消收藏（80105），请在官方客户端操作".to_string();
             return;
         }
-        let Some(playlist) = self.playlists.iter().find(|playlist| playlist.id == id) else {
-            self.status = "右栏不是个人歌单，没法移除".to_string();
+        let Some(playlist) = self
+            .nav
+            .playlists
+            .items
+            .iter()
+            .find(|playlist| playlist.id == id)
+        else {
+            self.status = "当前不是个人歌单，没法移除".to_string();
             return;
         };
         let request = WriteRequest {
@@ -423,18 +794,19 @@ impl App {
     }
 
     /// 用当前右栏的歌单开一个队列并从 `index` 开始播。
+    /// 用当前焦点列表开一个队列并从 `index` 开始播。
     fn play_from_tracks(&mut self, index: usize) {
-        if self.tracks.is_empty() {
+        let origin = self.nav.origin_name();
+        let Some(view) = self.nav.focused_songs() else {
+            return;
+        };
+        if view.items.is_empty() {
             return;
         }
-        let index = index.min(self.tracks.len() - 1);
+        let index = index.min(view.items.len() - 1);
         self.skipped = 0;
-        self.queue = self.tracks.clone();
-        self.queue_name = self
-            .shown
-            .as_ref()
-            .map(|(_, name)| name.clone())
-            .unwrap_or_default();
+        self.queue = view.items.clone();
+        self.queue_name = origin;
         self.play_index(index);
     }
 
@@ -442,22 +814,34 @@ impl App {
 
     pub(super) fn on_msg(&mut self, message: Msg) {
         match message {
+            Msg::Favorites(result) => {
+                self.loading = None;
+                self.nav.favorites_loaded = true;
+                match result {
+                    Ok(songs) => {
+                        self.status = format!("我喜欢：{} 首", songs.len());
+                        self.nav.favorites.items = songs;
+                        self.nav.favorites.select_first();
+                    }
+                    Err(error) => {
+                        self.nav.favorites.error = Some(format!("{error:#}"));
+                        self.status = format!("{error:#}");
+                    }
+                }
+            }
             Msg::Playlists(result) => {
                 self.loading = None;
+                self.nav.playlists_loaded = true;
                 match result {
                     Ok(playlists) => {
                         self.status = format!("共 {} 个歌单", playlists.len());
-                        let first = playlists
-                            .first()
-                            .map(|playlist| (playlist.id.clone(), playlist.name.clone()));
-                        self.playlists = playlists;
-                        self.playlist_state
-                            .select((!self.playlists.is_empty()).then_some(0));
-                        if let Some((id, name)) = first {
-                            self.load_tracks(id, name);
-                        }
+                        self.nav.playlists.items = playlists;
+                        self.nav.playlists.select_first();
                     }
-                    Err(error) => self.status = format!("{error:#}"),
+                    Err(error) => {
+                        self.nav.playlists.error = Some(format!("{error:#}"));
+                        self.status = format!("{error:#}");
+                    }
                 }
             }
             Msg::Tracks {
@@ -468,9 +852,7 @@ impl App {
                 match result {
                     Ok((playlist, songs)) => {
                         self.status = format!("《{}》{} 首", playlist.name, songs.len());
-                        self.shown = Some((playlist_id, playlist.name));
-                        self.track_state.select((!songs.is_empty()).then_some(0));
-                        self.tracks = songs;
+                        self.nav.push_tracks(&playlist_id, &playlist.name, songs);
                     }
                     Err(error) => self.status = format!("{error:#}"),
                 }
@@ -480,13 +862,15 @@ impl App {
                 match result {
                     Ok(songs) => {
                         self.status = format!("搜索「{keyword}」：{} 首", songs.len());
-                        self.shown =
-                            Some((format!("search:{keyword}"), format!("搜索：{keyword}")));
-                        self.track_state.select((!songs.is_empty()).then_some(0));
-                        self.tracks = songs;
-                        self.focus = Focus::Tracks;
+                        self.nav.search_results.items = songs;
+                        self.nav.search_results.select_first();
+                        // 结果一到就把焦点放进结果列表，`j`/`k` 立刻可用。
+                        self.nav.focus = Focus::Content;
                     }
-                    Err(error) => self.status = format!("{error:#}"),
+                    Err(error) => {
+                        self.nav.search_results.error = Some(format!("{error:#}"));
+                        self.status = format!("{error:#}");
+                    }
                 }
             }
             Msg::Wrote {
@@ -581,25 +965,30 @@ impl App {
         if self.input.is_some() {
             return keys::Context::SearchInput;
         }
-        match self.focus {
-            Focus::Playlists => keys::Context::Menu,
-            Focus::Tracks => keys::Context::Content,
+        match self.nav.focus {
+            Focus::Menu => keys::Context::Menu,
+            Focus::Content => keys::Context::Content,
         }
     }
 
     fn apply(&mut self, action: keys::Action) {
         match action {
             keys::Action::Quit => self.quit = true,
+            keys::Action::Menu(index) => {
+                if let Some(menu) = Menu::ALL.get(index).copied() {
+                    self.switch_menu(menu);
+                }
+            }
             keys::Action::Up => self.move_selection(-1),
             keys::Action::Down => self.move_selection(1),
             keys::Action::First => self.select_edge(false),
             keys::Action::Last => self.select_edge(true),
-            keys::Action::PageUp => self.move_selection(-10),
-            keys::Action::PageDown => self.move_selection(10),
+            keys::Action::PageUp => self.nav.page_focus(-1),
+            keys::Action::PageDown => self.nav.page_focus(1),
             keys::Action::FocusNext | keys::Action::FocusPrev => {
-                self.focus = match self.focus {
-                    Focus::Playlists => Focus::Tracks,
-                    Focus::Tracks => Focus::Playlists,
+                self.nav.focus = match self.nav.focus {
+                    Focus::Menu => Focus::Content,
+                    Focus::Content => Focus::Menu,
                 };
             }
             keys::Action::Enter => {
@@ -607,13 +996,7 @@ impl App {
                     self.confirm_picker();
                     return;
                 }
-                match self.focus {
-                    Focus::Playlists => self.enter_playlist(),
-                    Focus::Tracks => {
-                        let index = self.track_state.selected().unwrap_or(0);
-                        self.play_from_tracks(index);
-                    }
-                }
+                self.enter_selected();
             }
             keys::Action::Search => self.input = Some(String::new()),
             keys::Action::Download => self.download_selected(),
@@ -646,24 +1029,34 @@ impl App {
             }
             keys::Action::InputCancel => self.input = None,
             keys::Action::Back => {
+                // 顺序：先关模态，再退输入态，最后退一层视图。
                 if self.picker.is_some() {
                     self.picker = None;
                 } else if self.input.is_some() {
                     self.input = None;
+                } else if self.nav.pop_tracks() {
+                    self.nav.focus = Focus::Content;
                 }
             }
         }
     }
 
-    fn enter_playlist(&mut self) {
-        let Some(index) = self.playlist_state.selected() else {
+    /// `Enter`：歌单列表 = 往下进一层；曲目列表 = 以此列表开队列并从该首播。
+    fn enter_selected(&mut self) {
+        if self.nav.can_enter_depth() {
+            let Some(playlist) = self.nav.playlists.selected().cloned() else {
+                return;
+            };
+            self.nav.begin_tracks(&playlist.id, &playlist.name);
+            self.load_tracks(playlist.id, playlist.name);
             return;
-        };
-        let Some(playlist) = self.playlists.get(index) else {
-            return;
-        };
-        self.focus = Focus::Tracks;
-        self.load_tracks(playlist.id.clone(), playlist.name.clone());
+        }
+        let index = self
+            .nav
+            .focused_songs()
+            .and_then(|view| view.state.selected())
+            .unwrap_or(0);
+        self.play_from_tracks(index);
     }
 
     fn play_relative(&mut self, delta: isize) {
@@ -683,27 +1076,23 @@ impl App {
         self.play_index(next as usize);
     }
 
+    /// `j`/`k`：焦点在菜单上就是换菜单项（后台菜单的行为），在主区就是挪选中行。
     fn move_selection(&mut self, delta: isize) {
-        let (state, len) = match self.focus {
-            Focus::Playlists => (&mut self.playlist_state, self.playlists.len()),
-            Focus::Tracks => (&mut self.track_state, self.tracks.len()),
-        };
-        if len == 0 {
+        if self.nav.focus == Focus::Menu {
+            let next = (self.nav.menu.index() as isize + delta)
+                .clamp(0, Menu::ALL.len() as isize - 1);
+            self.switch_menu(Menu::ALL[next as usize]);
             return;
         }
-        let current = state.selected().unwrap_or(0) as isize;
-        let next = (current + delta).clamp(0, len as isize - 1) as usize;
-        state.select(Some(next));
+        self.nav.move_focus_by(delta);
     }
 
     fn select_edge(&mut self, last: bool) {
-        let (state, len) = match self.focus {
-            Focus::Playlists => (&mut self.playlist_state, self.playlists.len()),
-            Focus::Tracks => (&mut self.track_state, self.tracks.len()),
-        };
-        if len > 0 {
-            state.select(Some(if last { len - 1 } else { 0 }));
+        if self.nav.focus == Focus::Menu {
+            self.switch_menu(if last { Menu::History } else { Menu::Favorites });
+            return;
         }
+        self.nav.focus_edge(last);
     }
 
     /// 每帧收尾：引擎死了要报，播完了要接上下一首，下载进度刷到状态栏。

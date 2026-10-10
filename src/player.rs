@@ -57,6 +57,8 @@ pub enum Phase {
 pub struct Snapshot {
     /// 「标题 — 歌手」。
     pub title: Option<String>,
+    /// 正在播那首的 mid（界面用来在列表里标 `♪`；mid 全局唯一，比标题可靠）。
+    pub mid: Option<String>,
     /// 实际开出来的档位（`Buffering` 时还是 `None`）。
     pub quality: Option<Quality>,
     /// 实际开出来的那份文件的字节数（拿不到 `Content-Length` 就是 `None`）。
@@ -75,6 +77,7 @@ impl Default for Snapshot {
     fn default() -> Self {
         Self {
             title: None,
+            mid: None,
             quality: None,
             size: None,
             phase: Phase::Idle,
@@ -247,6 +250,7 @@ fn handle(
             tracing::info!("开始播放：{title}");
             update(state, |snapshot| {
                 snapshot.title = Some(title);
+                snapshot.mid = Some(track.song.mid.clone());
                 snapshot.quality = None;
                 snapshot.size = None;
                 snapshot.phase = Phase::Buffering;

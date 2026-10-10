@@ -13,6 +13,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Quit,
+    /// 数字键直达菜单项（下标对应 `Menu::ALL`）。
+    Menu(usize),
     Up,
     Down,
     First,
@@ -85,6 +87,8 @@ pub fn resolve(context: Context, key: KeyEvent) -> Option<Action> {
 fn common(key: KeyEvent, context: Context) -> Option<Action> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
+        // 数字键从任何焦点位置直达菜单项（后台菜单的惯例）。
+        KeyCode::Char(digit @ '1'..='4') => Some(Action::Menu(digit as usize - '1' as usize)),
         KeyCode::Char('q') => Some(Action::Quit),
         KeyCode::Tab => Some(Action::FocusNext),
         KeyCode::BackTab => Some(Action::FocusPrev),
@@ -110,11 +114,9 @@ fn common(key: KeyEvent, context: Context) -> Option<Action> {
         KeyCode::Char('d') => Some(Action::Download),
         KeyCode::Char('y') => Some(Action::ToggleLyric),
         KeyCode::Char('/') => Some(Action::Search),
-        // 左栏是最外层，Esc 没有「上级」可回；右栏的返回语义等嵌套层（Task 6）再接。
-        _ => {
-            let _ = context;
-            None
-        }
+        // 主区可能有上一层（「我的歌单 › 某歌单」），菜单没有——它是导航的最外层。
+        KeyCode::Esc | KeyCode::Backspace if context == Context::Content => Some(Action::Back),
+        _ => None,
     }
 }
 
@@ -198,9 +200,23 @@ mod tests {
     }
 
     #[test]
+    fn digits_jump_between_menu_items_from_any_focus() {
+        assert_eq!(press(Context::Menu, KeyCode::Char('1')), Some(Action::Menu(0)));
+        assert_eq!(press(Context::Content, KeyCode::Char('3')), Some(Action::Menu(2)));
+        assert_eq!(press(Context::Content, KeyCode::Char('4')), Some(Action::Menu(3)));
+        assert_eq!(press(Context::Content, KeyCode::Char('5')), None, "只有四项");
+    }
+
+    #[test]
+    fn esc_goes_back_in_the_content_area_but_not_from_the_menu() {
+        assert_eq!(press(Context::Content, KeyCode::Esc), Some(Action::Back));
+        assert_eq!(press(Context::Content, KeyCode::Backspace), Some(Action::Back));
+        assert_eq!(press(Context::Menu, KeyCode::Esc), None, "菜单是最外层");
+    }
+
+    #[test]
     fn unbound_keys_stay_unbound() {
         assert_eq!(press(Context::Content, KeyCode::Char('z')), None);
-        assert_eq!(press(Context::Content, KeyCode::Esc), None, "阶段 2 还没有可返回的层级");
         assert_eq!(press(Context::Content, KeyCode::Char('m')), None, "播放模式随队列一起接");
         assert_eq!(press(Context::Menu, KeyCode::Char('?')), None, "帮助浮层在 Task 9");
     }

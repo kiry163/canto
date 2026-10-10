@@ -40,7 +40,7 @@ pub fn run(
     if let Some(warning) = warning {
         app.status = warning;
     }
-    app.reload_playlists();
+    app.load_initial();
 
     let mut terminal = ratatui::init();
     let outcome = event_loop(&mut terminal, &mut app, &rx);
