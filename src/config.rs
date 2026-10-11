@@ -11,7 +11,7 @@ use serde::Deserialize;
 use crate::model::Quality;
 use crate::paths;
 
-/// 播放缓存默认上限（MiB）。1 GiB 大约能放 400 首 320k、100 多首无损。
+/// 播放缓存默认上限（MiB）。1 GiB 大约能放 2000 首 128k、400 首 320k。
 pub const DEFAULT_CACHE_MB: u64 = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,8 +30,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            // 默认 320k MP3：体积与音质的中间点；要无损就在 config.toml 里改。
-            quality: Quality::High320,
+            // 默认 128k MP3：体积最小，够日常听；要更好就在 config.toml 里改。
+            quality: Quality::Low128,
             download_dir: default_download_dir(),
             lyrics_dir: default_lyrics_dir(),
             cache_mb: DEFAULT_CACHE_MB,
@@ -150,10 +150,19 @@ fn write_default(path: &Path) -> Result<()> {
     std::fs::create_dir_all(parent)
         .with_context(|| format!("创建配置目录失败：{}", parent.display()))?;
     let default = Config::default();
-    // 四档逐行写清楚：名字、体积量级。选不出来的时候不用回来翻代码。
-    let options: String = Quality::options()
+    // 四档逐行写清楚：名字、体积量级，「默认」标记跟着默认值走（别硬编码在某一档上，
+    // 否则改了默认值就会说错）。
+    let options: String = Quality::ALL
         .iter()
-        .map(|(token, note)| format!("#   {token:<6} {note}\n"))
+        .map(|quality| {
+            let token = quality.token();
+            let mark = if *quality == default.quality { "   ← 默认" } else { "" };
+            format!(
+                "#   {token:<6} {:<10} {}{mark}\n",
+                quality.label(),
+                quality.size_hint()
+            )
+        })
         .collect();
     let text = format!(
         "# canto 配置。改完重启 canto 生效。\n\
@@ -217,10 +226,10 @@ mod tests {
         assert!(warning.contains("128") && warning.contains("320"), "{warning}");
     }
 
-    /// 默认档位是 320（自用播放器不需要无损），且模板里四档都写清楚了。
+    /// 默认档位是 128，且模板里四档都写清楚了。
     #[test]
     fn the_generated_template_documents_every_quality_option() {
-        assert_eq!(Config::default().quality.token(), "320");
+        assert_eq!(Config::default().quality.token(), "128", "默认档位");
 
         let dir = std::env::temp_dir().join(format!("canto-config-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("建临时目录");
@@ -229,14 +238,32 @@ mod tests {
         let text = std::fs::read_to_string(&path).expect("读回配置");
 
         assert!(
-            text.contains(&format!("quality = \"{}\"", Quality::High320.token())),
+            text.contains(&format!("quality = \"{}\"", Config::default().quality.token())),
             "模板里写的是默认档位：{text}"
         );
-        // 四档都要在注释里逐行写清楚（名字 + 体积量级），选的时候不用翻代码。
-        for (token, note) in Quality::options() {
-            assert!(text.contains(token), "模板里没提 {token} 一档：{text}");
-            assert!(text.contains(note), "模板里没写 {token} 的说明：{text}");
+        // 四档都要在注释里逐行写清楚（规范名 + 显示名 + 体积量级）。
+        for quality in Quality::ALL {
+            assert!(
+                text.contains(quality.token()),
+                "模板里没提 {} 一档：{text}",
+                quality.token()
+            );
+            assert!(
+                text.contains(quality.label()) && text.contains(quality.size_hint()),
+                "模板里没写 {} 的说明：{text}",
+                quality.token()
+            );
         }
+        // 「默认」标记只能落在默认那一档上。
+        let marked = text
+            .lines()
+            .find(|line| line.contains("默认"))
+            .expect("模板该标出默认档位");
+        assert!(
+            marked.contains(&format!("quality \"{}\"", Quality::Low128.token()))
+                || marked.contains(Quality::Low128.token()),
+            "默认档位是 128，标记却在别处：{marked}"
+        );
         assert!(text.contains("lyrics_dir"), "歌词目录要出现在模板里：{text}");
         assert!(text.contains("cache_mb"), "缓存上限要出现在模板里：{text}");
         // 模板本身必须是能解析回去的合法配置。

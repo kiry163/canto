@@ -7,7 +7,7 @@
 //! 文件名是 `<mid>.<档位>.<扩展名>`：mid 全局唯一且不像 vkey 会过期，档位写进名字
 //! 是为了算「这份是什么档位」时不用猜（`320` 与 `128` 都是 `.mp3`，光看扩展名分不出）。
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -55,9 +55,10 @@ fn for_song_in(dir: &Path, mid: &str) -> Option<(PathBuf, Quality)> {
     None
 }
 
-/// 缓存里已经有的那些歌（mid）。列表拿它标「已缓存」，启动时扫一遍。
-pub fn cached_mids() -> HashSet<String> {
-    cached_mids_in(&paths::cache_dir())
+/// 缓存里已经有的那些歌：mid → （档位，文件字节数）。列表拿它标「已缓存」并显示
+/// 缓存里那份的档位（缓存命中时播放/下载用的就是它）。启动时扫一遍。
+pub fn cached_entries() -> HashMap<String, (Quality, u64)> {
+    cached_entries_in(&paths::cache_dir())
 }
 
 /// 歌词缓存目录（跟歌曲缓存分开一份，翻起来清楚）。
@@ -98,20 +99,29 @@ fn put_lyric_in(dir: &Path, mid: &str, lyric: Option<&Lyric>) {
     }
 }
 
-fn cached_mids_in(dir: &Path) -> HashSet<String> {
+fn cached_entries_in(dir: &Path) -> HashMap<String, (Quality, u64)> {
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return HashSet::new();
+        return HashMap::new();
     };
     entries
         .flatten()
         .filter_map(|entry| {
             let path = entry.path();
-            if !entry.metadata().ok()?.is_file() {
+            let metadata = entry.metadata().ok()?;
+            if !metadata.is_file() {
                 return None;
             }
             let name = path.file_name()?.to_str()?;
-            let (mid, _) = name.split_once('.')?;
-            (!name.ends_with(".part")).then(|| mid.to_string())
+            if name.ends_with(".part") {
+                return None;
+            }
+            // `<mid>.<档位>.<扩展名>`：mid 自己可能带点，按「从右边切两段」解析。
+            let mut parts = name.rsplitn(3, '.');
+            let _ext = parts.next()?;
+            let tier = parts.next()?;
+            let mid = parts.next()?;
+            let quality = Quality::parse(tier)?;
+            Some((mid.to_string(), (quality, metadata.len())))
         })
         .collect()
 }
@@ -177,15 +187,19 @@ fn sweep_dir(dir: &Path, limit_bytes: u64) -> (usize, u64) {
     (deleted, freed)
 }
 
+/// 「刚转正」的回传通道：(mid, 档位, 字节数)。音频线程往里塞，界面每帧取走。
+pub type Promoted = Arc<Mutex<Vec<(String, Quality, u64)>>>;
+
 /// 边播边写盘的那一半（挂给 `MediaStream`）。
 pub(crate) struct Write {
     file: File,
     part: PathBuf,
     done: PathBuf,
-    /// 这首的 mid，转正时回传给界面。
+    /// 这首的 mid 与档位，转正时回传给界面。
     mid: String,
-    /// 转正后把 mid 塞进去（界面的「已缓存」标记靠它刷新）。
-    promoted: Arc<Mutex<Vec<String>>>,
+    tier: Quality,
+    /// 转正后把 (mid, 档位, 字节数) 塞进去（界面的「已缓存」标记靠它刷新）。
+    promoted: Promoted,
     /// 从 0 开始已经**连续**写到哪；洞之后的字节一律不写。
     prefix: u64,
     /// 收尾过了就不再删 `part`（正常完成或被判定不合格，两种都在 `finish` 里处理）。
@@ -197,7 +211,7 @@ impl Write {
         mid: &str,
         tier: &str,
         ext: &str,
-        promoted: Arc<Mutex<Vec<String>>>,
+        promoted: Promoted,
     ) -> std::io::Result<Self> {
         Self::new_in(&paths::cache_dir(), mid, tier, ext, promoted)
     }
@@ -207,7 +221,7 @@ impl Write {
         mid: &str,
         tier: &str,
         ext: &str,
-        promoted: Arc<Mutex<Vec<String>>>,
+        promoted: Promoted,
     ) -> std::io::Result<Self> {
         std::fs::create_dir_all(dir)?;
         let (done, part) = names_in(dir, mid, tier, ext);
@@ -218,6 +232,8 @@ impl Write {
             part,
             done,
             mid: mid.to_string(),
+            // 文件名里的档位一定是规范名（`with_cache` 传的是 `Quality::token()`）。
+            tier: Quality::parse(tier).unwrap_or(Quality::High320),
             promoted,
             prefix: 0,
             finished: false,
@@ -245,7 +261,7 @@ impl Write {
             if std::fs::rename(&self.part, &self.done).is_ok()
                 && let Ok(mut promoted) = self.promoted.lock()
             {
-                promoted.push(self.mid.clone());
+                promoted.push((self.mid.clone(), self.tier, self.prefix));
             }
         } else {
             let _ = std::fs::remove_file(&self.part);
@@ -266,7 +282,7 @@ impl Drop for Write {
 mod tests {
     use super::*;
 
-    fn promoted_sink() -> Arc<Mutex<Vec<String>>> {
+    fn promoted_sink() -> Promoted {
         Arc::new(Mutex::new(Vec::new()))
     }
 
@@ -292,7 +308,11 @@ mod tests {
         assert!(done.is_file(), "顺序读完该留下完整缓存");
         assert!(!part.exists(), "临时文件该改名过去");
         assert_eq!(std::fs::read(&done).expect("读回"), vec![1, 2, 3, 4, 5]);
-        assert_eq!(*promoted.lock().expect("锁"), vec!["mid1".to_string()]);
+        assert_eq!(
+            *promoted.lock().expect("锁"),
+            vec![("mid1".to_string(), Quality::High320, 5)],
+            "转正要回传 mid、档位与字节数"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -398,19 +418,20 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// 缓存里已有哪些歌：`cached_mids` 认正式文件，不认 `.part`，也不认歌词目录。
+    /// 缓存里已有哪些歌：认正式文件，不认 `.part`，也不认歌词目录；带档位与字节数。
     #[test]
-    fn cached_mids_lists_only_complete_tracks() {
+    fn cached_entries_list_only_complete_tracks() {
         let dir = temp_dir("mids");
         std::fs::write(dir.join("aaa.320.mp3"), vec![0_u8; 10]).expect("写完整缓存");
         std::fs::write(dir.join("bbb.flac.flac.part"), vec![0_u8; 5]).expect("写半截");
         std::fs::create_dir_all(dir.join("lyrics")).expect("建歌词目录");
         std::fs::write(dir.join("lyrics/ccc.lrc"), "x").expect("写歌词");
 
-        let mids = cached_mids_in(&dir);
-        assert!(mids.contains("aaa"), "{mids:?}");
-        assert!(!mids.contains("bbb"), "半截的不算：{mids:?}");
-        assert!(!mids.contains("ccc"), "歌词目录不算：{mids:?}");
+        std::fs::write(dir.join("bbb.flac.flac.part"), vec![0_u8; 5]).expect("写半截");
+        let entries = cached_entries_in(&dir);
+        assert_eq!(entries.get("aaa"), Some(&(Quality::High320, 10)), "{entries:?}");
+        assert!(!entries.contains_key("bbb"), "半截的不算：{entries:?}");
+        assert!(!entries.contains_key("ccc"), "歌词目录不算：{entries:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

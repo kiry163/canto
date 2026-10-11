@@ -72,13 +72,23 @@ impl App {
 
     /// 内容区标题：面包屑，外加「筛选」徽标（知道自己在看子集、剩下几条）。
     fn content_title(&self) -> String {
-        let breadcrumb = self.nav.breadcrumb.join(" › ");
+        // 历史那屏的条数是现算的派生信息，不进导航状态——以前它存在标题里，
+        // 记录一条播放历史就会把**别的屏**的标题改写成「历史（N 条）」。
+        let title = if self.nav.menu == Menu::History {
+            if self.history.is_empty() {
+                "历史".to_string()
+            } else {
+                format!("历史（{} 条）", self.history.len())
+            }
+        } else {
+            self.nav.title_chain().join(" › ")
+        };
         let keyword = self.nav.filter_text();
         if keyword.is_empty() {
-            return format!(" {breadcrumb} ");
+            return format!(" {title} ");
         }
         let (hits, total) = self.nav.filter_counts();
-        format!(" {breadcrumb} 筛选「{keyword}」{hits}/{total} ")
+        format!(" {title} 筛选「{keyword}」{hits}/{total} ")
     }
 
     /// `/` 打开的筛选输入行。
@@ -150,16 +160,21 @@ impl App {
                 } else {
                     " "
                 };
-                let (quality, size) = song.sizes.at_or_below(want);
+                // 已缓存的歌：播放/下载用的就是缓存那份，所以显示它的档位与真实大小；
+                // 没缓存才按配置的下限算「新取流会取哪一档」。
+                let (quality, size) = match self.cached.get(&song.mid) {
+                    Some((cached, bytes)) => (*cached, Some(*bytes)),
+                    None => song.sizes.at_or_below(want),
+                };
                 let mut line = vec![Span::raw(format!(
-                    "{marker} {:>5}  {:<6} {:>7}  ",
+                    "{marker} {:>5}  {:<9} {:>7}  ",
                     format_duration(StdDuration::from_secs(song.duration_secs)),
-                    quality.file_label(),
+                    quality.label(),
                     size.map_or_else(|| "—".to_string(), format_size),
                 ))];
                 // 已缓存：本地有完整的一份，重听 0 网络。占位宽度固定，行间才不会错位。
                 line.push(Span::styled(
-                    if self.cached.contains(&song.mid) {
+                    if self.cached.contains_key(&song.mid) {
                         "已缓存 "
                     } else {
                         "       "

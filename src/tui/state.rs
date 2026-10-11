@@ -305,7 +305,6 @@ pub(super) struct Nav {
     pub history_view: ListView<Song>,
     /// 当前曲目层对应的歌单（`None` = 不在嵌套层里）。
     pub shown: Option<(String, String)>,
-    pub breadcrumb: Vec<String>,
     /// 这两屏的数据拉过没有（空列表也可能是「真的没有」，不能靠 `is_empty` 判断）。
     pub favorites_loaded: bool,
     pub playlists_loaded: bool,
@@ -325,7 +324,6 @@ impl Nav {
             search_results: ListView::songs(),
             history_view: ListView::songs(),
             shown: None,
-            breadcrumb: vec!["我的收藏".to_string()],
             favorites_loaded: false,
             playlists_loaded: false,
             search_text: String::new(),
@@ -333,17 +331,22 @@ impl Nav {
         }
     }
 
-    /// 切到某一屏：内容换屏，但每屏自己的选中位置都留着（「换一屏内容，不是清空一屏内容」）。
+    /// 当前这一屏的标题（**派生**，不存状态）：菜单 + 是否进在某个歌单里。
     ///
-    /// 「我的歌单」这一屏可能还停在某个歌单的曲目里（`shown`），这时面包屑也要跟着
-    /// 还原成「我的歌单 › 嗯」——否则标题说「我的歌单」、内容却是曲目，对不上。
+    /// 以前标题存在 `breadcrumb` 里，于是任何「别的屏的异步结果回来了」都可能把它改写成
+    /// 那一屏的标题——最典型的是记录一条播放历史就把当前屏标题变成「历史（N 条）」。
+    /// 派生之后这类问题从结构上没有了：标题永远由「现在在看哪一屏」算出来。
     /// 数字键切屏是**回到上次的位置**，退层交给 `Esc`。
+    pub fn title_chain(&self) -> Vec<String> {
+        match (self.menu, &self.shown) {
+            (Menu::Playlists, Some((_, name))) => vec!["我的歌单".to_string(), name.clone()],
+            (menu, _) => vec![menu.title().to_string()],
+        }
+    }
+
+    /// 切到某一屏：内容换屏，但每屏自己的选中位置都留着（「换一屏内容，不是清空一屏内容」）。
     pub fn switch_menu(&mut self, menu: Menu) {
         self.menu = menu;
-        self.breadcrumb = match (menu, &self.shown) {
-            (Menu::Playlists, Some((_, name))) => vec!["我的歌单".to_string(), name.clone()],
-            _ => vec![menu.title().to_string()],
-        };
         // 搜索屏进来就该能打字，不用先按一下别的键。
         self.search_input = menu == Menu::Search;
     }
@@ -367,12 +370,11 @@ impl Nav {
         self.menu == Menu::Playlists && self.shown.is_none()
     }
 
-    /// 进入「我的歌单 › 嗯」这一层：清掉旧曲目、写面包屑。
+    /// 进入「我的歌单 › 嗯」这一层：清掉旧曲目、记住在哪个歌单里（标题由 `shown` 派生）。
     pub fn push_tracks(&mut self, id: &str, name: &str, songs: Vec<Song>) {
         self.shown = Some((id.to_string(), name.to_string()));
         self.tracks = ListView::songs();
         self.tracks.set_items(songs);
-        self.breadcrumb = vec!["我的歌单".to_string(), name.to_string()];
     }
 
     /// 请求已发出、结果还没回来时先进入这一层（曲目留空，等 `Msg::Tracks` 填）。
@@ -386,7 +388,6 @@ impl Nav {
             return false;
         }
         self.tracks = ListView::songs();
-        self.breadcrumb = vec!["我的歌单".to_string()];
         true
     }
 
@@ -545,9 +546,10 @@ pub(super) struct App {
     pub(super) show_lyric: bool,
     /// `Y`：全屏歌词（内容区整块让给歌词，播放条与状态行照旧）。
     pub(super) lyric_full: bool,
-    /// 本地已经有完整缓存的那些歌（mid）。列表里标「已缓存」，启动时扫一遍目录，
-    /// 播放中刚听完转正的那首由音频线程回传（见 `Engine::take_cached`）。
-    pub(super) cached: std::collections::HashSet<String>,
+    /// 本地已经有完整缓存的那些歌：mid →（缓存那份的档位, 字节数）。列表里标「已缓存」
+    /// 并显示缓存档位（命中缓存时播放/下载用的就是它）；启动时扫一遍目录，播放中刚听完
+    /// 转正的那首由音频线程回传（见 `Engine::take_cached`）。
+    pub(super) cached: std::collections::HashMap<String, (crate::model::Quality, u64)>,
     /// `/` 的筛选框开着（输入即筛当前列表）。
     pub(super) filter_input: bool,
     /// 帮助浮层开着（`?`）。
@@ -593,7 +595,7 @@ impl App {
             lyric_loading: false,
             show_lyric: true,
             lyric_full: false,
-            cached: crate::cache::cached_mids(),
+            cached: crate::cache::cached_entries(),
             filter_input: false,
             help_open: false,
             queue_open: false,
@@ -1518,12 +1520,8 @@ impl App {
         if let Some(index) = previous.filter(|index| *index < view.len()) {
             view.state.select(Some(index));
         }
-        // 标题带上条数：一眼知道要不要清。
-        self.nav.breadcrumb = vec![if self.history.is_empty() {
-            "历史".to_string()
-        } else {
-            format!("历史（{} 条）", self.history.len())
-        }];
+        // 标题里的「（N 条）」由画标题那边现算：这里只填列表，**不能**去动当前屏标题
+        // ——记录一条播放历史就改写标题，正是「在别的屏播放，标题变成历史」的根源。
     }
 
     /// `Enter`：歌单列表 = 往下进一层；曲目列表 = 以此列表开队列并从该首播。
@@ -1594,9 +1592,9 @@ impl App {
 
     /// 每帧收尾：引擎死了要报，播完了要接上下一首，下载进度刷到状态栏。
     pub(super) fn tick(&mut self) {
-        // 刚缓存完的歌：列表里的「已缓存」标记要知道。
-        for mid in self.engine.take_cached() {
-            self.cached.insert(mid);
+        // 刚缓存完的歌：列表里的「已缓存」标记要知道（连档位与大小一起）。
+        for (mid, quality, bytes) in self.engine.take_cached() {
+            self.cached.insert(mid, (quality, bytes));
         }
         self.poll_transfer();
         if !self.engine.is_alive() {
@@ -1662,7 +1660,7 @@ mod tests {
         assert_eq!(nav.favorites.selected().map(|s| s.mid.as_str()), Some("c"));
 
         nav.switch_menu(Menu::Playlists);
-        assert_eq!(nav.breadcrumb, ["我的歌单"]);
+        assert_eq!(nav.title_chain(), ["我的歌单"]);
         nav.switch_menu(Menu::Favorites);
         assert_eq!(
             nav.favorites.selected().map(|s| s.mid.as_str()),
@@ -1672,7 +1670,7 @@ mod tests {
     }
 
     #[test]
-    fn entering_a_playlist_pushes_a_breadcrumb_and_esc_pops_it() {
+    fn entering_a_playlist_shows_the_name_and_esc_pops_it() {
         let mut nav = Nav::new();
         nav.switch_menu(Menu::Playlists);
         nav.playlists.set_items(vec![playlist("1", "嗯"), playlist("2", "循环")]);
@@ -1681,13 +1679,13 @@ mod tests {
         let target = nav.playlists.selected().cloned().expect("选中了歌单");
         assert_eq!(target.id, "1");
         nav.begin_tracks(&target.id, &target.name);
-        assert_eq!(nav.breadcrumb, ["我的歌单", "嗯"]);
+        assert_eq!(nav.title_chain(), ["我的歌单", "嗯"]);
         assert!(!nav.can_enter_depth(), "已经在曲目层里了");
 
         nav.push_tracks("1", "嗯", vec![test_song("a")]);
         assert_eq!(nav.tracks.items().len(), 1);
         assert!(nav.pop_tracks(), "Esc 该返回歌单列表");
-        assert_eq!(nav.breadcrumb, ["我的歌单"]);
+        assert_eq!(nav.title_chain(), ["我的歌单"]);
         assert_eq!(nav.tracks.items().len(), 0, "退回上一层要清掉曲目");
         assert!(!nav.pop_tracks(), "已经在最上层，再返回没有动作");
     }
@@ -1845,10 +1843,10 @@ mod tests {
 
         app.apply(keys::Action::Back);
         assert_eq!(app.nav.filter_counts(), (2, 2), "第一次 Esc 清掉筛选");
-        assert_eq!(app.nav.breadcrumb, ["我的歌单", "嗯"], "第一次 Esc 不退层");
+        assert_eq!(app.nav.title_chain(), ["我的歌单", "嗯"], "第一次 Esc 不退层");
 
         app.apply(keys::Action::Back);
-        assert_eq!(app.nav.breadcrumb, ["我的歌单"], "第二次 Esc 才退上一层");
+        assert_eq!(app.nav.title_chain(), ["我的歌单"], "第二次 Esc 才退上一层");
     }
 
     /// `Y` 开关全屏歌词；`Esc` / 数字切屏都会退出它。
@@ -1880,13 +1878,14 @@ mod tests {
     #[test]
     fn esc_leaves_the_fullscreen_before_popping_a_level() {
         let (mut app, _runtime) = test_app();
+        app.apply(keys::Action::Menu(1));
         app.nav.begin_tracks("1", "嗯");
         app.apply(keys::Action::ToggleLyricFull);
         app.apply(keys::Action::Back);
         assert!(!app.lyric_full, "第一次 Esc 退全屏");
-        assert_eq!(app.nav.breadcrumb, ["我的歌单", "嗯"], "还留在这一层");
+        assert_eq!(app.nav.title_chain(), ["我的歌单", "嗯"], "还留在这一层");
         app.apply(keys::Action::Back);
-        assert_eq!(app.nav.breadcrumb, ["我的歌单"], "第二次 Esc 才退层");
+        assert_eq!(app.nav.title_chain(), ["我的歌单"], "第二次 Esc 才退层");
     }
 
     /// 搜完看别的屏、再切回搜索：关键词与结果都还在。
@@ -1941,14 +1940,14 @@ mod tests {
         app.nav.begin_tracks("1", "嗯");
         app.nav.tracks.set_items(vec![test_song("a"), test_song("b")]);
         app.nav.tracks.move_by(1);
-        assert_eq!(app.nav.breadcrumb, ["我的歌单", "嗯"]);
+        assert_eq!(app.nav.title_chain(), ["我的歌单", "嗯"]);
 
         app.apply(keys::Action::Menu(3));
-        assert_eq!(app.nav.breadcrumb, ["历史"]);
+        assert_eq!(app.nav.title_chain(), ["历史"]);
 
         app.apply(keys::Action::Menu(1));
         assert_eq!(
-            app.nav.breadcrumb,
+            app.nav.title_chain(),
             ["我的歌单", "嗯"],
             "回到这一屏要还原「还在哪个歌单里」，否则标题和内容对不上"
         );
@@ -1963,7 +1962,7 @@ mod tests {
 
         // Esc 才是退层：退出歌单，回到歌单列表。
         app.apply(keys::Action::Back);
-        assert_eq!(app.nav.breadcrumb, ["我的歌单"]);
+        assert_eq!(app.nav.title_chain(), ["我的歌单"]);
     }
 
     /// `j`/`k` 直接挪当前屏的列表（没有「菜单游标」这层中间态了）。
@@ -2127,7 +2126,7 @@ mod tests {
         assert_eq!(songs.len(), 3);
         assert_eq!(songs[index].mid, "b");
         assert_eq!(origin, "历史");
-        assert!(app.nav.breadcrumb[0].contains("3 条"), "标题带条数：{:?}", app.nav.breadcrumb);
+        assert_eq!(app.nav.title_chain(), ["历史"], "导航链只报屏名，条数是绘制时现算的");
     }
 
     #[test]

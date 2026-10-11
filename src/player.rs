@@ -124,8 +124,8 @@ pub struct Engine {
     tx: Sender<Cmd>,
     state: Arc<Mutex<Snapshot>>,
     running: Arc<AtomicBool>,
-    /// 刚缓存完的歌（mid）。界面每帧取走，用来刷新列表里的「已缓存」标记。
-    promoted: Arc<Mutex<Vec<String>>>,
+    /// 刚缓存完的歌（mid、档位、字节数）。界面每帧取走，用来刷新列表里的「已缓存」标记。
+    promoted: cache::Promoted,
 }
 
 impl Engine {
@@ -162,8 +162,8 @@ impl Engine {
             .clone()
     }
 
-    /// 取走「刚缓存完」的 mid 列表（界面每帧调一次）。
-    pub fn take_cached(&self) -> Vec<String> {
+    /// 取走「刚缓存完」的歌（界面每帧调一次）。
+    pub fn take_cached(&self) -> Vec<(String, Quality, u64)> {
         let mut promoted = self.promoted.lock().unwrap_or_else(|error| error.into_inner());
         std::mem::take(&mut *promoted)
     }
@@ -211,7 +211,7 @@ fn run(
     sink: MixerDeviceSink,
     running: Arc<AtomicBool>,
     cache_on: bool,
-    promoted: Arc<Mutex<Vec<String>>>,
+    promoted: cache::Promoted,
 ) {
     let mixer = sink.mixer().clone();
     let mut player: Option<Player> = None;
@@ -266,7 +266,7 @@ fn handle(
     volume: &mut f32,
     seek_anchor: &mut Option<Duration>,
     cache_on: bool,
-    promoted: &Arc<Mutex<Vec<String>>>,
+    promoted: &cache::Promoted,
 ) {
     match cmd {
         Cmd::Play(track) => {
@@ -408,7 +408,11 @@ struct Opened {
 ///
 /// 先看本地缓存：命中就完全不碰网络（拖动也瞬时）。没命中才去 CDN，并顺手把
 /// 读到的字节写进缓存（只有从头顺序听完才会被认作完整，见 [`crate::cache`]）。
-fn open(track: &Track, cache_on: bool, promoted: &Arc<Mutex<Vec<String>>>) -> Result<Opened> {
+fn open(
+    track: &Track,
+    cache_on: bool,
+    promoted: &cache::Promoted,
+) -> Result<Opened> {
     let mid = track.song.mid.as_str();
     // 缓存里已经有这首（任意档位）：直接读本地文件，一个请求都不用发。
     if cache_on

@@ -15,26 +15,23 @@ pub enum Quality {
 }
 
 impl Quality {
-    /// 展示与 `--quality` 用的短名。
+    /// 展示名：**带上格式**（列表、播放条、下载状态、日志都用这一个，没有第二套）。
     pub fn label(self) -> &'static str {
         match self {
-            Quality::Low128 => "128k",
-            Quality::High320 => "320k",
-            Quality::Flac => "无损",
+            Quality::Low128 => "MP3 128k",
+            Quality::High320 => "MP3 320k",
+            Quality::Flac => "FLAC",
             Quality::Hires => "Hi-Res",
         }
     }
 
-    /// 列表里那一列用的标签（按文件类型叫：`FLAC` / `320k` / …）。
-    ///
-    /// 跟 [`Quality::label`] 的展示名（「无损」「Hi-Res」）不是一套：状态行报的是
-    /// 音质档位，列表里那一列报的是「这份文件是什么」。
-    pub fn file_label(self) -> &'static str {
+    /// 配置模板里那句体积量级。
+    pub fn size_hint(self) -> &'static str {
         match self {
-            Quality::Low128 => "128k",
-            Quality::High320 => "320k",
-            Quality::Flac => "FLAC",
-            Quality::Hires => "Hi-Res",
+            Quality::Low128 => "约 3–5 MB/首",
+            Quality::High320 => "约 8–12 MB/首",
+            Quality::Flac => "约 25–35 MB/首",
+            Quality::Hires => "单曲可到 ~150 MB",
         }
     }
 
@@ -50,15 +47,13 @@ impl Quality {
         }
     }
 
-    /// 四档的说明（配置模板里逐行写清楚：名字、体积量级），顺序从低到高。
-    pub fn options() -> [(&'static str, &'static str); 4] {
-        [
-            ("128", "128k MP3     约 3–5 MB/首       最小"),
-            ("320", "320k MP3     约 8–12 MB/首      默认"),
-            ("flac", "无损 FLAC    约 25–35 MB/首"),
-            ("hires", "Hi-Res       单曲可到 ~150 MB"),
-        ]
-    }
+    /// 四档，顺序从低到高（配置模板与提示都按它来）。
+    pub const ALL: [Quality; 4] = [
+        Quality::Low128,
+        Quality::High320,
+        Quality::Flac,
+        Quality::Hires,
+    ];
 
     /// 解析 `--quality`。接受 `128`/`128k`、`320`/`320k`、`flac`/`lossless`/`无损`、
     /// `hires`/`hi-res`/`母带`。

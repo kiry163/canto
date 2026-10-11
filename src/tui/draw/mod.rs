@@ -346,6 +346,41 @@ mod tests {
         assert!(bold, "当前句该加粗：{:?}", rows[current]);
     }
 
+    /// 历史屏的标题带条数（现算），切到别的屏就该显示那一屏的名字。
+    #[test]
+    fn the_title_follows_the_screen_and_the_history_counts_its_rows() {
+        let (mut app, _runtime) = test_app();
+        for mid in ["a", "b"] {
+            app.record_history(&test_song(mid));
+        }
+        app.switch_menu(Menu::History);
+        let history = frame_flat(&mut app, 120, 30);
+        assert!(history.contains("历史（2条）"), "历史标题带条数：{history}");
+
+        app.switch_menu(Menu::Favorites);
+        app.nav.favorites.set_items(vec![test_song("a")]);
+        let favorites = frame_flat(&mut app, 120, 30);
+        assert!(favorites.contains("我的收藏"), "{favorites}");
+        assert!(!favorites.contains("历史（"), "切走之后不该还挂着历史标题：{favorites}");
+    }
+
+    /// 回归：在别的屏播放（= 记一条播放历史）之后，那一屏的标题不能被改写成「历史（N 条）」。
+    ///
+    /// 以前标题是存在 `breadcrumb` 里的，`refresh_history_view` 一跑就把它覆盖成历史屏的标题。
+    #[test]
+    fn recording_history_does_not_rewrite_another_screens_title() {
+        let (mut app, _runtime) = test_app();
+        app.switch_menu(Menu::Favorites);
+        app.nav.favorites.set_items(vec![test_song("a")]);
+        assert!(frame_flat(&mut app, 120, 30).contains("我的收藏"));
+
+        // 正好是播放一首歌之后走的那条路：记一笔历史 + 重建历史屏。
+        app.record_history(&test_song("b"));
+        let text = frame_flat(&mut app, 120, 30);
+        assert!(text.contains("我的收藏"), "标题还是当前屏：{text}");
+        assert!(!text.contains("历史（"), "不该出现历史标题：{text}");
+    }
+
     /// 队列浮层里的高亮要真画在挪动后的那一行上。
     ///
     /// 回归：方向键原本穿透到底下的主区列表，浮层里的高亮永远不动（「浮层选不动」）。

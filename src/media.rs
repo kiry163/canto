@@ -8,7 +8,6 @@
 
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use reqwest::StatusCode;
@@ -119,7 +118,7 @@ impl MediaStream {
         mid: &str,
         tier: &str,
         ext: &str,
-        promoted: Arc<Mutex<Vec<String>>>,
+        promoted: cache::Promoted,
     ) -> Self {
         match cache::Write::new(mid, tier, ext, promoted) {
             Ok(write) => self.cache = Some(write),
