@@ -25,6 +25,19 @@ impl Quality {
         }
     }
 
+    /// 列表里那一列用的标签（按文件类型叫：`FLAC` / `320k` / …）。
+    ///
+    /// 跟 [`Quality::label`] 的展示名（「无损」「Hi-Res」）不是一套：状态行报的是
+    /// 音质档位，列表里那一列报的是「这份文件是什么」。
+    pub fn file_label(self) -> &'static str {
+        match self {
+            Quality::Low128 => "128k",
+            Quality::High320 => "320k",
+            Quality::Flac => "FLAC",
+            Quality::Hires => "Hi-Res",
+        }
+    }
+
     /// 配置文件里写的**规范名**：`parse()` 认得的一堆写法里挑一个当正牌。
     ///
     /// 写回 `config.toml` 与报错提示都用它，免得「无损」这种展示名又得特判回 `flac`。
@@ -89,27 +102,23 @@ pub struct FileSizes {
 }
 
 impl FileSizes {
-    /// 最高可用档位：（标签，字节数）。标签和大小必须出自同一档，
-    /// 不然会出现「标着 FLAC、大小却是 Hi-Res 那份」的错位。
-    fn best(&self) -> Option<(&'static str, u64)> {
+    /// 按这个下限，**实际会去取**哪一档：（档位，接口报的体积）。
+    ///
+    /// 列表里那一列显示这个，而不是接口报的最高档位——配置成 320 的时候还列着
+    /// `FLAC 31MB`，只会让人以为它要下无损。
+    ///
+    /// 优先挑「真的报了体积」的档位（接口对某些档位不报大小，见 README 已知限制）；
+    /// 一档都没报就退回下限本身、体积未知。
+    pub fn at_or_below(&self, want: Quality) -> (Quality, Option<u64>) {
         [
-            ("Hi-Res", self.hires),
-            ("FLAC", self.flac),
-            ("320k", self.mp3_320),
-            ("128k", self.mp3_128),
+            (Quality::Hires, self.hires),
+            (Quality::Flac, self.flac),
+            (Quality::High320, self.mp3_320),
+            (Quality::Low128, self.mp3_128),
         ]
         .into_iter()
-        .find(|(_, size)| *size > 0)
-    }
-
-    /// 最高可用档位标签，用于列表里一眼看出有没有无损。
-    pub fn best_label(&self) -> &'static str {
-        self.best().map_or("—", |(label, _)| label)
-    }
-
-    /// 最高可用档位的字节数（接口一档都没报就是 `None`）。
-    pub fn best_size(&self) -> Option<u64> {
-        self.best().map(|(_, size)| size)
+        .find(|(quality, size)| *quality <= want && *size > 0)
+        .map_or((want, None), |(quality, size)| (quality, Some(size)))
     }
 }
 
@@ -127,6 +136,33 @@ pub struct LyricLine {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Lyric {
     pub lines: Vec<LyricLine>,
+}
+
+impl Lyric {
+    /// 写回标准 LRC（时间戳已换算成绝对值，`offset` 也应用过了）。
+    ///
+    /// 下载落盘与歌词缓存都走这一份——读的时候又是 [`Lyric::parse`]，
+    /// 所以「写出去再读回来」正好是个闭环，不需要第二套序列化。
+    /// `translation = true` 时只输出翻译行（写 `<mid>.trans.lrc` 用）。
+    pub fn to_lrc(&self, translation: bool) -> String {
+        let mut out = String::new();
+        for line in &self.lines {
+            let text = if translation {
+                line.translation.as_deref()
+            } else {
+                Some(line.text.as_str())
+            };
+            let Some(text) = text else { continue };
+            let seconds = line.at.as_secs();
+            out.push_str(&format!(
+                "[{:02}:{:02}.{:02}]{text}\n",
+                seconds / 60,
+                seconds % 60,
+                line.at.subsec_millis() / 10
+            ));
+        }
+        out
+    }
 }
 
 impl Lyric {
@@ -285,6 +321,53 @@ impl Playlist {
 mod tests {
     use super::*;
 
+    /// 列表那一列：跟着配置的下限走，标签与体积必须同一档。
+    #[test]
+    fn at_or_below_picks_the_tier_we_would_actually_fetch() {
+        let sizes = FileSizes {
+            mp3_128: 4_000_000,
+            mp3_320: 9_000_000,
+            flac: 30_000_000,
+            hires: 150_000_000,
+        };
+        assert_eq!(
+            sizes.at_or_below(Quality::Hires),
+            (Quality::Hires, Some(150_000_000))
+        );
+        assert_eq!(
+            sizes.at_or_below(Quality::Flac),
+            (Quality::Flac, Some(30_000_000))
+        );
+        assert_eq!(
+            sizes.at_or_below(Quality::High320),
+            (Quality::High320, Some(9_000_000)),
+            "配置成 320 就不该再显示无损"
+        );
+        assert_eq!(
+            sizes.at_or_below(Quality::Low128),
+            (Quality::Low128, Some(4_000_000))
+        );
+    }
+
+    /// 接口没报的档位不算数（跳过去看更低一档）；全都没报就退回下限、体积未知。
+    #[test]
+    fn at_or_below_skips_tiers_without_a_size() {
+        let partial = FileSizes {
+            mp3_128: 4_000_000,
+            mp3_320: 0,
+            flac: 0,
+            hires: 0,
+        };
+        assert_eq!(
+            partial.at_or_below(Quality::Flac),
+            (Quality::Low128, Some(4_000_000)),
+            "无损没报体积，实际会退到 128k"
+        );
+
+        let none = FileSizes::default();
+        assert_eq!(none.at_or_below(Quality::High320), (Quality::High320, None));
+    }
+
     /// 实测抓到的开头（2026-10-09，天黑黑）：元信息 + 正文混在一起。
     const REAL_LRC: &str = "[ti:天黑黑]\n\
         [ar:孙燕姿]\n\
@@ -295,19 +378,19 @@ mod tests {
         [00:03.11]词：廖莹如/吴依铮\n\
         [00:06.22]曲：李偲菘\n";
 
+    /// 档位与体积必须出自同一档：标着 FLAC、大小却是 Hi-Res 那份就是错位。
     #[test]
-    fn best_quality_keeps_label_and_size_together() {
+    fn the_reported_tier_and_size_come_from_the_same_tier() {
         let lossless = FileSizes {
             mp3_128: 3_500_000,
             mp3_320: 9_000_000,
             flac: 25_000_000,
             hires: 0,
         };
-        assert_eq!(lossless.best_label(), "FLAC");
         assert_eq!(
-            lossless.best_size(),
-            Some(25_000_000),
-            "标签是 FLAC，大小也必须是那份"
+            lossless.at_or_below(Quality::Hires),
+            (Quality::Flac, Some(25_000_000)),
+            "要 Hi-Res 但接口没报它的体积 → 退到 FLAC，标签与大小都是 FLAC 那份"
         );
 
         let hires = FileSizes {
@@ -315,19 +398,26 @@ mod tests {
             hires: 150_000_000,
             ..Default::default()
         };
-        assert_eq!(hires.best_label(), "Hi-Res");
-        assert_eq!(hires.best_size(), Some(150_000_000));
+        assert_eq!(
+            hires.at_or_below(Quality::Hires),
+            (Quality::Hires, Some(150_000_000))
+        );
 
         let low = FileSizes {
             mp3_128: 3_500_000,
             ..Default::default()
         };
-        assert_eq!(low.best_label(), "128k");
-        assert_eq!(low.best_size(), Some(3_500_000));
+        assert_eq!(
+            low.at_or_below(Quality::Hires),
+            (Quality::Low128, Some(3_500_000))
+        );
 
         let unknown = FileSizes::default();
-        assert_eq!(unknown.best_label(), "—");
-        assert_eq!(unknown.best_size(), None);
+        assert_eq!(
+            unknown.at_or_below(Quality::Hires),
+            (Quality::Hires, None),
+            "接口一档都没报：退回下限本身，体积未知"
+        );
     }
 
     #[test]

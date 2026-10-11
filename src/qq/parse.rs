@@ -132,6 +132,7 @@ pub fn parse_user_playlist(item: &Value) -> Option<Playlist> {
 
 #[cfg(test)]
 mod tests {
+    use crate::model::Quality;
     use super::*;
     use serde_json::json;
 
@@ -166,7 +167,11 @@ mod tests {
         assert_eq!(song.duration_secs, 269);
         assert_eq!(song.duration_secs, 4 * 60 + 29, "04:29");
         assert_eq!(song.sizes.flac, 29532253);
-        assert_eq!(song.sizes.best_label(), "FLAC", "没有 hires 就该退到 FLAC");
+        assert_eq!(
+            song.sizes.at_or_below(Quality::Hires).0,
+            Quality::Flac,
+            "没有 hires 就该退到 FLAC"
+        );
     }
 
     #[test]
@@ -187,7 +192,7 @@ mod tests {
         item["file"]["size_hires"] = json!("90000000");
         let song = parse_song(&item).unwrap();
         assert_eq!(song.duration_secs, 210);
-        assert_eq!(song.sizes.best_label(), "Hi-Res");
+        assert_eq!(song.sizes.at_or_below(Quality::Hires).0, Quality::Hires);
     }
 
     #[test]
@@ -215,7 +220,7 @@ mod tests {
         assert_eq!(song.album_name, "叶惠美");
         assert_eq!(song.duration_secs, 269);
         assert_eq!(song.sizes.mp3_320, 10792943);
-        assert_eq!(song.sizes.best_label(), "320k");
+        assert_eq!(song.sizes.at_or_below(Quality::Hires).0, Quality::High320);
 
         assert!(parse_search_song(&json!({ "songname": "没有 mid" })).is_none());
     }

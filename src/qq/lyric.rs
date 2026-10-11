@@ -14,9 +14,26 @@ use base64::Engine;
 use serde_json::{Value, json};
 
 use crate::model::{Lyric, Song};
+use crate::cache;
 
 /// 取这首歌的歌词；`Ok(None)` 表示这首歌确实没有歌词。
-pub async fn get(song: &Song) -> Result<Option<Lyric>> {
+pub async fn get(song: &Song, cache_on: bool) -> Result<Option<Lyric>> {
+    if cache_on
+        && let Some(cached) = cache::lyric(&song.mid)
+    {
+        tracing::debug!("命中歌词缓存：{}", song.mid);
+        return Ok(cached);
+    }
+    let lyric = fetch(song).await?;
+    if cache_on {
+        // 连「这首没有歌词」也记一笔，免得下次再为空结果发一次请求。
+        cache::put_lyric(&song.mid, lyric.as_ref());
+    }
+    Ok(lyric)
+}
+
+/// 问接口要歌词（不碰缓存）。
+async fn fetch(song: &Song) -> Result<Option<Lyric>> {
     let body = json!({
         "comm": { "ct": 24, "cv": 0, "uin": 0, "format": "json" },
         "req": {

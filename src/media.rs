@@ -8,6 +8,7 @@
 
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use reqwest::StatusCode;
@@ -113,8 +114,14 @@ impl MediaStream {
 
     /// 边播边把读到的字节写进缓存。只有**从头顺序读完**才会被认作完整缓存
     /// （见 [`crate::cache`]），半路换歌 / 拖进度留下的半截文件会自己清掉。
-    pub fn with_cache(mut self, mid: &str, ext: &str) -> Self {
-        match cache::Write::new(mid, ext) {
+    pub fn with_cache(
+        mut self,
+        mid: &str,
+        tier: &str,
+        ext: &str,
+        promoted: Arc<Mutex<Vec<String>>>,
+    ) -> Self {
+        match cache::Write::new(mid, tier, ext, promoted) {
             Ok(write) => self.cache = Some(write),
             // 缓存写不进去（磁盘满 / 权限）不该影响听歌。
             Err(error) => tracing::warn!("缓存写不进去（{error}），这次不缓存"),

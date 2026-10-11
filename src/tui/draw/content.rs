@@ -137,6 +137,9 @@ impl App {
     /// 曲目列表：所有「装着一堆歌」的屏共用（收藏 / 歌单曲目 / 搜索）。
     pub(super) fn draw_songs(&mut self, frame: &mut Frame, area: Rect, title: &str) {
         let playing = self.now_playing_mid();
+        // 档位列按**配置的下限**算：配置成 320 就不该再列 `FLAC 31MB`——那会让人
+        // 以为它要下无损。真正取到的那一档仍以播放条为准。
+        let want = self.config.quality;
         let items: Vec<ListItem> = self
             .nav
             .song_view()
@@ -147,16 +150,24 @@ impl App {
                 } else {
                     " "
                 };
-                ListItem::new(format!(
-                    "{marker} {:>5}  {:<6} {:>7}  {} — {}",
+                let (quality, size) = song.sizes.at_or_below(want);
+                let mut line = vec![Span::raw(format!(
+                    "{marker} {:>5}  {:<6} {:>7}  ",
                     format_duration(StdDuration::from_secs(song.duration_secs)),
-                    song.sizes.best_label(),
-                    song.sizes
-                        .best_size()
-                        .map_or_else(|| "—".to_string(), format_size),
-                    song.title,
-                    song.singers,
-                ))
+                    quality.file_label(),
+                    size.map_or_else(|| "—".to_string(), format_size),
+                ))];
+                // 已缓存：本地有完整的一份，重听 0 网络。占位宽度固定，行间才不会错位。
+                line.push(Span::styled(
+                    if self.cached.contains(&song.mid) {
+                        "已缓存 "
+                    } else {
+                        "       "
+                    },
+                    Style::new().fg(Color::Green),
+                ));
+                line.push(Span::raw(format!("{} — {}", song.title, song.singers)));
+                ListItem::new(Line::from(line))
             })
             .collect();
         let mut state = std::mem::take(&mut self.nav.song_view_mut().state);

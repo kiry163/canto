@@ -545,6 +545,9 @@ pub(super) struct App {
     pub(super) show_lyric: bool,
     /// `Y`：全屏歌词（内容区整块让给歌词，播放条与状态行照旧）。
     pub(super) lyric_full: bool,
+    /// 本地已经有完整缓存的那些歌（mid）。列表里标「已缓存」，启动时扫一遍目录，
+    /// 播放中刚听完转正的那首由音频线程回传（见 `Engine::take_cached`）。
+    pub(super) cached: std::collections::HashSet<String>,
     /// `/` 的筛选框开着（输入即筛当前列表）。
     pub(super) filter_input: bool,
     /// 帮助浮层开着（`?`）。
@@ -590,6 +593,7 @@ impl App {
             lyric_loading: false,
             show_lyric: true,
             lyric_full: false,
+            cached: crate::cache::cached_mids(),
             filter_input: false,
             help_open: false,
             queue_open: false,
@@ -670,6 +674,7 @@ impl App {
         let dir = self.config.download_dir.clone();
         let lyrics_dir = self.config.lyrics_dir.clone();
         let quality = self.config.quality;
+        let cache_on = self.cache_on();
         let received = Arc::new(AtomicU64::new(0));
         let total = Arc::new(AtomicU64::new(0));
         let transfer = Arc::new(Mutex::new(Transfer {
@@ -685,7 +690,7 @@ impl App {
         std::thread::spawn(move || {
             let outcome = match handle.block_on(async {
                 let candidates = qq::vkey::candidates(&song, Some(quality)).await?;
-                let lyric = qq::lyric::get(&song).await.ok().flatten();
+                let lyric = qq::lyric::get(&song, cache_on).await.ok().flatten();
                 Ok::<_, anyhow::Error>((candidates, lyric))
             }) {
                 Ok((candidates, lyric)) => {
@@ -706,7 +711,8 @@ impl App {
                             format!("已存在：{}", saved.path.display())
                         }
                         Ok(saved) => format!(
-                            "已下载：{}（{:.1} MB，{}{}）",
+                            "已{}：{}（{:.1} MB，{}{}）",
+                            if saved.from_cache { "从缓存复制" } else { "下载" },
                             saved.path.display(),
                             saved.bytes as f64 / 1_048_576.0,
                             saved.quality.label(),
@@ -874,6 +880,7 @@ impl App {
         let tx = self.tx.clone();
         let handle_song = song.clone();
         let quality = self.config.quality;
+        let cache_on = self.cache_on();
         self.handle.spawn(async move {
             let result = qq::vkey::candidates(&handle_song, Some(quality)).await;
             let playable = result.is_ok();
@@ -885,7 +892,7 @@ impl App {
             });
             // 取流成功才取歌词：放不了的歌没必要取。
             if playable {
-                let result = qq::lyric::get(&song).await;
+                let result = qq::lyric::get(&song, cache_on).await;
                 let _ = tx.send(Msg::Lyric {
                     request,
                     title: song.title,
@@ -1310,6 +1317,11 @@ impl App {
         }
     }
 
+    /// 播放缓存开着吗（`config.toml` 的 `cache_mb` 为 0 就是关掉，歌词缓存一起关）。
+    fn cache_on(&self) -> bool {
+        self.config.cache_mb > 0
+    }
+
     /// 进登录屏并开始扫码流程。
     pub(super) fn start_login(&mut self) {
         self.screen = Screen::Login(LoginState::default());
@@ -1582,6 +1594,10 @@ impl App {
 
     /// 每帧收尾：引擎死了要报，播完了要接上下一首，下载进度刷到状态栏。
     pub(super) fn tick(&mut self) {
+        // 刚缓存完的歌：列表里的「已缓存」标记要知道。
+        for mid in self.engine.take_cached() {
+            self.cached.insert(mid);
+        }
         self.poll_transfer();
         if !self.engine.is_alive() {
             self.status = "音频线程已退出，重启 canto".to_string();

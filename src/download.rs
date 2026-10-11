@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+use crate::cache;
 use crate::media::MediaStream;
 use crate::model::{Lyric, Quality, Song};
 use crate::qq::vkey::Candidate;
@@ -23,6 +24,8 @@ pub struct Saved {
     pub lyrics: Vec<PathBuf>,
     /// 文件本来就在，跳过了。
     pub existed: bool,
+    /// 直接从播放缓存复制过来的（一个字节都没走网络）。
+    pub from_cache: bool,
 }
 
 /// 下载第一个能打开的候选；`progress` 每读完一块回调一次（已收字节、总长）。
@@ -41,6 +44,38 @@ pub fn save(
     let stem = file_stem(song);
     let mut failures = Vec::new();
 
+    // 缓存里已经有这首（任意档位）：直接复制过去，别再下一遍。
+    // 档位以缓存里那份为准——用户要的是「这首歌的文件」，不是「重新下一份配置档位」。
+    if let Some((cached, quality)) = cache::for_song(&song.mid) {
+        let ext = cached
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("bin");
+        let path = dir.join(format!("{stem}.{ext}"));
+        if path.exists() {
+            return Ok(Saved {
+                path,
+                quality,
+                bytes: 0,
+                lyrics: Vec::new(),
+                existed: true,
+                from_cache: true,
+            });
+        }
+        let bytes = std::fs::copy(&cached, &path)
+            .with_context(|| format!("从缓存复制到 {} 失败", path.display()))?;
+        progress(bytes, Some(bytes));
+        let lyrics = write_lyrics(&stem, lyrics_dir, lyric)?;
+        return Ok(Saved {
+            path,
+            quality,
+            bytes,
+            lyrics,
+            existed: false,
+            from_cache: true,
+        });
+    }
+
     for candidate in candidates {
         let path = dir.join(format!("{stem}.{}", candidate.ext));
         if path.exists() {
@@ -50,6 +85,7 @@ pub fn save(
                 bytes: 0,
                 lyrics: Vec::new(),
                 existed: true,
+                from_cache: false,
             });
         }
         let mut stream = match MediaStream::open(&candidate.url) {
@@ -92,6 +128,7 @@ pub fn save(
             bytes: received,
             lyrics,
             existed: false,
+            from_cache: false,
         });
     }
     bail!("没有能下载的档位：{}", failures.join("；"))
