@@ -227,18 +227,18 @@ mod tests {
 
     #[test]
     fn parses_a_user_playlist() {
-        // 实测响应（2026-10-09 抓的），字段名与搜索接口那套完全不同。
+        // 实测响应（2026-10-09 抓的，字段名与搜索接口那套完全不同；tid 已换成假值）。
         let item = json!({
             "diss_name": "嗯",
             "diss_cover": "http://y.gtimg.cn/music/photo_new/T002R300x300M000001BMYBD25YV7w.jpg?n=1",
             "song_cnt": 197,
             "listen_num": 2082,
             "dirid": 2,
-            "tid": 7675761234u64,
+            "tid": 1000000001u64,
             "dir_show": 2
         });
         let playlist = parse_user_playlist(&item).expect("个人歌单要解析出来");
-        assert_eq!(playlist.id, "7675761234", "详情接口要的是 tid，不是 dirid");
+        assert_eq!(playlist.id, "1000000001", "详情接口要的是 tid，不是 dirid");
         assert_eq!(playlist.dir_id, 2, "写入接口要的是 dirid");
         assert_eq!(playlist.name, "嗯");
         assert_eq!(playlist.song_count, 197);
@@ -257,7 +257,7 @@ mod tests {
             "diss_cover": "?n=1",
             "song_cnt": 488,
             "dirid": 201,
-            "tid": 1319185119u64,
+            "tid": 1000000002u64,
             "dir_show": 0
         });
         let playlist = parse_user_playlist(&item).expect("我喜欢要单独成行");
