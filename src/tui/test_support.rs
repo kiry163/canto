@@ -50,6 +50,14 @@ pub(super) fn test_song(mid: &str) -> Song {
     }
 }
 
+/// 指定标题与歌手的曲目：筛选要按这两个字段命中，`test_song` 那套固定文案测不出来。
+pub(super) fn titled_song(mid: &str, title: &str, singers: &str) -> Song {
+    let mut song = test_song(mid);
+    song.title = title.to_string();
+    song.singers = singers.to_string();
+    song
+}
+
 pub(super) fn test_playlist(id: &str, name: &str) -> Playlist {
     Playlist {
         id: id.to_string(),

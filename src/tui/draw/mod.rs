@@ -153,9 +153,10 @@ pub fn hints(context: keys::Context) -> &'static str {
     match context {
         keys::Context::Menu => "j/k 选菜单 · Enter 进入 · 1-4 直达 · Tab 到主区 · ? 帮助",
         keys::Context::Content => {
-            "Enter 播放 · Space 暂停 · n/b 切歌 · f 收藏 · p 加歌单 · ? 帮助"
+            "Enter 播放 · Space 暂停 · n/b 切歌 · / 筛选 · f 收藏 · p 加歌单 · ? 帮助"
         }
         keys::Context::SearchInput => "输入关键词 · Enter 搜索 · Esc 退出输入",
+        keys::Context::FilterInput => "输入即筛选 · Enter 确认 · Esc 清空",
         keys::Context::PlaylistPicker => "j/k 选歌单 · Enter 确认 · Esc 取消",
         keys::Context::HelpOverlay => "Esc 或 ? 关闭帮助",
         keys::Context::QueueOverlay => {
@@ -302,6 +303,29 @@ mod tests {
     ///
     /// 回归：方向键原本穿透到底下的主区列表，浮层里的高亮永远不动（「浮层选不动」）。
     /// 这里用 `TestBackend` 看真实单元格，避免增量重绘造成的误判。
+    /// 有筛选时标题报「命中/总数」，列表只画命中行；筛选框开着时多一行输入行。
+    #[test]
+    fn the_filter_is_visible_in_the_title_and_narrows_the_rows() {
+        let (mut app, _runtime) = test_app();
+        app.nav.switch_menu(Menu::Favorites);
+        app.nav.favorites.set_items(vec![
+            crate::tui::test_support::titled_song("m1", "晴天", "周杰伦"),
+            crate::tui::test_support::titled_song("m2", "非酋", "薛明媛"),
+        ]);
+        let before = frame_flat(&mut app, 160, 40);
+        assert!(!before.contains("筛选「"), "没筛的时候不该有徽标：{before}");
+
+        app.nav.set_filter("非酋");
+        let after = frame_flat(&mut app, 160, 40);
+        assert!(after.contains("筛选「非酋」1/2"), "标题要报命中数：{after}");
+        assert!(!after.contains("晴天"), "没命中的行不该画出来：{after}");
+
+        // 输入框开着时第一行是输入行（画的是当前关键词）。
+        app.filter_input = true;
+        let typing = frame_flat(&mut app, 160, 40);
+        assert!(typing.contains("筛选：非酋"), "筛选框要画出来：{typing}");
+    }
+
     #[test]
     fn the_queue_overlay_draws_the_highlight_on_the_selected_row() {
         let (mut app, _runtime) = test_app();

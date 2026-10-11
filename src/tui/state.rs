@@ -127,53 +127,173 @@ impl Menu {
 }
 
 /// 一屏列表的通用状态：条目 + 选中位置 + 这一屏的错误 + 可选的右侧副标题。
+///
+/// 「筛选」是这一层自带的：`items` 永远是**全量**数据，`visible` 是当前可见项在
+/// `items` 里的下标。所有对外行为（选中哪一条、画哪几行、回车播哪一队）都走
+/// `visible`，所以筛选只影响「看得到什么」，不会破坏原始数据。
+///
+/// 高亮的 `state.selected()` 是**可见行里的位置**，不是 `items` 的下标——
+/// 要拿原始下标用 [`ListView::selected_index`]。
 #[derive(Debug)]
 pub(super) struct ListView<T> {
-    pub items: Vec<T>,
+    items: Vec<T>,
     pub state: ListState,
     /// 这一屏自己的错误（别的屏没事）。
-    pub error: Option<String>,
+    pub(super) error: Option<String>,
     /// 每行的右侧副标题（历史屏放「时间 · 来自《来源》」，别的屏留空）。
     /// 与 `items` 等长，改 `items` 的代码要顺手改它。
-    pub labels: Vec<String>,
+    labels: Vec<String>,
+    /// 筛选关键词（按用户敲的原样存，用来显示）。
+    filter: String,
+    /// 这一屏的哪些字段参与筛选（曲目看标题/歌手，歌单看名字）。
+    matcher: fn(&T, &str) -> bool,
+    /// 当前可见项在 `items` 里的下标。`items` 或筛选词一变就重算（`refresh_visible`）。
+    visible: Vec<usize>,
 }
 
-impl<T> Default for ListView<T> {
-    fn default() -> Self {
+/// 曲目按「标题 / 歌手」筛（两边都转小写，大小写不敏感）。
+fn matches_song(song: &Song, needle: &str) -> bool {
+    song.title.to_lowercase().contains(needle) || song.singers.to_lowercase().contains(needle)
+}
+
+/// 歌单按名字筛。
+fn matches_playlist(playlist: &Playlist, needle: &str) -> bool {
+    playlist.name.to_lowercase().contains(needle)
+}
+
+impl ListView<Song> {
+    pub(super) fn songs() -> Self {
+        Self::with_matcher(matches_song)
+    }
+}
+
+impl ListView<Playlist> {
+    pub(super) fn playlists() -> Self {
+        Self::with_matcher(matches_playlist)
+    }
+}
+
+impl<T> ListView<T> {
+    fn with_matcher(matcher: fn(&T, &str) -> bool) -> Self {
         Self {
             items: Vec::new(),
             state: ListState::default(),
             error: None,
             labels: Vec::new(),
+            filter: String::new(),
+            matcher,
+            visible: Vec::new(),
         }
     }
-}
 
-impl<T> ListView<T> {
-    pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
+    /// 换一批数据：清掉筛选，选中回到第一行。
+    pub(super) fn set_items(&mut self, items: Vec<T>) {
+        self.labels.clear();
+        self.filter.clear();
+        self.items = items;
+        self.refresh_visible(false);
     }
 
-    pub fn selected(&self) -> Option<&T> {
-        self.state.selected().and_then(|index| self.items.get(index))
+    /// 换一批带右侧副标题的数据（历史屏）。
+    pub(super) fn set_items_with_labels(&mut self, items: Vec<T>, labels: Vec<String>) {
+        debug_assert_eq!(items.len(), labels.len(), "副标题要与条目一一对应");
+        self.items = items;
+        self.labels = labels;
+        self.refresh_visible(false);
     }
 
-    pub fn select_first(&mut self) {
-        self.state.select((!self.items.is_empty()).then_some(0));
+    /// 全量数据（不受筛选影响）。
+    pub(super) fn items(&self) -> &[T] {
+        &self.items
     }
 
-    pub fn move_by(&mut self, delta: isize) {
-        if self.items.is_empty() {
+    /// 当前可见的条目。
+    pub(super) fn visible_items(&self) -> impl Iterator<Item = &T> {
+        self.visible.iter().filter_map(|index| self.items.get(*index))
+    }
+
+    /// 当前可见的行：条目 + 右侧副标题（没有副标题就是空串）。
+    pub(super) fn visible_rows(&self) -> impl Iterator<Item = (&T, &str)> {
+        self.visible.iter().filter_map(|index| {
+            let item = self.items.get(*index)?;
+            let label = self.labels.get(*index).map_or("", String::as_str);
+            Some((item, label))
+        })
+    }
+
+    /// 可见条数（筛选后）。
+    pub(super) fn len(&self) -> usize {
+        self.visible.len()
+    }
+
+    /// 可见项是否为空——「这一屏有没有东西可看」看它。
+    pub(super) fn is_empty(&self) -> bool {
+        self.visible.is_empty()
+    }
+
+    pub(super) fn selected(&self) -> Option<&T> {
+        self.visible
+            .get(self.state.selected()?)
+            .and_then(|index| self.items.get(*index))
+    }
+
+    /// 选中项在 `items`（全量）里的下标。
+    pub(super) fn selected_index(&self) -> Option<usize> {
+        self.visible.get(self.state.selected()?).copied()
+    }
+
+    pub(super) fn select_first(&mut self) {
+        self.state.select((!self.visible.is_empty()).then_some(0));
+    }
+
+    pub(super) fn move_by(&mut self, delta: isize) {
+        if self.visible.is_empty() {
             return;
         }
         let current = self.state.selected().unwrap_or(0) as isize;
-        let next = (current + delta).clamp(0, self.items.len() as isize - 1);
+        let next = (current + delta).clamp(0, self.visible.len() as isize - 1);
         self.state.select(Some(next as usize));
     }
 
-    pub fn edge(&mut self, last: bool) {
-        if !self.items.is_empty() {
-            self.state.select(Some(if last { self.items.len() - 1 } else { 0 }));
+    pub(super) fn edge(&mut self, last: bool) {
+        if !self.visible.is_empty() {
+            self.state
+                .select(Some(if last { self.visible.len() - 1 } else { 0 }));
+        }
+    }
+
+    /// 当前筛选词。
+    pub(super) fn filter_text(&self) -> &str {
+        &self.filter
+    }
+
+    /// 换筛选词并重算可见项（输入即筛）。
+    pub(super) fn set_filter(&mut self, keyword: &str) {
+        if self.filter == keyword {
+            return;
+        }
+        self.filter = keyword.to_string();
+        self.refresh_visible(true);
+    }
+
+    /// 按当前筛选词重算可见项。`items` 或筛选词改了就**必须**走这里，
+    /// 否则高亮会和画出来的行对不上。
+    ///
+    /// `keep` = 尽量把高亮留在原来那一条上（输入时越筛越窄，不该把光标弹回第一行）；
+    /// 它已经被筛掉了就退回第一行。
+    fn refresh_visible(&mut self, keep: bool) {
+        let previous = keep.then(|| self.selected_index()).flatten();
+        let needle = self.filter.to_lowercase();
+        self.visible = if needle.is_empty() {
+            (0..self.items().len()).collect()
+        } else {
+            (0..self.items().len())
+                .filter(|index| (self.matcher)(&self.items[*index], &needle))
+                .collect()
+        };
+        match previous.and_then(|index| self.visible.iter().position(|it| *it == index)) {
+            Some(position) => self.state.select(Some(position)),
+            None => self.select_first(),
         }
     }
 }
@@ -215,11 +335,11 @@ impl Nav {
             menu: Menu::Favorites,
             cursor: Menu::Favorites,
             focus: Focus::Menu,
-            favorites: ListView::default(),
-            playlists: ListView::default(),
-            tracks: ListView::default(),
-            search_results: ListView::default(),
-            history_view: ListView::default(),
+            favorites: ListView::songs(),
+            playlists: ListView::playlists(),
+            tracks: ListView::songs(),
+            search_results: ListView::songs(),
+            history_view: ListView::songs(),
             shown: None,
             breadcrumb: vec!["我的收藏".to_string()],
             favorites_loaded: false,
@@ -240,10 +360,6 @@ impl Nav {
     }
 
     /// `/`：跳到搜索屏并聚焦输入框，任何位置都能用。
-    pub fn begin_search_input(&mut self) {
-        self.switch_menu(Menu::Search);
-    }
-
     /// 退出输入态。关键词留着——退出输入不等于放弃这次搜索。
     pub fn end_search_input(&mut self) {
         self.search_input = false;
@@ -265,13 +381,8 @@ impl Nav {
     /// 进入「我的歌单 › 嗯」这一层：清掉旧曲目、写面包屑。
     pub fn push_tracks(&mut self, id: &str, name: &str, songs: Vec<Song>) {
         self.shown = Some((id.to_string(), name.to_string()));
-        self.tracks = ListView {
-            items: songs,
-            state: ListState::default(),
-            error: None,
-            labels: Vec::new(),
-        };
-        self.tracks.select_first();
+        self.tracks = ListView::songs();
+        self.tracks.set_items(songs);
         self.breadcrumb = vec!["我的歌单".to_string(), name.to_string()];
     }
 
@@ -285,9 +396,38 @@ impl Nav {
         if self.shown.take().is_none() {
             return false;
         }
-        self.tracks = ListView::default();
+        self.tracks = ListView::songs();
         self.breadcrumb = vec!["我的歌单".to_string()];
         true
+    }
+
+    /// 当前这一屏的筛选词（歌单列表在最上层时就是它自己的）。
+    pub fn filter_text(&self) -> &str {
+        match self.menu {
+            Menu::Playlists if self.shown.is_none() => self.playlists.filter_text(),
+            _ => self.song_view().filter_text(),
+        }
+    }
+
+    /// 换筛选词（输入即筛）。
+    pub fn set_filter(&mut self, keyword: &str) {
+        match self.menu {
+            Menu::Playlists if self.shown.is_none() => self.playlists.set_filter(keyword),
+            _ => self.song_view_mut().set_filter(keyword),
+        }
+    }
+
+    /// 当前列表的（命中数, 总数）——筛选时才画进标题。
+    pub fn filter_counts(&self) -> (usize, usize) {
+        match self.menu {
+            Menu::Playlists if self.shown.is_none() => {
+                (self.playlists.len(), self.playlists.items().len())
+            }
+            _ => {
+                let view = self.song_view();
+                (view.len(), view.items().len())
+            }
+        }
     }
 
     /// 主区这一屏的曲目列表（跟焦点无关，绘制用）。
@@ -422,6 +562,8 @@ pub(super) struct App {
     /// 歌词面板是否展开。
     pub(super) show_lyric: bool,
     pub(super) lyric_state: ListState,
+    /// `/` 的筛选框开着（输入即筛当前列表）。
+    pub(super) filter_input: bool,
     /// 帮助浮层开着（`?`）。
     pub(super) help_open: bool,
     /// 队列浮层开着（`u`）。
@@ -465,6 +607,7 @@ impl App {
             lyric: None,
             lyric_loading: false,
             show_lyric: true,
+            filter_input: false,
             lyric_state: ListState::default(),
             help_open: false,
             queue_open: false,
@@ -775,11 +918,12 @@ impl App {
     /// 当前焦点列表 → `(曲目, 选中下标, 来源名)`。`Enter` 与 `a`/`A`（空队列时）都走这里。
     fn queue_from_focus(&self) -> Option<(Vec<Song>, usize, String)> {
         let view = self.nav.focused_songs()?;
-        if view.items.is_empty() {
+        // 灌的是**当前看得见**的那几首：筛过之后播的就是筛出来的子集。
+        if view.is_empty() {
             return None;
         }
         Some((
-            view.items.clone(),
+            view.visible_items().cloned().collect(),
             view.state.selected().unwrap_or(0),
             self.nav.origin_name(),
         ))
@@ -879,8 +1023,7 @@ impl App {
                 match result {
                     Ok(songs) => {
                         self.status = format!("我喜欢：{} 首", songs.len());
-                        self.nav.favorites.items = songs;
-                        self.nav.favorites.select_first();
+                        self.nav.favorites.set_items(songs);
                     }
                     Err(error) => {
                         self.nav.favorites.error = Some(format!("{error:#}"));
@@ -896,8 +1039,7 @@ impl App {
                         // 「我喜欢」在菜单里是单独一项（`f` 写它），不在「我的歌单」里重复出现。
                         playlists.retain(|playlist| !playlist.is_favorites);
                         self.status = format!("共 {} 个歌单", playlists.len());
-                        self.nav.playlists.items = playlists;
-                        self.nav.playlists.select_first();
+                        self.nav.playlists.set_items(playlists);
                     }
                     Err(error) => {
                         self.nav.playlists.error = Some(format!("{error:#}"));
@@ -923,8 +1065,7 @@ impl App {
                 match result {
                     Ok(songs) => {
                         self.status = format!("搜索「{keyword}」：{} 首", songs.len());
-                        self.nav.search_results.items = songs;
-                        self.nav.search_results.select_first();
+                        self.nav.search_results.set_items(songs);
                         // 结果一到就把焦点放进结果列表，`j`/`k` 立刻可用。
                         self.nav.focus = Focus::Content;
                     }
@@ -1039,6 +1180,10 @@ impl App {
         if self.picker.is_some() {
             return keys::Context::PlaylistPicker;
         }
+        // 筛选框跟搜索框一样是文本输入，只是 Enter / Esc 落点不同。
+        if self.filter_input {
+            return keys::Context::FilterInput;
+        }
         if self.nav.search_input {
             return keys::Context::SearchInput;
         }
@@ -1110,7 +1255,27 @@ impl App {
                 }
                 self.enter_selected();
             }
-            keys::Action::Search => self.nav.begin_search_input(),
+            keys::Action::Filter => {
+                // `/` 只筛当前列表；顺手把搜索屏的输入态让出去，免得两个输入框打架。
+                self.nav.search_input = false;
+                self.filter_input = true;
+            }
+            keys::Action::FilterChar(character) => {
+                let mut keyword = self.nav.filter_text().to_string();
+                keyword.push(character);
+                self.nav.set_filter(&keyword);
+            }
+            keys::Action::FilterBackspace => {
+                let mut keyword = self.nav.filter_text().to_string();
+                keyword.pop();
+                self.nav.set_filter(&keyword);
+            }
+            // 回车只是收起输入框：筛出来的子集留着，接着就能 `Enter` 播这一队。
+            keys::Action::FilterSubmit => self.filter_input = false,
+            keys::Action::FilterCancel => {
+                self.filter_input = false;
+                self.nav.set_filter("");
+            }
             keys::Action::Download => self.download_selected(),
             keys::Action::Favorite => self.favorite_selected(),
             keys::Action::AddToPlaylist => self.open_picker(),
@@ -1157,6 +1322,9 @@ impl App {
                     self.picker = None;
                 } else if self.nav.search_input {
                     self.nav.end_search_input();
+                } else if !self.nav.filter_text().is_empty() {
+                    // 筛选也算一层：Esc 先清掉它，再按才退上一层视图。
+                    self.nav.set_filter("");
                 } else if self.nav.pop_tracks() {
                     self.nav.focus = Focus::Content;
                 }
@@ -1325,8 +1493,8 @@ impl App {
     /// 取流只认 mid（`qq::vkey::candidates` 用 mid 拼文件名，`media_mid` 缺失时回落到
     /// mid），因此能直接播——这一点由实测确认（见 README 的已知限制）。
     pub(super) fn refresh_history_view(&mut self) {
-        let selected = self.nav.history_view.state.selected();
-        self.nav.history_view.items = self
+        let previous = self.nav.history_view.state.selected();
+        let songs: Vec<Song> = self
             .history
             .entries()
             .iter()
@@ -1342,7 +1510,7 @@ impl App {
                 sizes: crate::model::FileSizes::default(),
             })
             .collect();
-        self.nav.history_view.labels = self
+        let labels: Vec<String> = self
             .history
             .entries()
             .iter()
@@ -1354,10 +1522,12 @@ impl App {
                 )
             })
             .collect();
-        self.nav
-            .history_view
-            .state
-            .select(selected.or((!self.history.is_empty()).then_some(0)));
+        let view = &mut self.nav.history_view;
+        view.set_items_with_labels(songs, labels);
+        // 重建之后把高亮放回原来那一行（比如刚从历史里删了一条，索引要夹住）。
+        if let Some(index) = previous.filter(|index| *index < view.len()) {
+            view.state.select(Some(index));
+        }
         // 标题带上条数：一眼知道要不要清。
         self.nav.breadcrumb = vec![if self.history.is_empty() {
             "历史".to_string()
@@ -1495,13 +1665,13 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tui::test_support::{test_playlist as playlist, test_song};
+    use crate::tui::test_support::{test_app, test_playlist as playlist, test_song, titled_song};
 
     /// 菜单切换是「换一屏内容」，不是「清空一屏内容」：切走再切回，选中位置要还在。
     #[test]
     fn switching_menus_keeps_each_views_selection() {
         let mut nav = Nav::new();
-        nav.favorites.items = vec![test_song("a"), test_song("b"), test_song("c")];
+        nav.favorites.set_items(vec![test_song("a"), test_song("b"), test_song("c")]);
         nav.favorites.select_first();
         nav.switch_menu(Menu::Favorites);
         nav.favorites.move_by(2);
@@ -1521,7 +1691,7 @@ mod tests {
     fn entering_a_playlist_pushes_a_breadcrumb_and_esc_pops_it() {
         let mut nav = Nav::new();
         nav.switch_menu(Menu::Playlists);
-        nav.playlists.items = vec![playlist("1", "嗯"), playlist("2", "循环")];
+        nav.playlists.set_items(vec![playlist("1", "嗯"), playlist("2", "循环")]);
         nav.playlists.select_first();
         assert!(nav.can_enter_depth(), "歌单列表是最上一层，可以往下进");
         let target = nav.playlists.selected().cloned().expect("选中了歌单");
@@ -1531,10 +1701,10 @@ mod tests {
         assert!(!nav.can_enter_depth(), "已经在曲目层里了");
 
         nav.push_tracks("1", "嗯", vec![test_song("a")]);
-        assert_eq!(nav.tracks.items.len(), 1);
+        assert_eq!(nav.tracks.items().len(), 1);
         assert!(nav.pop_tracks(), "Esc 该返回歌单列表");
         assert_eq!(nav.breadcrumb, ["我的歌单"]);
-        assert_eq!(nav.tracks.items.len(), 0, "退回上一层要清掉曲目");
+        assert_eq!(nav.tracks.items().len(), 0, "退回上一层要清掉曲目");
         assert!(!nav.pop_tracks(), "已经在最上层，再返回没有动作");
     }
 
@@ -1542,7 +1712,7 @@ mod tests {
     fn paging_moves_ten_rows_and_stops_at_the_end() {
         let mut nav = Nav::new();
         nav.switch_menu(Menu::Favorites);
-        nav.favorites.items = (0..25).map(|index| test_song(&format!("m{index}"))).collect();
+        nav.favorites.set_items((0..25).map(|index| test_song(&format!("m{index}"))).collect());
         nav.favorites.select_first();
         nav.page_focus(1);
         assert_eq!(nav.favorites.state.selected(), Some(10));
@@ -1559,11 +1729,142 @@ mod tests {
         let mut nav = Nav::new();
         nav.switch_menu(Menu::Playlists);
         nav.push_tracks("1", "嗯", vec![test_song("keep")]);
-        nav.search_results.items = vec![test_song("found")];
+        nav.search_results.set_items(vec![test_song("found")]);
         nav.switch_menu(Menu::Search);
-        assert_eq!(nav.focused_songs().unwrap().items[0].mid, "found");
+        assert_eq!(nav.focused_songs().unwrap().items()[0].mid, "found");
         nav.switch_menu(Menu::Playlists);
-        assert_eq!(nav.tracks.items[0].mid, "keep", "歌单曲目没被搜索顶掉");
+        assert_eq!(nav.tracks.items()[0].mid, "keep", "歌单曲目没被搜索顶掉");
+    }
+
+    /// `/` 筛当前列表：只剩命中的，回车播的就是这一队；Esc 清掉。
+    #[test]
+    fn filtering_narrows_the_list_and_what_enter_plays() {
+        let (mut app, _runtime) = test_app();
+        app.nav.switch_menu(Menu::Favorites);
+        app.nav.favorites.set_items(vec![
+            titled_song("m1", "晴天", "周杰伦"),
+            titled_song("m2", "非酋", "薛明媛"),
+            titled_song("m3", "晴天娃娃", "某某"),
+        ]);
+        app.apply(keys::Action::Filter);
+        assert_eq!(app.context(), keys::Context::FilterInput, "`/` 打开筛选框");
+        assert_eq!(app.nav.menu, Menu::Favorites, "`/` 不再跳去搜索屏");
+        for character in "晴天".chars() {
+            app.apply(keys::Action::FilterChar(character));
+        }
+        assert_eq!(app.nav.filter_counts(), (2, 3), "标题要报命中 2/3");
+        app.apply(keys::Action::FilterSubmit);
+        assert_eq!(app.context(), keys::Context::Content, "回车收起筛选框");
+
+        app.nav.favorites.move_by(1);
+        let (songs, index, _) = app.queue_from_focus().expect("筛出来两首，可播");
+        assert_eq!(
+            songs
+                .iter()
+                .map(|song| song.mid.as_str())
+                .collect::<Vec<_>>(),
+            ["m1", "m3"],
+            "队列只装筛出来的那几首"
+        );
+        assert_eq!(index, 1, "播的是高亮那首（子集里的第 2 首）");
+
+        app.apply(keys::Action::Filter);
+        app.apply(keys::Action::FilterCancel);
+        assert_eq!(app.nav.filter_counts(), (3, 3), "Esc 清掉筛选");
+        assert_eq!(app.context(), keys::Context::Content);
+    }
+
+    /// 歌手名也该命中（不只是标题），并且大小写不敏感。
+    #[test]
+    fn filtering_matches_the_singer_too() {
+        let mut nav = Nav::new();
+        nav.favorites.set_items(vec![
+            titled_song("m1", "Sunny", "周杰伦"),
+            titled_song("m2", "非酋", "薛明媛"),
+        ]);
+        nav.switch_menu(Menu::Favorites);
+        nav.set_filter("薛明媛");
+        assert_eq!(nav.favorites.selected().map(|s| s.mid.as_str()), Some("m2"));
+        nav.set_filter("sun");
+        assert_eq!(
+            nav.favorites.selected().map(|s| s.mid.as_str()),
+            Some("m1"),
+            "标题匹配大小写不敏感"
+        );
+        nav.set_filter("没人叫这名字");
+        assert_eq!(nav.filter_counts(), (0, 2), "全不命中就是 0 条");
+        assert!(nav.favorites.selected().is_none(), "空结果没有可选项");
+    }
+
+    /// 越筛越窄时高亮跟着原来那一条走；它被筛掉了才回第一行。
+    #[test]
+    fn narrowing_keeps_the_highlight_while_it_still_matches() {
+        let mut nav = Nav::new();
+        nav.favorites.set_items(vec![
+            titled_song("m1", "晴天", "周杰伦"),
+            titled_song("m2", "晴天娃娃", "某某"),
+            titled_song("m3", "非酋", "薛明媛"),
+        ]);
+        nav.switch_menu(Menu::Favorites);
+        nav.favorites.move_by(1);
+        nav.set_filter("晴天");
+        assert_eq!(
+            nav.favorites.selected().map(|s| s.mid.as_str()),
+            Some("m2"),
+            "原来那条还在筛出来的集合里，光标不该弹回第一行"
+        );
+        nav.set_filter("非酋");
+        assert_eq!(
+            nav.favorites.selected().map(|s| s.mid.as_str()),
+            Some("m3"),
+            "原来那条被筛掉了，退回第一行"
+        );
+        nav.set_filter("");
+        assert_eq!(nav.favorites.len(), 3, "清空筛选后全回来");
+    }
+
+    /// 歌单列表（左栏那一屏）也能按名字筛。
+    #[test]
+    fn the_playlist_list_can_be_filtered_too() {
+        let (mut app, _runtime) = test_app();
+        app.nav.switch_menu(Menu::Playlists);
+        app.nav
+            .playlists
+            .set_items(vec![playlist("1", "嗯"), playlist("2", "循环")]);
+        app.apply(keys::Action::Filter);
+        app.apply(keys::Action::FilterChar('循'));
+        assert_eq!(app.nav.filter_counts(), (1, 2));
+        assert_eq!(
+            app.nav.playlists.selected().map(|p| p.name.as_str()),
+            Some("循环")
+        );
+        app.apply(keys::Action::FilterCancel);
+        assert_eq!(app.nav.playlists.len(), 2);
+    }
+
+    /// Esc 先清筛选（它算一层），再按才退上一层视图。
+    #[test]
+    fn esc_clears_the_filter_before_popping_a_level() {
+        let (mut app, _runtime) = test_app();
+        app.nav.switch_menu(Menu::Playlists);
+        app.nav.playlists.set_items(vec![playlist("1", "嗯")]);
+        app.nav.push_tracks(
+            "1",
+            "嗯",
+            vec![
+                titled_song("m1", "晴天", "周杰伦"),
+                titled_song("m2", "非酋", "薛明媛"),
+            ],
+        );
+        app.nav.set_filter("非酋");
+        assert_eq!(app.nav.filter_counts(), (1, 2));
+
+        app.apply(keys::Action::Back);
+        assert_eq!(app.nav.filter_counts(), (2, 2), "第一次 Esc 清掉筛选");
+        assert_eq!(app.nav.breadcrumb, ["我的歌单", "嗯"], "第一次 Esc 不退层");
+
+        app.apply(keys::Action::Back);
+        assert_eq!(app.nav.breadcrumb, ["我的歌单"], "第二次 Esc 才退上一层");
     }
 
     /// 搜完看别的屏、再切回搜索：关键词与结果都还在。
@@ -1571,13 +1872,13 @@ mod tests {
     fn search_keeps_its_screen_so_browsing_is_not_lost() {
         let mut nav = Nav::new();
         nav.switch_menu(Menu::Favorites);
-        nav.favorites.items = vec![test_song("a"), test_song("b")];
+        nav.favorites.set_items(vec![test_song("a"), test_song("b")]);
         nav.favorites.select_first();
         nav.favorites.move_by(1);
 
-        nav.begin_search_input();
+        nav.switch_menu(Menu::Search);
         nav.search_text = "晴天".to_string();
-        nav.search_results.items = vec![test_song("s1"), test_song("s2")];
+        nav.search_results.set_items(vec![test_song("s1"), test_song("s2")]);
         nav.search_results.select_first();
 
         nav.switch_menu(Menu::Favorites);
@@ -1611,7 +1912,7 @@ mod tests {
     #[test]
     fn movement_only_touches_the_focused_list() {
         let mut nav = Nav::new();
-        nav.favorites.items = vec![test_song("a"), test_song("b")];
+        nav.favorites.set_items(vec![test_song("a"), test_song("b")]);
         nav.favorites.select_first();
         nav.focus = Focus::Menu;
         assert!(nav.focused_songs().is_none());
@@ -1648,9 +1949,9 @@ mod tests {
     fn p_opens_the_playlist_picker_and_a_stays_unbound_until_the_queue_lands() {
         let (mut app, _runtime) = crate::tui::test_support::test_app();
         app.nav.switch_menu(Menu::Favorites);
-        app.nav.favorites.items = vec![test_song("a")];
+        app.nav.favorites.set_items(vec![test_song("a")]);
         app.nav.favorites.select_first();
-        app.nav.playlists.items = vec![crate::tui::test_support::test_playlist("1", "嗯")];
+        app.nav.playlists.set_items(vec![crate::tui::test_support::test_playlist("1", "嗯")]);
         app.apply(keys::Action::AddToPlaylist);
         assert!(app.picker.is_some(), "p 打开歌单选择框");
         assert_eq!(app.context(), keys::Context::PlaylistPicker);
@@ -1663,7 +1964,7 @@ mod tests {
     fn appending_puts_the_picked_song_at_the_tail() {
         let (mut app, _runtime) = crate::tui::test_support::test_app();
         app.nav.switch_menu(Menu::Favorites);
-        app.nav.favorites.items = vec![test_song("a"), test_song("b")];
+        app.nav.favorites.set_items(vec![test_song("a"), test_song("b")]);
         app.nav.favorites.select_first();
         app.queue = queue::Queue::new(Vec::new(), 0, String::new());
         app.queue.push_back(test_song("seed"));
@@ -1677,7 +1978,7 @@ mod tests {
     fn insert_next_lands_right_after_the_current_song() {
         let (mut app, _runtime) = crate::tui::test_support::test_app();
         app.nav.switch_menu(Menu::Favorites);
-        app.nav.favorites.items = vec![test_song("c")];
+        app.nav.favorites.set_items(vec![test_song("c")]);
         app.nav.favorites.select_first();
         app.queue = queue::Queue::new(vec![test_song("a"), test_song("b")], 0, "嗯");
         app.push_to_queue(true);
@@ -1749,8 +2050,8 @@ mod tests {
         app.record_history(&song);
         app.record_history(&song);
         assert_eq!(app.history.len(), 1, "同一首连着播只记一条");
-        assert_eq!(app.nav.history_view.items.len(), 1, "历史屏立刻能看到");
-        assert_eq!(app.nav.history_view.items[0].mid, "a");
+        assert_eq!(app.nav.history_view.items().len(), 1, "历史屏立刻能看到");
+        assert_eq!(app.nav.history_view.items()[0].mid, "a");
         assert!(
             app.nav.history_view.labels[0].contains("来自《嗯》"),
             "副标题要写来源：{:?}",
@@ -1782,7 +2083,7 @@ mod tests {
         app.switch_menu(Menu::History);
         app.apply(keys::Action::HistoryClear);
         assert!(app.history.is_empty());
-        assert!(app.nav.history_view.items.is_empty());
+        assert!(app.nav.history_view.items().is_empty());
         assert_eq!(app.status, "已清空播放历史");
         assert!(!app.history_path.exists(), "磁盘上的也清了");
     }
@@ -1802,7 +2103,7 @@ mod tests {
     fn moving_the_menu_cursor_does_not_switch_the_view() {
         let (mut app, _runtime) = crate::tui::test_support::test_app();
         app.switch_menu(Menu::Favorites);
-        app.nav.favorites.items = vec![test_song("a"), test_song("b")];
+        app.nav.favorites.set_items(vec![test_song("a"), test_song("b")]);
         app.nav.favorites.select_first();
         app.nav.favorites.move_by(1);
         app.nav.focus = Focus::Menu;
@@ -1858,8 +2159,8 @@ mod tests {
             favorites,
             crate::tui::test_support::test_playlist("1", "嗯"),
         ])));
-        assert_eq!(app.nav.playlists.items.len(), 1, "只剩真歌单");
-        assert_eq!(app.nav.playlists.items[0].name, "嗯");
+        assert_eq!(app.nav.playlists.items().len(), 1, "只剩真歌单");
+        assert_eq!(app.nav.playlists.items()[0].name, "嗯");
     }
 
     /// 队列浮层里的 `j`/`k` 必须挪浮层自己的高亮——它盖在主区上，
@@ -1868,7 +2169,7 @@ mod tests {
     fn the_queue_overlay_moves_its_own_highlight() {
         let (mut app, _runtime) = crate::tui::test_support::test_app();
         app.nav.switch_menu(Menu::Favorites);
-        app.nav.favorites.items = vec![test_song("keep1"), test_song("keep2")];
+        app.nav.favorites.set_items(vec![test_song("keep1"), test_song("keep2")]);
         app.nav.favorites.select_first();
         app.queue = queue::Queue::new(
             vec![test_song("a"), test_song("b"), test_song("c")],
@@ -1899,12 +2200,12 @@ mod tests {
     fn the_playlist_picker_moves_its_own_highlight() {
         let (mut app, _runtime) = crate::tui::test_support::test_app();
         app.nav.switch_menu(Menu::Favorites);
-        app.nav.favorites.items = vec![test_song("a")];
+        app.nav.favorites.set_items(vec![test_song("a")]);
         app.nav.favorites.select_first();
-        app.nav.playlists.items = vec![
+        app.nav.playlists.set_items(vec![
             crate::tui::test_support::test_playlist("1", "嗯"),
             crate::tui::test_support::test_playlist("2", "循环"),
-        ];
+        ]);
         app.apply(keys::Action::AddToPlaylist);
         let Some((_, state, _)) = &app.picker else {
             panic!("选择框该开着");

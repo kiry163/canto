@@ -57,7 +57,12 @@ pub enum Action {
     Favorite,
     Download,
     ToggleLyric,
-    Search,
+    /// `/`：在当前列表里筛（**不**跳去搜索屏）。
+    Filter,
+    FilterChar(char),
+    FilterBackspace,
+    FilterSubmit,
+    FilterCancel,
     InputChar(char),
     InputSubmit,
     InputCancel,
@@ -73,6 +78,8 @@ pub enum Context {
     Content,
     /// 搜索输入框正在吃键。
     SearchInput,
+    /// `/` 打开的列表筛选框（跟搜索框一样是文本输入，只是 Enter 的含义不同）。
+    FilterInput,
     /// `p` 弹出的歌单选择框。
     PlaylistPicker,
     /// 帮助浮层。
@@ -89,6 +96,15 @@ pub fn resolve(context: Context, key: KeyEvent) -> Option<Action> {
         return Some(Action::Quit);
     }
     match context {
+        Context::FilterInput => match key.code {
+            KeyCode::Enter => Some(Action::FilterSubmit),
+            KeyCode::Esc => Some(Action::FilterCancel),
+            KeyCode::Backspace => Some(Action::FilterBackspace),
+            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(Action::FilterChar(character))
+            }
+            _ => None,
+        },
         Context::SearchInput => match key.code {
             KeyCode::Enter => Some(Action::InputSubmit),
             KeyCode::Esc => Some(Action::InputCancel),
@@ -168,7 +184,8 @@ fn common(key: KeyEvent, context: Context) -> Option<Action> {
         KeyCode::Char('f') => Some(Action::Favorite),
         KeyCode::Char('d') => Some(Action::Download),
         KeyCode::Char('y') => Some(Action::ToggleLyric),
-        KeyCode::Char('/') => Some(Action::Search),
+        // `/` 筛当前列表；搜索屏有自己的入口（菜单第 3 项）。
+        KeyCode::Char('/') => Some(Action::Filter),
         // 主区可能有上一层（「我的歌单 › 某歌单」），菜单没有——它是导航的最外层。
         KeyCode::Esc | KeyCode::Backspace if context == Context::Content => Some(Action::Back),
         _ => None,
@@ -185,6 +202,54 @@ mod tests {
 
     fn press(context: Context, code: KeyCode) -> Option<Action> {
         resolve(context, key(code))
+    }
+
+    /// `/` 是「筛当前列表」，不再跳去搜索屏（搜索屏有自己的入口：菜单第 3 项）。
+    #[test]
+    fn slash_filters_the_current_list() {
+        for context in [Context::Menu, Context::Content] {
+            assert_eq!(
+                press(context, KeyCode::Char('/')),
+                Some(Action::Filter),
+                "{context:?} 里 / 该是筛选"
+            );
+        }
+        assert_eq!(
+            press(Context::FilterInput, KeyCode::Char('/')),
+            Some(Action::FilterChar('/')),
+            "筛选框里再按 / 就是打一个斜杠"
+        );
+    }
+
+    /// 筛选框跟搜索框一样收字，只是 Enter 的含义不同（确认筛选 vs 发搜索）。
+    #[test]
+    fn the_filter_box_takes_text_until_enter() {
+        assert_eq!(
+            press(Context::FilterInput, KeyCode::Char('晴')),
+            Some(Action::FilterChar('晴'))
+        );
+        assert_eq!(
+            press(Context::FilterInput, KeyCode::Backspace),
+            Some(Action::FilterBackspace)
+        );
+        assert_eq!(
+            press(Context::FilterInput, KeyCode::Enter),
+            Some(Action::FilterSubmit)
+        );
+        assert_eq!(
+            press(Context::FilterInput, KeyCode::Esc),
+            Some(Action::FilterCancel)
+        );
+        assert_eq!(
+            press(Context::FilterInput, KeyCode::Char('q')),
+            Some(Action::FilterChar('q')),
+            "输入框里的 q 是打字，不是退出"
+        );
+        assert_eq!(
+            press(Context::FilterInput, KeyCode::Char('j')),
+            Some(Action::FilterChar('j')),
+            "输入框里 j/k 不该挪高亮"
+        );
     }
 
     #[test]

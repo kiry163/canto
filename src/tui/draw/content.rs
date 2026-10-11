@@ -15,16 +15,23 @@ use super::{focused_block, format_duration, format_size, highlight};
 
 impl App {
     pub(super) fn draw_content(&mut self, frame: &mut Frame, area: Rect) {
-        let title = format!(" {} ", self.nav.breadcrumb.join(" › "));
+        let title = self.content_title();
+        // 筛选框开着时，第一行让给输入行（跟搜索屏的输入行一个样子）。
+        let area = if self.filter_input {
+            let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area);
+            self.draw_filter_input(frame, rows[0]);
+            rows[1]
+        } else {
+            area
+        };
         let focused = self.nav.focus == Focus::Content;
         match self.nav.menu {
             Menu::Playlists if self.nav.shown.is_none() => {
                 let items: Vec<ListItem> = self
                     .nav
                     .playlists
-                    .items
-                    .iter()
-                    .map(|playlist| {
+                    .visible_rows()
+                    .map(|(playlist, _)| {
                         ListItem::new(format!("{:>5}  {}", playlist.song_count, playlist.name))
                     })
                     .collect();
@@ -47,7 +54,7 @@ impl App {
                     ])
                 } else if keyword.is_empty() {
                     Line::from(Span::styled(
-                        "按 / 输入关键词，回车搜索",
+                        "按 3（或菜单里选「搜索」）回到输入框",
                         Style::new().fg(Color::DarkGray),
                     ))
                 } else {
@@ -62,6 +69,27 @@ impl App {
             Menu::History => self.draw_history(frame, area, &title, focused),
             _ => self.draw_songs(frame, area, &title, focused),
         }
+    }
+
+    /// 内容区标题：面包屑，外加「筛选」徽标（知道自己在看子集、剩下几条）。
+    fn content_title(&self) -> String {
+        let breadcrumb = self.nav.breadcrumb.join(" › ");
+        let keyword = self.nav.filter_text();
+        if keyword.is_empty() {
+            return format!(" {breadcrumb} ");
+        }
+        let (hits, total) = self.nav.filter_counts();
+        format!(" {breadcrumb} 筛选「{keyword}」{hits}/{total} ")
+    }
+
+    /// `/` 打开的筛选输入行。
+    fn draw_filter_input(&self, frame: &mut Frame, area: Rect) {
+        let line = Line::from(vec![
+            Span::styled("筛选：", Style::new().fg(Color::Yellow)),
+            Span::raw(self.nav.filter_text().to_string()),
+            Span::styled("▏", Style::new().fg(Color::Yellow)),
+        ]);
+        frame.render_widget(Paragraph::new(line), area);
     }
 
     /// 历史屏：行是「标题 — 歌手」，右侧写「时间 · 来自《来源》」。
@@ -81,22 +109,20 @@ impl App {
             return;
         }
         let playing = self.now_playing_mid();
-        let view = self.nav.song_view();
-        let items: Vec<ListItem> = view
-            .items
-            .iter()
-            .enumerate()
-            .map(|(index, song)| {
+        let items: Vec<ListItem> = self
+            .nav
+            .song_view()
+            .visible_rows()
+            .map(|(song, label)| {
                 let marker = if playing.as_deref() == Some(song.mid.as_str()) {
                     "♪"
                 } else {
                     " "
                 };
-                let right = view.labels.get(index).cloned().unwrap_or_default();
                 ListItem::new(Line::from(vec![
                     Span::raw(format!("{marker} {} — {}", song.title, song.singers)),
                     Span::raw("  "),
-                    Span::styled(right, Style::new().fg(Color::DarkGray)),
+                    Span::styled(label.to_string(), Style::new().fg(Color::DarkGray)),
                 ]))
             })
             .collect();
@@ -115,9 +141,8 @@ impl App {
         let items: Vec<ListItem> = self
             .nav
             .song_view()
-            .items
-            .iter()
-            .map(|song| {
+            .visible_rows()
+            .map(|(song, _)| {
                 let marker = if Some(song.mid.as_str()) == playing.as_deref() {
                     "♪"
                 } else {
