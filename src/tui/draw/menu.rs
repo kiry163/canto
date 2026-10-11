@@ -1,7 +1,7 @@
 //! 左侧菜单（宽屏是左列，窄屏是顶部一行页签）。
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, Paragraph};
@@ -16,23 +16,13 @@ impl App {
             .iter()
             .map(|menu| ListItem::new(format!("{} {}", icon(*menu), menu.title())))
             .collect();
-        let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(area);
-        // 高亮跟着当前菜单项走（菜单项就是当前这一屏，不需要单独的选中态）。
-        self.menu_state.select(Some(self.nav.menu.index()));
+        // 高亮跟着菜单游标走：`j`/`k` 只动它，进去要按 Enter。
+        self.menu_state.select(Some(self.nav.cursor.index()));
         let list = List::new(items)
             .block(focused_block(" 菜单 ", focused))
             .highlight_style(highlight())
             .highlight_symbol("▶ ");
-        frame.render_stateful_widget(list, rows[0], &mut self.menu_state);
-
-        let identity = crate::session::jar()
-            .state()
-            .identity
-            .unwrap_or_else(|| "未登录".to_string());
-        frame.render_widget(
-            Paragraph::new(format!(" {identity}")).style(Style::new().fg(Color::DarkGray)),
-            rows[1],
-        );
+        frame.render_stateful_widget(list, area, &mut self.menu_state);
     }
 
 }

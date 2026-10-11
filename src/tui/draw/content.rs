@@ -25,11 +25,7 @@ impl App {
                     .items
                     .iter()
                     .map(|playlist| {
-                        let marker = if playlist.is_favorites { "♥" } else { " " };
-                        ListItem::new(format!(
-                            "{marker} {:>5}  {}",
-                            playlist.song_count, playlist.name
-                        ))
+                        ListItem::new(format!("{:>5}  {}", playlist.song_count, playlist.name))
                     })
                     .collect();
                 let list = List::new(items)
