@@ -32,6 +32,11 @@ pub fn log_path() -> PathBuf {
     data_dir().join("canto.log")
 }
 
+/// 单例锁文件（`flock` 的目标；内容只是持有者的 pid）。
+pub fn lock_path() -> PathBuf {
+    data_dir().join("canto.lock")
+}
+
 /// 终端装不下二维码时落盘的 PNG。
 pub fn qr_png_path() -> PathBuf {
     data_dir().join("login-qr.png")
@@ -50,6 +55,7 @@ mod tests {
             config_path(),
             history_path(),
             log_path(),
+            lock_path(),
             qr_png_path(),
         ];
         for path in &paths {

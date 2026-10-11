@@ -8,6 +8,7 @@ mod config;
 mod download;
 mod history;
 mod http;
+mod instance;
 mod media;
 mod model;
 mod paths;
@@ -29,6 +30,18 @@ use crate::player::Engine;
 fn main() -> Result<()> {
     restore_sigpipe();
     let cli = Cli::parse();
+    // 单例要在写日志**之前**：`init_tracing` 会清空日志文件，第二个实例被拒时
+    // 不该顺手把第一个实例的日志抹掉。
+    let lock = paths::lock_path();
+    let _instance = match instance::Instance::acquire(&lock)? {
+        Some(instance) => instance,
+        None => {
+            let who = instance::pid_in(&lock)
+                .map(|pid| format!("（pid {pid}）"))
+                .unwrap_or_default();
+            anyhow::bail!("已经有一个 canto 在跑{who}；同一份数据目录只允许一个实例");
+        }
+    };
     init_tracing(&cli.log)?;
     let runtime = tokio::runtime::Runtime::new().context("创建异步运行时失败")?;
     let (config, warning) = config::load();
