@@ -349,22 +349,12 @@ mod tests {
     #[test]
     fn sweeping_drops_parts_and_the_oldest_files_first() {
         let dir = temp_dir("sweep");
+        // 谁更老靠写的先后排出来，不调 `set_modified`：有的环境（实测是 wine）上它不生效，
+        // 两个文件的 mtime 会一样，「最久没听」就没法判定了。
         std::fs::write(dir.join("old.320.mp3"), vec![0_u8; 100]).expect("写老文件");
+        std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(dir.join("new.320.mp3"), vec![0_u8; 100]).expect("写新文件");
         std::fs::write(dir.join("half.320.mp3.part"), vec![0_u8; 50]).expect("写半截文件");
-        // 明确把 old 的时间调早，别依赖文件系统 mtime 的粗细。
-        let old = File::options()
-            .write(true)
-            .open(dir.join("old.320.mp3"))
-            .expect("打开老文件");
-        old.set_modified(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1000))
-            .expect("改老文件时间");
-        let new = File::options()
-            .write(true)
-            .open(dir.join("new.320.mp3"))
-            .expect("打开新文件");
-        new.set_modified(SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(2000))
-            .expect("改新文件时间");
 
         // 上限 150：总共有 200，得删掉最老的 100。
         let (deleted, freed) = sweep_dir(&dir, 150);
