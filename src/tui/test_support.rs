@@ -16,7 +16,8 @@ use super::state::App;
 /// 宿主，测试必须一直持有它（丢掉运行时，后台任务就哑了）。调用方写成
 /// `let (mut app, _runtime) = test_app();` 就行。
 ///
-/// 另一点：音频设备是真开的（本机跑测试可用；无音频设备的 CI 要另想办法注入假引擎）。
+/// 音频用哑引擎（`Engine::silent`），不碰真实设备：CI 上没有声卡也跑得动，
+/// 开发机也不会因为设备被别的程序独占而挂掉测试。
 pub(super) fn test_app() -> (App, tokio::runtime::Runtime) {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -25,7 +26,7 @@ pub(super) fn test_app() -> (App, tokio::runtime::Runtime) {
     let app = App::new(
         runtime.handle().clone(),
         // 关掉缓存：测试不该往使用者真实的 ~/.cache/canto 里写东西。
-        Engine::start(false).expect("打开音频设备"),
+        Engine::silent(false),
         Config::default(),
         // 每个测试一个独立的临时历史文件，免得互相看到对方写的。
         std::env::temp_dir().join(format!(

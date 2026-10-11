@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use rodio::source::Source;
-use rodio::stream::{DeviceSinkBuilder, MixerDeviceSink};
+use rodio::stream::DeviceSinkBuilder;
 use rodio::{Decoder, Player};
 
 use crate::cache;
@@ -136,6 +136,30 @@ impl Engine {
         let mut sink = DeviceSinkBuilder::open_default_sink()
             .context("打开默认音频设备失败（是不是有别的程序独占？）")?;
         sink.log_on_drop(false);
+        let mixer = sink.mixer().clone();
+        Self::spawn(sink, mixer, cache_on)
+    }
+
+    /// 哑引擎：不碰音频设备，直接接一个没人听的 mixer。
+    ///
+    /// 给没有声卡的机器用（CI 上没有音频设备）。测试要的是界面逻辑而不是声音，
+    /// 真设备那条路只由 `start` 走。
+    #[cfg(test)]
+    pub(crate) fn silent(cache_on: bool) -> Self {
+        let (mixer, source) = rodio::mixer::mixer(
+            rodio::ChannelCount::new(2).expect("2 声道"),
+            rodio::SampleRate::new(44_100).expect("44.1kHz"),
+        );
+        Self::spawn(source, mixer, cache_on).expect("启动音频线程")
+    }
+
+    /// 起音频线程。`keep_alive` 只是被线程攥着不放：真设备是 `MixerDeviceSink`
+    /// （丢了声音就停），测试里是 mixer 的输出端。
+    fn spawn(
+        keep_alive: impl Send + 'static,
+        mixer: rodio::mixer::Mixer,
+        cache_on: bool,
+    ) -> Result<Self> {
         let state = Arc::new(Mutex::new(Snapshot::default()));
         let running = Arc::new(AtomicBool::new(true));
         let promoted = Arc::new(Mutex::new(Vec::new()));
@@ -145,7 +169,17 @@ impl Engine {
         let thread_promoted = promoted.clone();
         std::thread::Builder::new()
             .name("canto-audio".to_string())
-            .spawn(move || run(rx, thread_state, sink, thread_running, cache_on, thread_promoted))
+            .spawn(move || {
+                run(
+                    rx,
+                    thread_state,
+                    keep_alive,
+                    mixer,
+                    thread_running,
+                    cache_on,
+                    thread_promoted,
+                )
+            })
             .context("启动音频线程失败")?;
         Ok(Self {
             tx,
@@ -208,12 +242,12 @@ impl Engine {
 fn run(
     rx: Receiver<Cmd>,
     state: Arc<Mutex<Snapshot>>,
-    sink: MixerDeviceSink,
+    _keep_alive: impl Send + 'static,
+    mixer: rodio::mixer::Mixer,
     running: Arc<AtomicBool>,
     cache_on: bool,
     promoted: cache::Promoted,
 ) {
-    let mixer = sink.mixer().clone();
     let mut player: Option<Player> = None;
     let mut volume = 1.0_f32;
     // 连续快进/快退的锚点，见 `Cmd::SeekBy` 的说明。
