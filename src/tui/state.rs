@@ -28,6 +28,22 @@ use super::queue;
 /// 连续遇到不可播曲目时最多自动跳几首——整个歌单都没版权时别一路刷到底。
 const MAX_AUTO_SKIPS: u32 = 3;
 
+/// 把 `state` 的选择位置挪 `delta` 格（越界夹住，空列表不动）。
+fn step_state(state: &mut ListState, len: usize, delta: isize) {
+    if len == 0 {
+        return;
+    }
+    let current = state.selected().unwrap_or(0) as isize;
+    state.select(Some((current + delta).clamp(0, len as isize - 1) as usize));
+}
+
+/// 跳到首 / 尾。
+fn edge_state(state: &mut ListState, len: usize, last: bool) {
+    if len > 0 {
+        state.select(Some(if last { len - 1 } else { 0 }));
+    }
+}
+
 /// 当前在哪一屏。启动时看会话：没登录就先出登录屏。
 pub(super) enum Screen {
     Login(LoginState),
@@ -1387,8 +1403,19 @@ impl App {
         }
     }
 
-    /// `j`/`k`：焦点在菜单上只挪高亮（**不**切屏），在主区就是挪选中行。
+    /// `j`/`k` 的落点：浮层开着就挪浮层自己的列表，否则按焦点走。
+    ///
+    /// 队列浮层与歌单选择框各有一份 `ListState`——它们盖在主区上，方向键绝不该
+    /// 穿透到底下的列表去（那正是「浮层里选不动」这个 bug 的成因）。
     fn move_selection(&mut self, delta: isize) {
+        if self.queue_open {
+            step_state(&mut self.queue_state, self.queue.len(), delta);
+            return;
+        }
+        if let Some((playlists, state, _)) = self.picker.as_mut() {
+            step_state(state, playlists.len(), delta);
+            return;
+        }
         if self.nav.focus == Focus::Menu {
             let next = (self.nav.cursor.index() as isize + delta)
                 .clamp(0, Menu::ALL.len() as isize - 1);
@@ -1398,7 +1425,16 @@ impl App {
         self.nav.move_focus_by(delta);
     }
 
+    /// `g`/`G`（Home/End）：落点同上，跳到首 / 尾。
     fn select_edge(&mut self, last: bool) {
+        if self.queue_open {
+            edge_state(&mut self.queue_state, self.queue.len(), last);
+            return;
+        }
+        if let Some((playlists, state, _)) = self.picker.as_mut() {
+            edge_state(state, playlists.len(), last);
+            return;
+        }
         if self.nav.focus == Focus::Menu {
             self.nav.cursor = if last { Menu::History } else { Menu::Favorites };
             return;
@@ -1824,5 +1860,62 @@ mod tests {
         ])));
         assert_eq!(app.nav.playlists.items.len(), 1, "只剩真歌单");
         assert_eq!(app.nav.playlists.items[0].name, "嗯");
+    }
+
+    /// 队列浮层里的 `j`/`k` 必须挪浮层自己的高亮——它盖在主区上，
+    /// 方向键穿透到底下的列表就会变成「浮层里选不动」（回归 bug）。
+    #[test]
+    fn the_queue_overlay_moves_its_own_highlight() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.nav.switch_menu(Menu::Favorites);
+        app.nav.favorites.items = vec![test_song("keep1"), test_song("keep2")];
+        app.nav.favorites.select_first();
+        app.queue = queue::Queue::new(
+            vec![test_song("a"), test_song("b"), test_song("c")],
+            0,
+            "嗯",
+        );
+        app.apply(keys::Action::QueueOverlay);
+        assert_eq!(app.queue_state.selected(), Some(0), "打开时落在正在播的那首上");
+
+        app.apply(keys::Action::Down);
+        assert_eq!(app.queue_state.selected(), Some(1), "j 该挪浮层的高亮");
+        assert_eq!(app.nav.favorites.state.selected(), Some(0), "底下那份列表不许动");
+
+        app.apply(keys::Action::Last);
+        assert_eq!(app.queue_state.selected(), Some(2), "G 跳末尾");
+        app.apply(keys::Action::First);
+        assert_eq!(app.queue_state.selected(), Some(0), "g 回开头");
+
+        // 高亮在末尾时删除：删掉的是第 3 首（不是正在播的那首），队列短一格。
+        app.apply(keys::Action::Last);
+        app.apply(keys::Action::QueueDelete);
+        assert_eq!(app.queue.len(), 2);
+        assert_eq!(app.queue.items()[app.queue.index()].mid, "a", "当前这首没被换掉");
+    }
+
+    /// 歌单选择框（`p`）里有同一类问题：它的高亮也得自己走。
+    #[test]
+    fn the_playlist_picker_moves_its_own_highlight() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.nav.switch_menu(Menu::Favorites);
+        app.nav.favorites.items = vec![test_song("a")];
+        app.nav.favorites.select_first();
+        app.nav.playlists.items = vec![
+            crate::tui::test_support::test_playlist("1", "嗯"),
+            crate::tui::test_support::test_playlist("2", "循环"),
+        ];
+        app.apply(keys::Action::AddToPlaylist);
+        let Some((_, state, _)) = &app.picker else {
+            panic!("选择框该开着");
+        };
+        assert_eq!(state.selected(), Some(0));
+
+        app.apply(keys::Action::Down);
+        let Some((_, state, _)) = &app.picker else {
+            panic!("选择框还开着");
+        };
+        assert_eq!(state.selected(), Some(1), "j 该挪选择框的高亮");
+        assert_eq!(app.nav.favorites.state.selected(), Some(0), "底下那份列表不许动");
     }
 }

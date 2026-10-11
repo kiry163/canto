@@ -206,6 +206,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
+    use crate::tui::queue;
     use crate::tui::state::Menu;
     use crate::tui::test_support::{test_app, test_song};
 
@@ -295,6 +296,39 @@ mod tests {
         assert!(text.contains("全局Tab焦点"), "全局键位：{text}");
         assert!(text.contains("歌单Enter进入曲目"), "当前屏那一行要跟着菜单变：{text}");
         assert!(text.contains("关闭Esc或?"), "关闭方式");
+    }
+
+    /// 队列浮层里的高亮要真画在挪动后的那一行上。
+    ///
+    /// 回归：方向键原本穿透到底下的主区列表，浮层里的高亮永远不动（「浮层选不动」）。
+    /// 这里用 `TestBackend` 看真实单元格，避免增量重绘造成的误判。
+    #[test]
+    fn the_queue_overlay_draws_the_highlight_on_the_selected_row() {
+        let (mut app, _runtime) = test_app();
+        app.queue = queue::Queue::new(vec![test_song("a"), test_song("b")], 0, "嗯");
+        app.apply(crate::tui::keys::Action::QueueOverlay);
+        let before = frame_flat(&mut app, 160, 40);
+        assert!(before.contains("队列1/2"), "浮层标题要显示序号：{before}");
+
+        // 第 2 行（歌 b）与第 1 行之间有没有高亮符号——菜单那个 ▶ 不算。
+        let arrow_between = |text: &str| {
+            let (first, second) = (
+                text.find("歌a").expect("第 1 行还在"),
+                text.find("歌b").expect("第 2 行还在"),
+            );
+            text.char_indices()
+                .filter(|(_, character)| *character == '▶')
+                .map(|(index, _)| index)
+                .find(|index| *index > first && *index < second)
+        };
+        assert!(arrow_between(&before).is_none(), "一开始高亮在第 1 行上");
+
+        app.apply(crate::tui::keys::Action::Down);
+        let after = frame_flat(&mut app, 160, 40);
+        assert!(
+            arrow_between(&after).is_some(),
+            "按 j 之后 ▶ 该落在第 2 行（歌 b）上：{after}"
+        );
     }
 
     #[test]
