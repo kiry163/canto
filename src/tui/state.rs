@@ -546,6 +546,19 @@ pub(super) struct App {
     pub(super) show_lyric: bool,
     /// `Y`：全屏视图（内容区整块让给它，播放条与状态行照旧）。
     pub(super) now_playing_full: bool,
+    /// 频谱：采样窗口的副本（复用缓冲，逐帧零分配）。
+    pub(super) spectrum_scratch: Vec<f32>,
+    /// 原始频段能量（0.0~1.0），由 FFT 分频得到。
+    pub(super) spectrum_raw: Vec<f32>,
+    /// 平滑后的频谱（快起慢落），画的是这一份。
+    pub(super) spectrum_smooth: Vec<f32>,
+    /// 峰值刻度：比柱子落得慢，柱子顶上那条线。
+    pub(super) spectrum_peak: Vec<f32>,
+    /// FFT 分析器（内部缓冲复用，不再逐帧分配）。
+    pub(super) analyzer: crate::spectrum::Analyzer,
+    /// 上一次推进平滑的时刻。平滑按**真实经过时间**算，不按帧数——帧率从
+    /// 150ms 提到 33ms 时观感才不会变。
+    pub(super) last_tick: std::time::Instant,
     /// 本地已经有完整缓存的那些歌：mid →（缓存那份的档位, 字节数）。列表里标「已缓存」
     /// 并显示缓存档位（命中缓存时播放/下载用的就是它）；启动时扫一遍目录，播放中刚听完
     /// 转正的那首由音频线程回传（见 `Engine::take_cached`）。
@@ -595,6 +608,12 @@ impl App {
             lyric_loading: false,
             show_lyric: true,
             now_playing_full: false,
+            spectrum_scratch: Vec::new(),
+            spectrum_raw: Vec::new(),
+            spectrum_smooth: Vec::new(),
+            spectrum_peak: Vec::new(),
+            analyzer: crate::spectrum::Analyzer::new(),
+            last_tick: std::time::Instant::now(),
             cached: crate::cache::cached_entries(),
             filter_input: false,
             help_open: false,
@@ -1589,8 +1608,65 @@ impl App {
         self.nav.edge_selection(last);
     }
 
+    /// 频谱是不是该动（全屏视图开着 + 正在播）。关着的时候不取、不算、不画。
+    pub(super) fn spectrum_wanted(&self) -> bool {
+        self.now_playing_full && self.engine.snapshot().phase == crate::player::Phase::Playing
+    }
+
+    /// 取一次频谱：采样窗口 → 频段能量。`Levels` 里没有数据时 `spectrum_raw` 会是空的。
+    fn refresh_spectrum(&mut self) {
+        let levels = self.engine.levels();
+        let rate = levels.read_into(&mut self.spectrum_scratch);
+        self.analyzer
+            .analyze_into(&self.spectrum_scratch, rate, &mut self.spectrum_raw);
+    }
+
+    /// 按真实经过时间做指数平滑：起振快、回落慢，柱子才跟手又不抖。
+    ///
+    /// 时间常数必须**远大于帧间隔**，否则块字符会在 ▁ 与 █ 之间跳变（看起来就是一直在闪）。
+    fn advance_visualizer(&mut self, elapsed: std::time::Duration) {
+        if self.spectrum_raw.is_empty() {
+            self.spectrum_smooth.clear();
+            self.spectrum_peak.clear();
+            return;
+        }
+
+        let count = self.spectrum_raw.len();
+        self.spectrum_smooth.resize(count, 0.0);
+        self.spectrum_peak.resize(count, 0.0);
+
+        // 夹一下：切屏或卡顿后 elapsed 可能很大，避免一帧跳到底
+        let seconds = elapsed.as_secs_f32().clamp(0.0, 0.5);
+        let attack = 1.0 - (-seconds / 0.12).exp();
+        let decay = 1.0 - (-seconds / 0.40).exp();
+        // 峰值每秒下落 60%（约 1.7 秒落到底），比柱子慢得多，才有频谱仪的余韵
+        let peak_fall = seconds * 0.6;
+
+        for index in 0..count {
+            let target = self.spectrum_raw[index].clamp(0.0, 1.0);
+            let current = self.spectrum_smooth[index];
+            let factor = if target > current { attack } else { decay };
+            let next = current + (target - current) * factor;
+            self.spectrum_smooth[index] = next;
+
+            let peak = self.spectrum_peak[index];
+            self.spectrum_peak[index] = (peak - peak_fall).max(next);
+        }
+    }
+
     /// 每帧收尾：引擎死了要报，播完了要接上下一首，下载进度刷到状态栏。
     pub(super) fn tick(&mut self) {
+        // 频谱：只在全屏视图开着且正在播时取，别的屏不付这份算力。
+        let now = std::time::Instant::now();
+        let elapsed = now.saturating_duration_since(self.last_tick);
+        self.last_tick = now;
+        if self.spectrum_wanted() {
+            self.refresh_spectrum();
+        } else {
+            self.spectrum_raw.clear();
+        }
+        self.advance_visualizer(elapsed);
+
         // 刚缓存完的歌：列表里的「已缓存」标记要知道（连档位与大小一起）。
         for (mid, quality, bytes) in self.engine.take_cached() {
             self.cached.insert(mid, (quality, bytes));
@@ -1846,6 +1922,38 @@ mod tests {
 
         app.apply(keys::Action::Back);
         assert_eq!(app.nav.title_chain(), ["我的歌单"], "第二次 Esc 才退上一层");
+    }
+
+    #[test]
+    fn a_single_frame_of_sound_does_not_jump_to_the_top() {
+        // 静音中突然来一记鼓点：一帧就该走完的话，块字符会在 ▁ 与 █ 之间跳变
+        let (mut app, _runtime) = test_app();
+        app.spectrum_raw = vec![1.0; crate::spectrum::BANDS];
+        app.advance_visualizer(std::time::Duration::from_millis(33));
+        let after = app.spectrum_smooth[0];
+        assert!(after > 0.0 && after < 0.5, "一帧就走了 {after:.2}，太快了");
+        // 峰值不会低于柱体
+        assert!(app.spectrum_peak[0] >= after);
+    }
+
+    #[test]
+    fn smoothing_is_frame_rate_independent() {
+        // 同一段真实时间，拆成两帧推进与一帧推进结果一致
+        let (mut one, _runtime) = test_app();
+        one.spectrum_raw = vec![1.0; crate::spectrum::BANDS];
+        one.advance_visualizer(std::time::Duration::from_millis(66));
+
+        let (mut two, _runtime) = test_app();
+        two.spectrum_raw = vec![1.0; crate::spectrum::BANDS];
+        two.advance_visualizer(std::time::Duration::from_millis(33));
+        two.advance_visualizer(std::time::Duration::from_millis(33));
+
+        assert!(
+            (one.spectrum_smooth[0] - two.spectrum_smooth[0]).abs() < 1e-3,
+            "帧率不该改变观感：{} vs {}",
+            one.spectrum_smooth[0],
+            two.spectrum_smooth[0]
+        );
     }
 
     /// `Y` 开关全屏视图；`Esc` / 数字切屏都会退出它。

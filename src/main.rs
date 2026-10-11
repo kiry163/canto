@@ -10,6 +10,7 @@ mod download;
 mod history;
 mod http;
 mod instance;
+mod levels;
 mod media;
 mod model;
 mod paths;
@@ -17,6 +18,7 @@ mod player;
 mod qq;
 mod qr;
 mod session;
+mod spectrum;
 mod tui;
 
 use anyhow::{Context, Result};

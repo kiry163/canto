@@ -20,6 +20,7 @@ use rodio::stream::DeviceSinkBuilder;
 use rodio::{Decoder, Player};
 
 use crate::cache;
+use crate::levels::{LevelMeter, Levels};
 use crate::media::{MediaStream, Source as MediaSource};
 use crate::model::{Quality, Song};
 use crate::qq::vkey::Candidate;
@@ -126,6 +127,8 @@ pub struct Engine {
     running: Arc<AtomicBool>,
     /// 刚缓存完的歌（mid、档位、字节数）。界面每帧取走，用来刷新列表里的「已缓存」标记。
     promoted: cache::Promoted,
+    /// 频谱分析用的采样通道：音频线程写、界面线程读（见 [`crate::levels`]）。
+    levels: Levels,
 }
 
 impl Engine {
@@ -167,6 +170,10 @@ impl Engine {
         let thread_state = state.clone();
         let thread_running = running.clone();
         let thread_promoted = promoted.clone();
+        // 先建好再分身：句柄与音频线程必须是**同一个** Levels，
+        // 否则界面读到的永远是零，柱子不会动。
+        let levels = Levels::new();
+        let thread_levels = levels.clone();
         std::thread::Builder::new()
             .name("canto-audio".to_string())
             .spawn(move || {
@@ -178,6 +185,7 @@ impl Engine {
                     thread_running,
                     cache_on,
                     thread_promoted,
+                    thread_levels,
                 )
             })
             .context("启动音频线程失败")?;
@@ -186,6 +194,7 @@ impl Engine {
             state,
             running,
             promoted,
+            levels,
         })
     }
 
@@ -194,6 +203,11 @@ impl Engine {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone()
+    }
+
+    /// 频谱分析用的采样通道。`Clone` 只是克隆几个 `Arc`，界面拿一份长期持有即可。
+    pub fn levels(&self) -> Levels {
+        self.levels.clone()
     }
 
     /// 取走「刚缓存完」的歌（界面每帧调一次）。
@@ -239,6 +253,7 @@ impl Engine {
 }
 
 /// 音频线程主循环：处理命令 + 定时刷新状态快照。
+#[allow(clippy::too_many_arguments)]
 fn run(
     rx: Receiver<Cmd>,
     state: Arc<Mutex<Snapshot>>,
@@ -247,6 +262,7 @@ fn run(
     running: Arc<AtomicBool>,
     cache_on: bool,
     promoted: cache::Promoted,
+    levels: Levels,
 ) {
     let mut player: Option<Player> = None;
     let mut volume = 1.0_f32;
@@ -265,6 +281,7 @@ fn run(
                     &mut seek_anchor,
                     cache_on,
                     &promoted,
+                    &levels,
                 );
                 // 连按按键时一次收干净，别让命令排队等下一个 tick。
                 while let Ok(cmd) = rx.try_recv() {
@@ -277,6 +294,7 @@ fn run(
                         &mut seek_anchor,
                         cache_on,
                         &promoted,
+                        &levels,
                     );
                 }
             }
@@ -301,12 +319,15 @@ fn handle(
     seek_anchor: &mut Option<Duration>,
     cache_on: bool,
     promoted: &cache::Promoted,
+    levels: &Levels,
 ) {
     match cmd {
         Cmd::Play(track) => {
             // 丢掉旧的播放器就是「停掉上一首」。
             *player = None;
             *seek_anchor = None;
+            // 上一首的波形不能留着，否则新歌起播时频谱会先亮一下旧的尾巴。
+            levels.clear();
             let title = track.label();
             tracing::info!("开始播放：{title}");
             update(state, |snapshot| {
@@ -323,7 +344,8 @@ fn handle(
                 Ok(opened) => {
                     let new_player = Player::connect_new(mixer);
                     new_player.set_volume(*volume);
-                    new_player.append(opened.decoder);
+                    // 包一层：采样原样透传给播放器，顺带把第 0 声道记进频谱窗口。
+                    new_player.append(LevelMeter::new(opened.decoder, levels.clone()));
                     tracing::info!("播放中：{}", opened.quality.label());
                     update(state, |snapshot| {
                         snapshot.quality = Some(opened.quality);
@@ -542,5 +564,74 @@ mod tests {
         assert_eq!(snapshot(118, None).progress(), 0.0);
         // 位置超过声明时长（有些文件头不准）也要夹在 1.0 以内。
         assert_eq!(snapshot(300, Some(236)).progress(), 1.0);
+    }
+
+    /// 冒烟：真解码器 → 采集通道 → 分析器，整条链路在没有声卡的机器上也能跑。
+    ///
+    /// 别处的测试只能零散地验各段（哑引擎没人拉样本，频谱恒为零；分析器只喂合成正弦）。
+    /// 这一条直接拉一个**真解码器**，把「真音频流进来之后窗口里有波形、频段不是全零、
+    /// 而且有效采样率来自解码器」这件事一起钉住——它也是这条链路唯一能进 CI 的端到端证据。
+    #[test]
+    fn a_real_decoder_feeds_the_spectrum_window() {
+        let path =
+            std::env::temp_dir().join(format!("canto-spectrum-smoke-{}.wav", std::process::id()));
+        write_sine_wav(&path, 44_100, 1.0, 440.0);
+
+        let file = File::open(&path).expect("打开临时 WAV");
+        let decoder = Decoder::new(MediaSource::File(file)).expect("解码 WAV");
+        let levels = Levels::new();
+        let mut meter = LevelMeter::new(decoder, levels.clone());
+        // 拉满一个窗口（单声道 44.1kHz，抽稀倍率是 1）
+        for _ in 0..crate::spectrum::WINDOW {
+            meter.next().expect("还有采样");
+        }
+        let _ = std::fs::remove_file(&path);
+
+        let mut window = Vec::new();
+        let rate = levels.read_into(&mut window);
+        assert_eq!(rate, 44_100, "有效采样率该是解码器报的");
+        assert!(
+            window.iter().any(|&sample| sample.abs() > 0.05),
+            "窗口里应当有真实波形"
+        );
+
+        let mut analyzer = crate::spectrum::Analyzer::new();
+        let mut bands = Vec::new();
+        analyzer.analyze_into(&window, rate, &mut bands);
+        assert_eq!(bands.len(), crate::spectrum::BANDS);
+        assert!(
+            bands.iter().any(|&value| value > 0.0),
+            "440Hz 的正弦应当点亮某些频段，而不是全零"
+        );
+    }
+
+    /// 手写一个最小 WAV（44 字节头 + 16bit PCM 单声道）。文件名带 pid，并行测试不会撞。
+    fn write_sine_wav(path: &std::path::Path, rate: u32, seconds: f32, frequency: f32) {
+        let count = (rate as f32 * seconds) as usize;
+        let samples: Vec<i16> = (0..count)
+            .map(|i| {
+                (12_000.0 * (2.0 * std::f32::consts::PI * frequency * i as f32 / rate as f32).sin())
+                    as i16
+            })
+            .collect();
+        let data_len = (samples.len() * 2) as u32;
+        let mut bytes = Vec::with_capacity(44 + data_len as usize);
+        bytes.extend(b"RIFF");
+        bytes.extend((36 + data_len).to_le_bytes());
+        bytes.extend(b"WAVE");
+        bytes.extend(b"fmt ");
+        bytes.extend(16u32.to_le_bytes());
+        bytes.extend(1u16.to_le_bytes()); // PCM
+        bytes.extend(1u16.to_le_bytes()); // 单声道
+        bytes.extend(rate.to_le_bytes());
+        bytes.extend((rate * 2).to_le_bytes()); // 字节率
+        bytes.extend(2u16.to_le_bytes()); // 块对齐
+        bytes.extend(16u16.to_le_bytes()); // 位深
+        bytes.extend(b"data");
+        bytes.extend(data_len.to_le_bytes());
+        for sample in samples {
+            bytes.extend(sample.to_le_bytes());
+        }
+        std::fs::write(path, bytes).expect("写临时 WAV");
     }
 }
