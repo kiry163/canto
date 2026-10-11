@@ -99,11 +99,11 @@ impl App {
             return;
         }
         // 歌词块只在「正在放 + 有歌词 + 面板开着」时占位，不播放时不画空框。
-        // 全屏歌词时底部不再单开一块——同一份歌词没有画两遍的道理。
+        // 全屏视图时底部不再单开一块——同一份歌词没有画两遍的道理。
         let lyric_wanted =
-            self.show_lyric && self.lyric.is_some() && self.player_active() && !self.lyric_full;
+            self.show_lyric && self.lyric.is_some() && self.player_active() && !self.now_playing_full;
         let areas = layout(area, lyric_wanted);
-        if self.lyric_full {
+        if self.now_playing_full {
             self.draw_lyric(frame, areas.content);
         } else {
             self.draw_content(frame, areas.content);
@@ -114,7 +114,7 @@ impl App {
         self.draw_player(frame, areas.player);
         self.draw_status(frame, areas.status);
         // 浮层只盖**内容区**：播放条与状态行是常驻的，不该被挡住
-        // （全屏歌词也是这个规矩）。
+        // （全屏视图也是这个规矩）。
         if self.help_open {
             self.draw_help(frame, area);
         } else if self.queue_open {
@@ -136,7 +136,7 @@ pub fn hints(context: keys::Context) -> &'static str {
         keys::Context::Content => {
             "Enter 播放 · Space 暂停 · n/b 切歌 · / 筛选 · f 收藏 · p 加歌单 · ? 帮助"
         }
-        keys::Context::LyricFull => {
+        keys::Context::NowPlaying => {
             "Y/Esc 退出 · Space 暂停 · n/b 切歌 · ←/→ 10 秒 · +/- 音量 · ? 帮助"
         }
         keys::Context::SearchInput => "输入关键词 · Enter 搜索 · Esc 退出输入",
@@ -299,13 +299,13 @@ mod tests {
         assert!(text.contains("关闭Esc或?"), "关闭方式");
     }
 
-    /// 全屏歌词：歌词画在内容区，底部不再另开一块（同一份歌词不画两遍）。
+    /// 全屏视图：歌词画在内容区，底部不再另开一块（同一份歌词不画两遍）。
     #[test]
     fn fullscreen_lyric_takes_over_the_content_area() {
         let (mut app, _runtime) = test_app();
         app.nav.favorites.set_items(vec![test_song("a")]);
         app.lyric = Some(crate::tui::test_support::test_lyric());
-        app.lyric_full = true;
+        app.now_playing_full = true;
         let text = frame_flat(&mut app, 120, 30);
         // 空闲时没有歌名，标题就只有「歌词」——不写行数，也不写操作提示。
         assert!(text.contains("歌词"), "内容区标题变成歌词：{text}");
@@ -328,18 +328,18 @@ mod tests {
 
         // 关掉全屏就回到列表。底部那块歌词画不画是另一条规则（只在播放中开），
         // 这里引擎是空闲的，所以它本来就不出现。
-        app.lyric_full = false;
+        app.now_playing_full = false;
         let back = frame_flat(&mut app, 120, 30);
         assert!(back.contains("歌a"), "回到列表：{back}");
         assert!(!back.contains("歌词"), "回到列表就没有歌词块了：{back}");
     }
 
-    /// 全屏歌词里当前句是高亮的（黄 + 粗），别的行不是——看真实单元格的颜色。
+    /// 全屏视图里当前句是高亮的（黄 + 粗），别的行不是——看真实单元格的颜色。
     #[test]
     fn the_current_lyric_line_is_highlighted() {
         let (mut app, _runtime) = test_app();
         app.lyric = Some(crate::tui::test_support::test_lyric());
-        app.lyric_full = true;
+        app.now_playing_full = true;
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("测试终端");
         terminal.draw(|frame| app.draw(frame)).expect("绘制");
         let buffer = terminal.backend().buffer();
