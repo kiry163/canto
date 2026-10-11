@@ -30,6 +30,22 @@ use crate::player::Engine;
 fn main() -> Result<()> {
     restore_sigpipe();
     let cli = Cli::parse();
+    // 数据目录搬过一次家（老版本在 `~/Library/Application Support/canto`）：必须在
+    // `init_tracing` 之前搬，否则新位置先被建出来、老目录就成孤儿了。
+    match paths::migrate_legacy() {
+        Ok(Some(legacy)) => eprintln!(
+            "数据目录已搬到 {}（原 {}）",
+            paths::data_dir().display(),
+            legacy.display()
+        ),
+        // 搬不动就让程序照常起：新目录会重新生成配置，登录态重扫一次码即可。
+        Err(error) => eprintln!(
+            "数据目录搬迁失败（{error:#}）；仍用 {}（老目录里的登录态需要手动搬过去）",
+            paths::data_dir().display()
+        ),
+        Ok(None) => {}
+    }
+
     // 单例要在写日志**之前**：`init_tracing` 会清空日志文件，第二个实例被拒时
     // 不该顺手把第一个实例的日志抹掉。
     let lock = paths::lock_path();

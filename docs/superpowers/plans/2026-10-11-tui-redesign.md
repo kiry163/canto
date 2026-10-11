@@ -72,10 +72,11 @@
 
 use std::path::PathBuf;
 
-/// 应用数据目录：`<系统配置目录>/canto`。macOS 是 `~/Library/Application Support/canto`。
+/// 应用数据目录：`~/.config/canto`（§10.5 改过位置，老目录会一次性搬过来）。
 pub fn data_dir() -> PathBuf {
-    dirs::config_dir()
+    dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config")
         .join("canto")
 }
 
@@ -3110,4 +3111,6 @@ git commit -m "feat(session): 会话失效回登录屏、帮助内登出，READM
 - **单例运行**：设计见同文件 §10.2（`flock` + pid 锁文件，`src/instance.rs`）。
 - **去掉菜单栏、切屏只留数字键**：设计见 `specs/2026-10-11-tui-redesign-design.md` §10.3。删掉 `Focus`/`Tab`/`Context::Menu`/`draw/menu.rs` 与窄屏页签断点；§2 里被推翻的两行已就地标注。
 - **全屏歌词（`Y`）与当前句居中**：设计见 `specs/2026-10-11-tui-redesign-design.md` §10.4。删掉 `App::lyric_state`，改成自己算滚动位置（`lyric_rows` + `centered_scroll`，纯函数带单测）；全屏时内容区让给歌词，列表类键在 `Context::LyricFull` 里不绑定。
+- **数据目录改到 `~/.config/canto`**（带一次性整目录搬迁）：设计见 `specs/2026-10-11-tui-redesign-design.md` §10.5。
+- **歌词标题统一**：底部面板与全屏共用 `歌词 · 歌名`（`lyric_title` 纯函数带单测），不再显示行数；全屏只多一句退出提示。
 

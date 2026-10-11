@@ -288,7 +288,9 @@ mod tests {
         app.lyric = Some(crate::tui::test_support::test_lyric());
         app.lyric_full = true;
         let text = frame_flat(&mut app, 120, 30);
-        assert!(text.contains("歌词·"), "内容区标题变成歌词：{text}");
+        // 空闲时没有歌名，标题就只有「歌词」+ 退出提示（不再写行数）。
+        assert!(text.contains("歌词（Y或Esc退出）"), "内容区标题变成歌词：{text}");
+        assert!(!text.contains("行）"), "标题不该再写行数：{text}");
         assert!(text.contains("第1句"), "歌词正文画出来了：{text}");
         assert_eq!(text.matches("歌词").count(), 1, "只有一块歌词：{text}");
         assert!(!text.contains("歌a"), "列表让位给歌词：{text}");
@@ -298,7 +300,7 @@ mod tests {
         app.lyric_full = false;
         let back = frame_flat(&mut app, 120, 30);
         assert!(back.contains("歌a"), "回到列表：{back}");
-        assert!(!back.contains("歌词·"), "不再是全屏标题：{back}");
+        assert!(!back.contains("退出）"), "不再是全屏标题：{back}");
     }
 
     /// 全屏歌词里当前句是高亮的（黄 + 粗），别的行不是——看真实单元格的颜色。

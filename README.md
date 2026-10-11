@@ -28,7 +28,7 @@ cargo run -- --help       # 只有 --log / --version
 ```
 
 同一份数据目录**只允许一个 canto 在跑**：第二个实例会直接退出并告诉你持有者的
-pid（锁在 `~/Library/Application Support/canto/canto.lock`，跟着进程走，退出即释放）。
+pid（锁在 `~/.config/canto/canto.lock`，跟着进程走，退出即释放）。
 
 首次运行会生成 `config.toml`；没有有效会话时界面先出登录屏（下图右边那个二维码要
 **≥112 列 × 61 行**的终端，装不下会告诉你需要多大，并给 `c`（粘贴 cookie）与
@@ -89,12 +89,12 @@ pid（锁在 `~/Library/Application Support/canto/canto.lock`，跟着进程走�
 播到队尾会停下并在状态行说明。队列里没版权的歌（实测常见）会自动跳过，连着 3 首都
 不可播就停下报错。**队列内容与各屏选中位置退出即丢**（不落盘）。
 
-日志写文件：`~/Library/Application Support/canto/canto.log`——屏幕归界面，往
+日志写文件：`~/.config/canto/canto.log`——屏幕归界面，往
 stdout/stderr 打印会糊屏；`cargo run -- --log info` 可以把播放细节记进去。
 
 ## 配置
 
-`~/Library/Application Support/canto/config.toml`（首次运行自动生成）：
+`~/.config/canto/config.toml`（首次运行自动生成）：
 
 ```toml
 # 音质下限：从这一档往下找 —— hires | flac | 320 | 128
@@ -199,13 +199,18 @@ history_limit = 500
 ## 文件
 
 ```
-~/Library/Application Support/canto/      # 全部在系统配置目录下的 canto/
+~/.config/canto/          # 全部数据都在这一个目录里（XDG 习惯，三平台同一套路径）
   session.json    # cookie jar（= 账号凭据：别提交、别分享）
   config.toml     # 音质下限 / 下载目录 / 历史上限
   history.json    # 播放历史（最近 N 条）
   canto.log       # 日志（--log 控制级别）
+  canto.lock      # 单例锁（内容只是持有者 pid）
   login-qr.png    # 二维码落盘的一份（终端装不下时用 o 打开）
 ```
+
+目录位置改过：老版本在 macOS 的 `~/Library/Application Support/canto`。首次启动时会把
+**整个目录一次性搬过来**（会话、配置、历史、日志一起走，登录态不用重扫），只在「新目录
+还不存在」时动手，之后不再折腾。
 
 ## 代码结构
 
