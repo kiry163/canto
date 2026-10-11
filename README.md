@@ -22,6 +22,23 @@
 | 配置文件 `config.toml`（音质下限 / 下载目录 / 历史上限） | ✅ |
 | 单例运行（同一份数据目录只允许一个实例） | ✅ |
 
+## 平台
+
+macOS / Linux / Windows 三平台都能跑。Release 页面上的产物都由 CI 编（`release.yml`），本地不用
+再交叉编译：
+
+| 产物 | 对应平台 | 运行时的额外依赖 |
+|---|---|---|
+| `canto-aarch64-apple-darwin.tar.gz` | macOS Apple Silicon | 无（只用系统库） |
+| `canto-x86_64-unknown-linux-gnu.tar.gz` | Linux x86_64 | 系统要有 `libasound2`（ALSA；在 Ubuntu 22.04 上编的，glibc ≥ 2.35） |
+| `canto-x86_64-pc-windows-msvc.zip` | Windows x86_64 | 无（静态 CRT，不用装 VC++ 运行库） |
+
+Intel 芯片的 Mac 不在 Release 里（GitHub 也在逐步下线 `macos-*-intel` 镜像）：那种机型自己
+`cargo build --release` 编一份即可，代码本身是支持的。
+
+包里就是一个可执行文件，解压完在终端里敲 `./canto`（Windows 是 `canto.exe`）。它需要一个能画框的
+终端；启动时会打开默认音频设备，**没有声卡会直接报错退出**（不是等到第一次播放才报）。
+
 ## 用法
 
 ```bash
@@ -168,6 +185,10 @@ history_limit = 500
 cargo test                  # 键位、队列、历史、config、缓存、渲染冒烟…
 cargo clippy --all-targets
 ```
+
+CI（`.github/workflows/ci.yml`）在 `main` 和 PR 上跑 clippy + 三平台测试；测试用的是哑音频引擎
+（`Engine::silent`），CI 机器没有声卡也跑得动。发布走 `.github/workflows/release.yml`：打一个跟
+`Cargo.toml` 版本一致的 tag（例如 `v0.1.0`）就会编四份产物并挂到 GitHub Release 上。
 
 文档：
 - `docs/design.md`：实现与设计说明——播放与缓存、音质档位实测、界面与数据链路的取舍、代码结构

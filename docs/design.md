@@ -140,7 +140,7 @@ src/
   history.rs   播放历史：落盘、上限截断、连续去重、相对时间文案
   session.rs   登录态：域名感知 cookie jar、完整性校验、落盘、失效判定
   model.rs     Song / Playlist / Quality / Lyric
-  media.rs     HTTP 流 → Read + Seek（Range 重连 + 魔数嗅探）
+  media.rs     HTTP 流 → Read + Seek（Range 重连、服务端不理 Range 时自己跳过、魔数嗅探）
   player.rs    候选档位 → rodio 解码 → 默认音频设备（后台线程 + 状态快照）
   download.rs  下载歌曲与同名歌词（复用 media 的流）
   qr.rs        二维码 PNG → 终端字符块；落盘与系统查看器兜底
@@ -159,6 +159,27 @@ src/
     keys.rs    键位 → 动作（纯函数，带单测）
     queue.rs   队列模型与四种模式（纯逻辑，带单测）
     login.rs   登录屏：二维码、cookie 输入、扫码轮询
-    test_support.rs  测试用的 App / Song / Playlist 构造器
+    test_support.rs  测试用的 App / Song / Playlist 构造器（音频接哑引擎，不碰真实设备）
     draw/      骨架布局与各面板：content / lyric / player / status / overlay
 ```
+
+## 跨平台与发布
+
+三平台同源，平台差异只有三处，都收在 `cfg` 里：
+
+| 事情 | Unix | Windows |
+|---|---|---|
+| 单例锁 | 标准库 `File::try_lock`（落到 `flock`） | 同一个调用（落到 `LockFileEx`） |
+| 本地时间（历史文案） | `libc::localtime_r` | `FileTimeToSystemTime` + `SystemTimeToTzSpecificLocalTime`（`windows-sys`） |
+| 音频后端 | CoreAudio / ALSA | WASAPI（cpal 自己挑，代码里没有分支） |
+
+- 年内第几天（判断「昨天」）不用系统的 `tm_yday` / `wDayOfYear`：Windows 的 `SYSTEMTIME` 里根本没
+  这个字段，统一从年月日自己算（闰年规则也一起测了）。
+- 数据目录三平台都是 `~/.config/canto`，刻意不用 `dirs::config_dir()`（macOS 会给
+  `~/Library/Application Support`）。
+- 测试走哑音频引擎（`Engine::silent`）：CI 上没有声卡也能跑完整测试，开发机也不会因为声卡被别的
+  程序独占而挂测试。
+- 发版由 `.github/workflows/release.yml` 在 tag 上编三份产物（macOS Apple Silicon、Linux x86_64、
+  Windows x86_64），**先跑测试再打包**。Windows 用静态 CRT（目标机不用装 VC++ 运行库），Linux 在
+  Ubuntu 22.04 上编（glibc 下限 2.35）。日常检查（clippy + 三平台测试）在 `ci.yml`。
+  Intel Mac 不再出产物（GitHub 在逐步下线 `macos-*-intel` 镜像），老机型自己编。
