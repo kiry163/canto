@@ -982,11 +982,10 @@ impl App {
             Msg::Qr { png, attempt } => {
                 // PNG 一律留一份：终端画不下、想用相册扫，都靠它。
                 let saved = qr::save_png(&png, &paths::qr_png_path());
-                let lines = qr::to_lines(&png).unwrap_or_default();
-                let size = qr::dimensions(&png).unwrap_or((0, 0));
+                // 解不出来就当没有二维码（只出 cookie / 打开图片两条路）。
+                let modules = qr::modules(&png).ok();
                 if let Screen::Login(state) = &mut self.screen {
-                    state.lines = lines;
-                    state.qr_size = size;
+                    state.modules = modules;
                     state.attempt = attempt;
                     state.phase = LoginPhase::Ready;
                     state.message = format!("等待扫码…（第 {attempt} 张）");

@@ -88,7 +88,7 @@ pub fn lock_path() -> PathBuf {
     data_dir().join("canto.lock")
 }
 
-/// 终端装不下二维码时落盘的 PNG。
+/// 二维码落盘的一份（`o` 用它调系统查看器；作废了就覆盖）。
 pub fn qr_png_path() -> PathBuf {
     data_dir().join("login-qr.png")
 }
