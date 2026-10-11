@@ -73,6 +73,16 @@ pub fn log_path() -> PathBuf {
     data_dir().join("canto.log")
 }
 
+/// 播放缓存目录：`~/.cache/canto`。
+///
+/// 刻意跟数据目录分开：缓存随时可以丢（可能好几个 G），数据目录要小而能备份/同步。
+pub fn cache_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".cache")
+        .join("canto")
+}
+
 /// 单例锁文件（`flock` 的目标；内容只是持有者的 pid）。
 pub fn lock_path() -> PathBuf {
     data_dir().join("canto.lock")
@@ -99,6 +109,20 @@ mod tests {
             dir.display()
         );
         assert!(dir.starts_with(dirs::home_dir().expect("有 home")));
+    }
+
+    /// 缓存目录在 `~/.cache/canto`，不跟数据目录混在一起。
+    #[test]
+    fn the_cache_directory_lives_under_dot_cache() {
+        let dir = cache_dir();
+        assert_eq!(dir.file_name(), Some(std::ffi::OsStr::new("canto")));
+        assert_eq!(
+            dir.parent().and_then(|parent| parent.file_name()),
+            Some(std::ffi::OsStr::new(".cache")),
+            "{}",
+            dir.display()
+        );
+        assert_ne!(dir, data_dir(), "缓存与数据目录要分开");
     }
 
     /// 老目录整目录搬过来；新目录已存在、或老目录不在时都不动手。

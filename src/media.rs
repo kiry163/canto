@@ -6,11 +6,14 @@
 //!
 //! 只有 seek 到**已读过的位置**才会重连；正常顺序播放是一次请求走到底。
 
+use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::time::Duration;
 
 use reqwest::StatusCode;
 use reqwest::blocking::Response;
+
+use crate::cache;
 
 /// 往前 seek 超过这个距离就重连（读掉几 MB 只会白等）。
 const FORWARD_SEEK_LIMIT: u64 = 4 << 20;
@@ -29,6 +32,42 @@ pub struct MediaStream {
     pos: u64,
     /// 文件总长（`Content-Length`）；HEAD 拿不到时是 `None`。
     len: Option<u64>,
+    /// 边播边落盘的那一半（`with_cache` 才有）。
+    cache: Option<cache::Write>,
+}
+
+/// 播放源的两种形态：网络流（边走边下）与本地缓存文件。
+///
+/// 上层 `rodio::Decoder` 只要求 `Read + Seek`，这里用枚举把两种源统一起来，
+/// 播放器那边就不必为两种源各写一套解码逻辑。
+pub enum Source {
+    Stream(Box<MediaStream>),
+    File(File),
+}
+
+impl Read for Source {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Source::Stream(stream) => stream.read(buf),
+            Source::File(file) => file.read(buf),
+        }
+    }
+}
+
+impl Seek for Source {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        match self {
+            Source::Stream(stream) => stream.seek(pos),
+            Source::File(file) => file.seek(pos),
+        }
+    }
+
+    fn stream_position(&mut self) -> io::Result<u64> {
+        match self {
+            Source::Stream(stream) => stream.stream_position(),
+            Source::File(file) => file.stream_position(),
+        }
+    }
 }
 
 /// 认得出来的音频文件头。
@@ -66,9 +105,21 @@ impl MediaStream {
             peek_pos: 0,
             pos: 0,
             len: None,
+            cache: None,
         };
         stream.request_from(0)?;
         Ok(stream)
+    }
+
+    /// 边播边把读到的字节写进缓存。只有**从头顺序读完**才会被认作完整缓存
+    /// （见 [`crate::cache`]），半路换歌 / 拖进度留下的半截文件会自己清掉。
+    pub fn with_cache(mut self, mid: &str, ext: &str) -> Self {
+        match cache::Write::new(mid, ext) {
+            Ok(write) => self.cache = Some(write),
+            // 缓存写不进去（磁盘满 / 权限）不该影响听歌。
+            Err(error) => tracing::warn!("缓存写不进去（{error}），这次不缓存"),
+        }
+        self
     }
 
     /// 文件总长（`Content-Length` 或 `Content-Range` 里的总数）。
@@ -182,7 +233,11 @@ impl Read for MediaStream {
             let take = pending.min(buf.len());
             buf[..take].copy_from_slice(&self.peek[self.peek_pos..self.peek_pos + take]);
             self.peek_pos += take;
+            let offset = self.pos;
             self.pos += take as u64;
+            if let Some(cache) = self.cache.as_mut() {
+                cache.put(offset, &buf[..take]);
+            }
             return Ok(take);
         }
         if self.response.is_none() {
@@ -191,11 +246,21 @@ impl Read for MediaStream {
         let Some(response) = self.response.as_mut() else {
             return Ok(0); // 已经到文件尾
         };
+        let offset = self.pos;
         let read = response.read(buf)?;
         if read == 0 {
             self.response = None;
         }
         self.pos += read as u64;
+        if let Some(cache) = self.cache.as_mut() {
+            cache.put(offset, &buf[..read]);
+        }
+        if read == 0 {
+            // 读到尾了：交给缓存那边判定「算不算完整」。
+            if let Some(cache) = self.cache.take() {
+                cache.finish(self.pos, self.len);
+            }
+        }
         Ok(read)
     }
 }

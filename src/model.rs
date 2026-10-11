@@ -25,6 +25,28 @@ impl Quality {
         }
     }
 
+    /// 配置文件里写的**规范名**：`parse()` 认得的一堆写法里挑一个当正牌。
+    ///
+    /// 写回 `config.toml` 与报错提示都用它，免得「无损」这种展示名又得特判回 `flac`。
+    pub fn token(self) -> &'static str {
+        match self {
+            Quality::Low128 => "128",
+            Quality::High320 => "320",
+            Quality::Flac => "flac",
+            Quality::Hires => "hires",
+        }
+    }
+
+    /// 四档的说明（配置模板里逐行写清楚：名字、体积量级），顺序从低到高。
+    pub fn options() -> [(&'static str, &'static str); 4] {
+        [
+            ("128", "128k MP3     约 3–5 MB/首       最小"),
+            ("320", "320k MP3     约 8–12 MB/首      默认"),
+            ("flac", "无损 FLAC    约 25–35 MB/首"),
+            ("hires", "Hi-Res       单曲可到 ~150 MB"),
+        ]
+    }
+
     /// 解析 `--quality`。接受 `128`/`128k`、`320`/`320k`、`flac`/`lossless`/`无损`、
     /// `hires`/`hi-res`/`母带`。
     pub fn parse(text: &str) -> Option<Self> {

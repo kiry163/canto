@@ -8,6 +8,7 @@
 //! 候选地址在这里逐个**真去开**：只有能解码的才算数（服务端对不存在的文件也会
 //! 返回 purl/vkey，见 [`crate::qq::vkey`]）。
 
+use std::fs::File;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -18,7 +19,8 @@ use rodio::source::Source;
 use rodio::stream::{DeviceSinkBuilder, MixerDeviceSink};
 use rodio::{Decoder, Player};
 
-use crate::media::MediaStream;
+use crate::cache;
+use crate::media::{MediaStream, Source as MediaSource};
 use crate::model::{Quality, Song};
 use crate::qq::vkey::Candidate;
 
@@ -126,7 +128,9 @@ pub struct Engine {
 
 impl Engine {
     /// 打开默认音频设备并启动音频线程。设备打不开会立刻报错（而不是等第一次播放）。
-    pub fn start() -> Result<Self> {
+    ///
+    /// `cache_on`：边播边落盘（`config.toml` 的 `cache_mb` 为 0 时关掉）。
+    pub fn start(cache_on: bool) -> Result<Self> {
         let mut sink = DeviceSinkBuilder::open_default_sink()
             .context("打开默认音频设备失败（是不是有别的程序独占？）")?;
         sink.log_on_drop(false);
@@ -137,7 +141,7 @@ impl Engine {
         let thread_running = running.clone();
         std::thread::Builder::new()
             .name("canto-audio".to_string())
-            .spawn(move || run(rx, thread_state, sink, thread_running))
+            .spawn(move || run(rx, thread_state, sink, thread_running, cache_on))
             .context("启动音频线程失败")?;
         Ok(Self { tx, state, running })
     }
@@ -191,6 +195,7 @@ fn run(
     state: Arc<Mutex<Snapshot>>,
     sink: MixerDeviceSink,
     running: Arc<AtomicBool>,
+    cache_on: bool,
 ) {
     let mixer = sink.mixer().clone();
     let mut player: Option<Player> = None;
@@ -208,6 +213,7 @@ fn run(
                     &mut player,
                     &mut volume,
                     &mut seek_anchor,
+                    cache_on,
                 );
                 // 连按按键时一次收干净，别让命令排队等下一个 tick。
                 while let Ok(cmd) = rx.try_recv() {
@@ -218,6 +224,7 @@ fn run(
                         &mut player,
                         &mut volume,
                         &mut seek_anchor,
+                        cache_on,
                     );
                 }
             }
@@ -240,6 +247,7 @@ fn handle(
     player: &mut Option<Player>,
     volume: &mut f32,
     seek_anchor: &mut Option<Duration>,
+    cache_on: bool,
 ) {
     match cmd {
         Cmd::Play(track) => {
@@ -258,7 +266,7 @@ fn handle(
                 snapshot.duration = None;
                 snapshot.just_finished = false;
             });
-            match open(&track.candidates) {
+            match open(&track, cache_on) {
                 Ok(opened) => {
                     let new_player = Player::connect_new(mixer);
                     new_player.set_volume(*volume);
@@ -371,18 +379,46 @@ fn update(state: &Arc<Mutex<Snapshot>>, act: impl FnOnce(&mut Snapshot)) {
 
 /// 开出来的那份流：解码器 + 它是哪个档位、多大、多长。
 struct Opened {
-    decoder: Decoder<MediaStream>,
+    decoder: Decoder<MediaSource>,
     quality: Quality,
     size: Option<u64>,
     duration: Option<Duration>,
 }
 
 /// 逐个候选去开，返回第一个能解码的。
-fn open(candidates: &[Candidate]) -> Result<Opened> {
+///
+/// 先看本地缓存：命中就完全不碰网络（拖动也瞬时）。没命中才去 CDN，并顺手把
+/// 读到的字节写进缓存（只有从头顺序听完才会被认作完整，见 [`crate::cache`]）。
+fn open(track: &Track, cache_on: bool) -> Result<Opened> {
+    let mid = track.song.mid.as_str();
     // 逐个候选真去开，第一个能解码的胜出（服务端对不存在的文件也会给 purl）。
     let mut failures = Vec::new();
-    for candidate in candidates {
-        let stream = match MediaStream::open(&candidate.url) {
+    for candidate in &track.candidates {
+        if cache_on
+            && let Some(path) = cache::complete(mid, candidate.ext)
+        {
+            // 缓存坏了（写一半被裁掉之类）不该拦着听歌：记一笔，继续走网络。
+            match File::open(&path) {
+                Ok(file) => {
+                    let size = file.metadata().ok().map(|metadata| metadata.len());
+                    match Decoder::new(MediaSource::File(file)) {
+                        Ok(decoder) => {
+                            let duration = decoder.total_duration();
+                            tracing::info!("命中缓存：{}", path.display());
+                            return Ok(Opened {
+                                decoder,
+                                quality: candidate.quality,
+                                size,
+                                duration,
+                            });
+                        }
+                        Err(error) => failures.push(format!("缓存文件解不了码：{error}")),
+                    }
+                }
+                Err(error) => failures.push(format!("缓存文件打不开：{error}")),
+            }
+        }
+        let mut stream = match MediaStream::open(&candidate.url) {
             Ok(stream) => stream,
             Err(error) => {
                 tracing::debug!("{} 档打不开：{error}", candidate.quality.label());
@@ -390,8 +426,11 @@ fn open(candidates: &[Candidate]) -> Result<Opened> {
                 continue;
             }
         };
+        if cache_on {
+            stream = stream.with_cache(mid, candidate.ext);
+        }
         let size = stream.total();
-        match Decoder::new(stream) {
+        match Decoder::new(MediaSource::Stream(Box::new(stream))) {
             Ok(decoder) => {
                 let duration = decoder.total_duration();
                 return Ok(Opened {

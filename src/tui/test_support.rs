@@ -24,7 +24,8 @@ pub(super) fn test_app() -> (App, tokio::runtime::Runtime) {
     let (tx, _rx) = channel();
     let app = App::new(
         runtime.handle().clone(),
-        Engine::start().expect("打开音频设备"),
+        // 关掉缓存：测试不该往使用者真实的 ~/.cache/canto 里写东西。
+        Engine::start(false).expect("打开音频设备"),
         Config::default(),
         // 每个测试一个独立的临时历史文件，免得互相看到对方写的。
         std::env::temp_dir().join(format!(

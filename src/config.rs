@@ -11,18 +11,30 @@ use serde::Deserialize;
 use crate::model::Quality;
 use crate::paths;
 
+/// 播放缓存默认上限（MiB）。1 GiB 大约能放 400 首 320k、100 多首无损。
+pub const DEFAULT_CACHE_MB: u64 = 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
+    /// 音质下限（播放与下载共用）。
     pub quality: Quality,
+    /// 歌曲下载目录（`d` 键）。
     pub download_dir: PathBuf,
+    /// 歌词下载目录（跟歌曲分开放）。
+    pub lyrics_dir: PathBuf,
+    /// 播放缓存上限（MiB）；0 = 关掉缓存。
+    pub cache_mb: u64,
     pub history_limit: usize,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            quality: Quality::Flac,
+            // 默认 320k MP3：体积与音质的中间点；要无损就在 config.toml 里改。
+            quality: Quality::High320,
             download_dir: default_download_dir(),
+            lyrics_dir: default_lyrics_dir(),
+            cache_mb: DEFAULT_CACHE_MB,
             history_limit: 500,
         }
     }
@@ -35,11 +47,24 @@ pub fn default_download_dir() -> PathBuf {
         .join("canto")
 }
 
+/// 默认歌词目录：`<系统音乐目录>/canto-lyrics`。
+///
+/// 刻意跟歌曲目录**平级分开**：翻目录时不至于一首歌夹着两三个 `.lrc`，
+/// 也方便本地播放器或脚本按固定位置去取。
+pub fn default_lyrics_dir() -> PathBuf {
+    dirs::audio_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("canto-lyrics")
+}
+
 /// 文件里能写的字段；全 `Option`——缺字段就用默认值，不要求写全。
 #[derive(Debug, Deserialize)]
 struct Raw {
     quality: Option<String>,
     download_dir: Option<String>,
+    lyrics_dir: Option<String>,
+    /// 缓存上限（MiB）；0 = 关掉缓存。
+    cache_mb: Option<u64>,
     history_limit: Option<usize>,
 }
 
@@ -50,13 +75,19 @@ impl Raw {
             match Quality::parse(&text) {
                 Some(quality) => config.quality = quality,
                 None => warnings.push(format!(
-                    "quality = {text:?} 不认识（可用：hires / flac / 320 / 128），用默认值 {}",
-                    config.quality.label()
+                    "quality = {text:?} 不认识（可用：128 / 320 / flac / hires），用默认值 {}",
+                    config.quality.token()
                 )),
             }
         }
         if let Some(text) = self.download_dir {
             config.download_dir = expand_home(&text);
+        }
+        if let Some(text) = self.lyrics_dir {
+            config.lyrics_dir = expand_home(&text);
+        }
+        if let Some(mb) = self.cache_mb {
+            config.cache_mb = mb;
         }
         if let Some(limit) = self.history_limit {
             config.history_limit = limit.max(1);
@@ -119,20 +150,31 @@ fn write_default(path: &Path) -> Result<()> {
     std::fs::create_dir_all(parent)
         .with_context(|| format!("创建配置目录失败：{}", parent.display()))?;
     let default = Config::default();
-    // 写回文件的值必须是 `Quality::parse` 认得的短名（`Flac::label()` 是中文「无损」）。
-    let quality = match default.quality {
-        Quality::Flac => "flac".to_string(),
-        other => other.label().to_lowercase(),
-    };
+    // 四档逐行写清楚：名字、体积量级。选不出来的时候不用回来翻代码。
+    let options: String = Quality::options()
+        .iter()
+        .map(|(token, note)| format!("#   {token:<6} {note}\n"))
+        .collect();
     let text = format!(
         "# canto 配置。改完重启 canto 生效。\n\
-         # 音质下限：从这一档往下找 —— hires | flac | 320 | 128\n\
-         quality = \"{quality}\"\n\
-         # 下载目录（`d` 键落盘的地方），支持 `~`\n\
+         #\n\
+         # 音质下限：从这一档往下找，这一档没有就退到更低的一档（播放与下载都用它）\n\
+         {options}\
+         quality = \"{}\"\n\
+         #\n\
+         # 下载目录（`d` 键落盘的歌曲），支持 `~`\n\
          download_dir = \"{}\"\n\
+         # 歌词目录（下载时另存的 .lrc，跟歌曲分开放），支持 `~`\n\
+         lyrics_dir = \"{}\"\n\
+         # 播放缓存上限（MB，0 = 关掉）；缓存在 {}，按「最久没听的先删」维护\n\
+         cache_mb = {}\n\
          # 播放历史最多保留多少条\n\
          history_limit = {}\n",
+        default.quality.token(),
         default.download_dir.display(),
+        default.lyrics_dir.display(),
+        paths::cache_dir().display(),
+        default.cache_mb,
         default.history_limit,
     );
     std::fs::write(path, text).with_context(|| format!("写 {} 失败", path.display()))
@@ -154,9 +196,13 @@ mod tests {
 
     #[test]
     fn missing_fields_fall_back_to_defaults() {
-        let (config, warning) = load_from("missing", "quality = \"320\"\n");
-        assert_eq!(config.quality, Quality::High320);
+        // 只写一项，其余全用默认值；新加的键（歌词目录 / 缓存上限）也走这条路，
+        // 所以老配置文件不用改就能继续用。
+        let (config, warning) = load_from("missing", "quality = \"flac\"\n");
+        assert_eq!(config.quality, Quality::Flac);
         assert_eq!(config.download_dir, default_download_dir());
+        assert_eq!(config.lyrics_dir, default_lyrics_dir());
+        assert_eq!(config.cache_mb, DEFAULT_CACHE_MB);
         assert_eq!(config.history_limit, 500);
         assert!(warning.is_none(), "缺字段不是错误：{warning:?}");
     }
@@ -164,8 +210,39 @@ mod tests {
     #[test]
     fn unknown_quality_warns_and_keeps_default() {
         let (config, warning) = load_from("unknown", "quality = \"cd\"\n");
-        assert_eq!(config.quality, Quality::Flac);
-        assert!(warning.expect("应给出警告").contains("cd"));
+        assert_eq!(config.quality, Config::default().quality, "不认识就用默认档位");
+        let warning = warning.expect("应给出警告");
+        assert!(warning.contains("cd"), "{warning}");
+        // 提示里要给出可用的写法，别让人回来翻代码。
+        assert!(warning.contains("128") && warning.contains("320"), "{warning}");
+    }
+
+    /// 默认档位是 320（自用播放器不需要无损），且模板里四档都写清楚了。
+    #[test]
+    fn the_generated_template_documents_every_quality_option() {
+        assert_eq!(Config::default().quality.token(), "320");
+
+        let dir = std::env::temp_dir().join(format!("canto-config-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        let path = dir.join("config.toml");
+        write_default(&path).expect("写默认配置");
+        let text = std::fs::read_to_string(&path).expect("读回配置");
+
+        assert!(
+            text.contains(&format!("quality = \"{}\"", Quality::High320.token())),
+            "模板里写的是默认档位：{text}"
+        );
+        // 四档都要在注释里逐行写清楚（名字 + 体积量级），选的时候不用翻代码。
+        for (token, note) in Quality::options() {
+            assert!(text.contains(token), "模板里没提 {token} 一档：{text}");
+            assert!(text.contains(note), "模板里没写 {token} 的说明：{text}");
+        }
+        assert!(text.contains("lyrics_dir"), "歌词目录要出现在模板里：{text}");
+        assert!(text.contains("cache_mb"), "缓存上限要出现在模板里：{text}");
+        // 模板本身必须是能解析回去的合法配置。
+        let (config, warning) = load_file(&path);
+        assert_eq!(config, Config::default(), "{warning:?}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

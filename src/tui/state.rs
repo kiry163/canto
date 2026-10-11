@@ -668,6 +668,7 @@ impl App {
             return;
         };
         let dir = self.config.download_dir.clone();
+        let lyrics_dir = self.config.lyrics_dir.clone();
         let quality = self.config.quality;
         let received = Arc::new(AtomicU64::new(0));
         let total = Arc::new(AtomicU64::new(0));
@@ -693,8 +694,14 @@ impl App {
                         received.store(progress, Ordering::Relaxed);
                         total.store(size.unwrap_or(0), Ordering::Relaxed);
                     };
-                    match download::save(&song, &candidates, &dir, lyric.as_ref(), &mut on_progress)
-                    {
+                    match download::save(
+                        &song,
+                        &candidates,
+                        &dir,
+                        &lyrics_dir,
+                        lyric.as_ref(),
+                        &mut on_progress,
+                    ) {
                         Ok(saved) if saved.existed => {
                             format!("已存在：{}", saved.path.display())
                         }
@@ -703,11 +710,11 @@ impl App {
                             saved.path.display(),
                             saved.bytes as f64 / 1_048_576.0,
                             saved.quality.label(),
-                            // 歌词落盘了就说一声：使用者不必去目录里翻。
+                            // 歌词落在别的目录里，说清楚落在哪，省得去翻。
                             if saved.lyrics.is_empty() {
                                 String::new()
                             } else {
-                                "，含歌词".to_string()
+                                format!("，歌词在 {}", lyrics_dir.display())
                             }
                         ),
                         Err(error) => format!("下载失败：{error:#}"),

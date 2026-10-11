@@ -1,4 +1,4 @@
-//! 下载：把候选档位里第一个能打开的存成文件，顺带把歌词写在旁边。
+//! 下载：把候选档位里第一个能打开的存成文件，歌词另存到**单独的目录**。
 //!
 //! 传输直接用 [`MediaStream`]：它已经处理了"服务端给 purl 但文件其实不存在"
 //! （嗅探魔数）与 `Range` 重连，下载等于把它拷到磁盘。
@@ -26,10 +26,14 @@ pub struct Saved {
 }
 
 /// 下载第一个能打开的候选；`progress` 每读完一块回调一次（已收字节、总长）。
+///
+/// `dir` 放音频，`lyrics_dir` 放 `.lrc`——两者刻意分开：歌曲目录里不该夹着一堆歌词，
+/// 想单独取歌词时也有个固定位置。
 pub fn save(
     song: &Song,
     candidates: &[Candidate],
     dir: &Path,
+    lyrics_dir: &Path,
     lyric: Option<&Lyric>,
     progress: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<Saved> {
@@ -81,7 +85,7 @@ pub fn save(
             continue;
         }
         std::fs::rename(&part, &path).with_context(|| format!("改名失败：{}", path.display()))?;
-        let lyrics = write_lyrics(&stem, dir, lyric)?;
+        let lyrics = write_lyrics(&stem, lyrics_dir, lyric)?;
         return Ok(Saved {
             path,
             quality: candidate.quality,
@@ -115,11 +119,12 @@ fn file_stem(song: &Song) -> String {
     }
 }
 
-/// 歌词落地：正文 `.lrc`；有翻译再写一份 `.trans.lrc`。
+/// 歌词落地：正文 `.lrc`；有翻译再写一份 `.trans.lrc`。都写进 `dir`（歌词目录）。
 fn write_lyrics(stem: &str, dir: &Path, lyric: Option<&Lyric>) -> Result<Vec<PathBuf>> {
     let Some(lyric) = lyric.filter(|lyric| !lyric.lines.is_empty()) else {
         return Ok(Vec::new());
     };
+    std::fs::create_dir_all(dir).with_context(|| format!("创建歌词目录失败：{}", dir.display()))?;
     let mut written = Vec::new();
     let main = dir.join(format!("{stem}.lrc"));
     std::fs::write(&main, render(lyric, false))
@@ -183,6 +188,50 @@ mod tests {
         );
         // 标题与歌手都空 → 退回 mid，不能生成 ".flac" 这种文件。
         assert_eq!(file_stem(&song("", "")), "000CbUE00I998M");
+    }
+
+    /// 歌词写进**歌词目录**（不是歌曲目录），名字与音频同 stem。
+    #[test]
+    fn lyrics_land_in_their_own_directory() {
+        use crate::model::LyricLine;
+        let root = std::env::temp_dir().join(format!("canto-dl-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let songs = root.join("songs");
+        let lyrics = root.join("lyrics");
+        std::fs::create_dir_all(&songs).expect("建歌曲目录");
+
+        let lyric = Lyric {
+            lines: vec![
+                LyricLine {
+                    at: std::time::Duration::from_secs(1),
+                    text: "第一句".to_string(),
+                    translation: None,
+                },
+                LyricLine {
+                    at: std::time::Duration::from_secs(2),
+                    text: "第二句".to_string(),
+                    translation: Some("second".to_string()),
+                },
+            ],
+        };
+        let written = write_lyrics("歌手 - 标题", &lyrics, Some(&lyric)).expect("写歌词");
+        assert_eq!(written.len(), 2, "正文 + 翻译各一份");
+        assert!(lyrics.join("歌手 - 标题.lrc").is_file(), "{written:?}");
+        assert!(lyrics.join("歌手 - 标题.trans.lrc").is_file(), "{written:?}");
+        assert_eq!(
+            std::fs::read_dir(&songs).expect("列歌曲目录").count(),
+            0,
+            "歌曲目录里不该混进歌词"
+        );
+
+        // 没有歌词（或歌词是空的）就一个文件都不写。
+        assert!(write_lyrics("歌手 - 标题", &lyrics, None).expect("没歌词").is_empty());
+        assert!(
+            write_lyrics("歌手 - 标题", &lyrics, Some(&Lyric::default()))
+                .expect("空歌词")
+                .is_empty()
+        );
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! 登录屏（扫码或粘贴 cookie）；所有功能都在界面里，命令行只剩 `--log`。
 
 mod cli;
+mod cache;
 mod config;
 mod download;
 mod history;
@@ -61,7 +62,12 @@ fn main() -> Result<()> {
     init_tracing(&cli.log)?;
     let runtime = tokio::runtime::Runtime::new().context("创建异步运行时失败")?;
     let (config, warning) = config::load();
-    let engine = Engine::start()?;
+    // 起播之前把缓存整理一下：删掉上次没退干净留下的半截文件，再按上限压一压。
+    let (swept, freed) = cache::sweep(config.cache_mb * 1024 * 1024);
+    if swept > 0 {
+        tracing::info!("缓存清理：删除 {swept} 个文件，释放 {freed} 字节");
+    }
+    let engine = Engine::start(config.cache_mb > 0)?;
     tui::run(
         runtime.handle().clone(),
         engine,
