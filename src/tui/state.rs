@@ -1613,6 +1613,14 @@ impl App {
         self.now_playing_full && self.engine.snapshot().phase == crate::player::Phase::Playing
     }
 
+    /// 频谱是不是正在动——界面刷新据此把间隔提到 ~30fps。
+    ///
+    /// 只在全屏视图开着**且**正在播时为真：别的屏不显示频谱（不提速），暂停时那几格
+    /// 不会动（也不需要重绘）。
+    pub(super) fn spectrum_animating(&self) -> bool {
+        self.spectrum_wanted() && matches!(self.screen, Screen::Main)
+    }
+
     /// 取一次频谱：采样窗口 → 频段能量。`Levels` 里没有数据时 `spectrum_raw` 会是空的。
     fn refresh_spectrum(&mut self) {
         let levels = self.engine.levels();
@@ -1922,6 +1930,16 @@ mod tests {
 
         app.apply(keys::Action::Back);
         assert_eq!(app.nav.title_chain(), ["我的歌单"], "第二次 Esc 才退上一层");
+    }
+
+    #[test]
+    fn only_a_playing_fullscreen_view_raises_the_frame_rate() {
+        let (mut app, _runtime) = test_app();
+        assert!(!app.spectrum_animating(), "默认（没开视图）不提速");
+
+        app.now_playing_full = true;
+        // 哑引擎：没播过，phase 还是 Idle
+        assert!(!app.spectrum_animating(), "没在播不提速");
     }
 
     #[test]

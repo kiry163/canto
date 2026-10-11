@@ -9,6 +9,7 @@
 //! - `Enter` 左栏=加载该歌单，右栏=播放该首
 //! - `Space` 播放/暂停，`n`/`b` 下一首/上一首，`←`/`→`（或 `h`/`l`）±10 秒，`+`/`-` 音量
 //! - `y` 开/关歌词面板（跟着播放位置高亮当前行，带翻译）
+//! - `Y` 全屏正在播放：上半屏真频谱（跟着音频采样动）、下半屏歌词；`Y` 或 `Esc` 退出
 //! - `/` 搜索（回车搜、Esc 取消；结果显示在曲目栏，直接回车播放）
 //! - `d` 下载选中的那首（含同名歌词）到默认目录，进度显示在状态栏
 
@@ -33,6 +34,9 @@ use crate::player::Engine;
 
 /// 界面刷新间隔，同时也是按键与后台消息的最长等待。
 const TICK: StdDuration = StdDuration::from_millis(150);
+/// 频谱在动时的刷新间隔（约 30fps）。终端一次重绘是整屏 diff，再往上（60fps）
+/// 观感差别很小、重绘成本却翻倍，所以取这个折中。
+const SPECTRUM_TICK: StdDuration = StdDuration::from_millis(33);
 
 pub fn run(
     handle: tokio::runtime::Handle,
@@ -68,7 +72,13 @@ fn event_loop(
 ) -> Result<()> {
     while !app.quit {
         terminal.draw(|frame| app.draw(frame)).context("渲染失败")?;
-        if event::poll(TICK).context("读取键盘事件失败")?
+        // 频谱在动时提速：6.7fps 下柱子是一格一跳。
+        let tick = if app.spectrum_animating() {
+            SPECTRUM_TICK
+        } else {
+            TICK
+        };
+        if event::poll(tick).context("读取键盘事件失败")?
             && let Event::Key(key) = event::read().context("读取键盘事件失败")?
             && key.kind == KeyEventKind::Press
         {
