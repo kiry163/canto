@@ -11,7 +11,6 @@ cookie_store = "0.22.1"
 crossterm = "0.29.0"
 dirs = "7.0.0"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
-libc = "0.2.190"
 ratatui = "0.30.2"
 reqwest = { version = "0.13.5", features = ["json", "cookies", "blocking", "query", "form"] }
 rodio = "0.22.2"
@@ -22,3 +21,11 @@ toml = "1.1.8"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 url = "2.5.8"
+
+# 平台各要一点系统接口：Unix 的 `flock`/`localtime_r`，Windows 的
+# `FileTimeToSystemTime` + 时区换算。两边都不引第三方时间/加锁库。
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.190"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Time"] }

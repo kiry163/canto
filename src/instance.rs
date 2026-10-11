@@ -1,15 +1,15 @@
 //! 单例运行：同一份数据目录只允许一个 canto。
 //!
-//! 用 `flock` 锁住 `<配置目录>/canto/canto.lock`：锁跟着**进程**走，进程一死内核
-//! 自动释放，所以不需要处理「上次没退干净留下的僵尸锁」——锁文件留着没关系，
+//! 用文件锁（Unix `flock`、Windows `LockFileEx`，都由标准库的 `File::try_lock`
+//! 落到系统调用）锁住 `<配置目录>/canto/canto.lock`：锁跟着**进程**走，进程一死
+//! 内核自动释放，所以不需要处理「上次没退干净留下的僵尸锁」——锁文件留着没关系，
 //! 有它在只说明「文件存在过」，不代表有人在跑。
 //!
 //! 为什么要单例：会话文件、历史、日志都是同一批文件，两个实例同时写会互相覆盖
 //! （尤其 `session.json` 与 `history.json` 都是「读-改-写」）。
 
-use std::fs::File;
+use std::fs::{File, TryLockError};
 use std::io::{Read, Seek, Write};
-use std::os::fd::AsRawFd;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -33,15 +33,14 @@ impl Instance {
             .truncate(false)
             .open(path)
             .with_context(|| format!("打开锁文件失败：{}", path.display()))?;
-        // SAFETY: `file` 活着，fd 有效；`flock` 只在这个 fd 上打锁，不碰别的进程。
-        let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if locked != 0 {
-            let error = std::io::Error::last_os_error();
-            return match error.raw_os_error() {
-                // 这两个常量在 Linux/macOS 上是同一个值（都等于 EAGAIN）。
-                Some(libc::EWOULDBLOCK) => Ok(None),
-                _ => Err(error).with_context(|| format!("锁 {} 失败", path.display())),
-            };
+        // 标准库的 `try_lock`：Unix 上等于 `flock(LOCK_EX | LOCK_NB)`，Windows 上是
+        // `LockFileEx`；锁跟着这个 `File` 走，句柄一关（进程退出也算）自动释放。
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => return Ok(None),
+            Err(TryLockError::Error(error)) => {
+                return Err(error).with_context(|| format!("锁 {} 失败", path.display()));
+            }
         }
         // 锁拿到手了：把 pid 写进去，第二个实例能报出「谁在跑」。
         let _ = file.set_len(0);

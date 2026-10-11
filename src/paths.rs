@@ -83,7 +83,7 @@ pub fn cache_dir() -> PathBuf {
         .join("canto")
 }
 
-/// 单例锁文件（`flock` 的目标；内容只是持有者的 pid）。
+/// 单例锁文件（`File::try_lock` 的目标；内容只是持有者的 pid）。
 pub fn lock_path() -> PathBuf {
     data_dir().join("canto.lock")
 }
