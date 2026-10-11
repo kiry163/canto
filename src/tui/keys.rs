@@ -55,6 +55,8 @@ pub enum Action {
     Favorite,
     Download,
     ToggleLyric,
+    /// `Y`：全屏歌词（占内容区，播放条与状态行不动）。
+    ToggleLyricFull,
     /// `/`：在当前列表里筛（**不**跳去搜索屏）。
     Filter,
     FilterChar(char),
@@ -72,6 +74,8 @@ pub enum Action {
 pub enum Context {
     /// 主界面（菜单栏去掉后只剩这一块内容区）。
     Content,
+    /// 全屏歌词：内容区被歌词占满，只留「看得见」的那些键。
+    LyricFull,
     /// 搜索输入框正在吃键。
     SearchInput,
     /// `/` 打开的列表筛选框（跟搜索框一样是文本输入，只是 Enter 的含义不同）。
@@ -140,6 +144,24 @@ pub fn resolve(context: Context, key: KeyEvent) -> Option<Action> {
             KeyCode::Char('k') | KeyCode::Up => Some(Action::Up),
             _ => None,
         },
+        Context::LyricFull => match key.code {
+            KeyCode::Esc => Some(Action::Back),
+            KeyCode::Char('Y') => Some(Action::ToggleLyricFull),
+            KeyCode::Char(digit @ '1'..='4') => Some(Action::Menu(digit as usize - '1' as usize)),
+            KeyCode::Char('?') | KeyCode::F(1) => Some(Action::Help),
+            KeyCode::Char('q') => Some(Action::Quit),
+            KeyCode::Char(' ') => Some(Action::PlayPause),
+            KeyCode::Char('n') => Some(Action::Next),
+            KeyCode::Char('b') => Some(Action::Prev),
+            KeyCode::Left | KeyCode::Char('h') => Some(Action::SeekBack),
+            KeyCode::Right | KeyCode::Char('l') => Some(Action::SeekForward),
+            KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Char('.') => Some(Action::VolumeUp),
+            KeyCode::Char('-') | KeyCode::Char(',') => Some(Action::VolumeDown),
+            KeyCode::Char('m') => Some(Action::CycleMode),
+            KeyCode::Char('u') => Some(Action::QueueOverlay),
+            // 列表看不见，就不给「对选中那首动手」的键留门（f/d/p/x/a/A/Enter）。
+            _ => None,
+        },
         Context::Content => common(key),
     }
 }
@@ -178,6 +200,8 @@ fn common(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('f') => Some(Action::Favorite),
         KeyCode::Char('d') => Some(Action::Download),
         KeyCode::Char('y') => Some(Action::ToggleLyric),
+        // 大写 `Y` = 全屏歌词（`y` 是底部那一块歌词的开关，两者独立）。
+        KeyCode::Char('Y') => Some(Action::ToggleLyricFull),
         // `/` 筛当前列表；搜索屏有自己的入口（菜单第 3 项）。
         KeyCode::Char('/') => Some(Action::Filter),
         // 可能有上一层（「我的歌单 › 某歌单」）：Esc 一层层退。
@@ -196,6 +220,58 @@ mod tests {
 
     fn press(context: Context, code: KeyCode) -> Option<Action> {
         resolve(context, key(code))
+    }
+
+    /// `y` 是底部那块歌词的开关，`Y` 是全屏歌词；全屏里只留「看得见」的键。
+    #[test]
+    fn uppercase_y_is_fullscreen_lyric_and_hides_list_keys() {
+        assert_eq!(
+            press(Context::Content, KeyCode::Char('y')),
+            Some(Action::ToggleLyric)
+        );
+        assert_eq!(
+            press(Context::Content, KeyCode::Char('Y')),
+            Some(Action::ToggleLyricFull)
+        );
+
+        // 全屏里保留的：播放、切歌、进度、音量、模式、切屏、队列、帮助、退出。
+        for (code, action) in [
+            (KeyCode::Esc, Action::Back),
+            (KeyCode::Char('Y'), Action::ToggleLyricFull),
+            (KeyCode::Char('2'), Action::Menu(1)),
+            (KeyCode::Char(' '), Action::PlayPause),
+            (KeyCode::Char('n'), Action::Next),
+            (KeyCode::Char('b'), Action::Prev),
+            (KeyCode::Char('h'), Action::SeekBack),
+            (KeyCode::Char('l'), Action::SeekForward),
+            (KeyCode::Char('+'), Action::VolumeUp),
+            (KeyCode::Char('-'), Action::VolumeDown),
+            (KeyCode::Char('m'), Action::CycleMode),
+            (KeyCode::Char('u'), Action::QueueOverlay),
+            (KeyCode::Char('?'), Action::Help),
+            (KeyCode::Char('q'), Action::Quit),
+        ] {
+            assert_eq!(
+                press(Context::LyricFull, code),
+                Some(action),
+                "全屏歌词里 {code:?} 该是 {action:?}"
+            );
+        }
+
+        // 列表看不见，就不给「对选中那首动手」的键留门。
+        for code in [
+            KeyCode::Enter,
+            KeyCode::Char('f'),
+            KeyCode::Char('d'),
+            KeyCode::Char('p'),
+            KeyCode::Char('x'),
+            KeyCode::Char('a'),
+            KeyCode::Char('A'),
+            KeyCode::Char('/'),
+            KeyCode::Char('j'),
+        ] {
+            assert_eq!(press(Context::LyricFull, code), None, "{code:?} 在全屏里该没绑定");
+        }
     }
 
     /// `/` 是「筛当前列表」，不再跳去搜索屏（搜索屏有自己的入口：菜单第 3 项）。

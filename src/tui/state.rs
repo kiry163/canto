@@ -543,7 +543,8 @@ pub(super) struct App {
     pub(super) lyric_loading: bool,
     /// 歌词面板是否展开。
     pub(super) show_lyric: bool,
-    pub(super) lyric_state: ListState,
+    /// `Y`：全屏歌词（内容区整块让给歌词，播放条与状态行照旧）。
+    pub(super) lyric_full: bool,
     /// `/` 的筛选框开着（输入即筛当前列表）。
     pub(super) filter_input: bool,
     /// 帮助浮层开着（`?`）。
@@ -588,8 +589,8 @@ impl App {
             lyric: None,
             lyric_loading: false,
             show_lyric: true,
+            lyric_full: false,
             filter_input: false,
-            lyric_state: ListState::default(),
             help_open: false,
             queue_open: false,
             queue_state: ListState::default(),
@@ -629,6 +630,8 @@ impl App {
     /// 切屏。这一屏没拉过数据就顺手拉一次——每屏的选中位置由 `Nav` 留着，
     /// 所以来回切不会丢上下文。
     pub(super) fn switch_menu(&mut self, menu: Menu) {
+        // 切屏就是离开这一屏：全屏歌词跟着收起来。
+        self.lyric_full = false;
         self.nav.switch_menu(menu);
         match menu {
             Menu::Favorites if !self.nav.favorites_loaded => self.reload_favorites(),
@@ -1159,6 +1162,10 @@ impl App {
         if self.picker.is_some() {
             return keys::Context::PlaylistPicker;
         }
+        // 全屏歌词盖住内容区：列表看不见，就别让列表类按键生效。
+        if self.lyric_full {
+            return keys::Context::LyricFull;
+        }
         // 筛选框跟搜索框一样是文本输入，只是 Enter / Esc 落点不同。
         if self.filter_input {
             return keys::Context::FilterInput;
@@ -1241,6 +1248,7 @@ impl App {
             keys::Action::AddToPlaylist => self.open_picker(),
             keys::Action::RemoveFromPlaylist => self.remove_selected(),
             keys::Action::ToggleLyric => self.show_lyric = !self.show_lyric,
+            keys::Action::ToggleLyricFull => self.lyric_full = !self.lyric_full,
             keys::Action::PlayPause => self.engine.toggle_pause(),
             keys::Action::Next => self.play_relative(true),
             keys::Action::Prev => self.play_relative(false),
@@ -1282,6 +1290,9 @@ impl App {
                     self.picker = None;
                 } else if self.nav.search_input {
                     self.nav.end_search_input();
+                } else if self.lyric_full {
+                    // 全屏歌词是一层「盖在内容区上的视图」，Esc 先退出它。
+                    self.lyric_full = false;
                 } else if !self.nav.filter_text().is_empty() {
                     // 筛选也算一层：Esc 先清掉它，再按才退上一层视图。
                     self.nav.set_filter("");
@@ -1815,6 +1826,44 @@ mod tests {
 
         app.apply(keys::Action::Back);
         assert_eq!(app.nav.breadcrumb, ["我的歌单"], "第二次 Esc 才退上一层");
+    }
+
+    /// `Y` 开关全屏歌词；`Esc` / 数字切屏都会退出它。
+    #[test]
+    fn fullscreen_lyric_toggles_and_is_left_by_esc_or_switching() {
+        let (mut app, _runtime) = test_app();
+        assert!(!app.lyric_full);
+        app.apply(keys::Action::ToggleLyricFull);
+        assert!(app.lyric_full);
+        assert_eq!(app.context(), keys::Context::LyricFull, "全屏时上下文跟着变");
+
+        // 全屏里再按 Y = 退出；底部那块歌词的开关（y）不受影响。
+        app.apply(keys::Action::ToggleLyricFull);
+        assert!(!app.lyric_full);
+        assert_eq!(app.context(), keys::Context::Content);
+
+        app.apply(keys::Action::ToggleLyricFull);
+        app.apply(keys::Action::Back);
+        assert!(!app.lyric_full, "Esc 退出全屏");
+        assert!(!app.quit, "Esc 不该顺手退出程序");
+
+        app.apply(keys::Action::ToggleLyricFull);
+        app.apply(keys::Action::Menu(3));
+        assert!(!app.lyric_full, "切屏就是离开这一屏");
+        assert_eq!(app.nav.menu, Menu::History);
+    }
+
+    /// Esc 的层级：全屏歌词在「退一层视图」之前，退完层才轮到歌单。
+    #[test]
+    fn esc_leaves_the_fullscreen_before_popping_a_level() {
+        let (mut app, _runtime) = test_app();
+        app.nav.begin_tracks("1", "嗯");
+        app.apply(keys::Action::ToggleLyricFull);
+        app.apply(keys::Action::Back);
+        assert!(!app.lyric_full, "第一次 Esc 退全屏");
+        assert_eq!(app.nav.breadcrumb, ["我的歌单", "嗯"], "还留在这一层");
+        app.apply(keys::Action::Back);
+        assert_eq!(app.nav.breadcrumb, ["我的歌单"], "第二次 Esc 才退层");
     }
 
     /// 搜完看别的屏、再切回搜索：关键词与结果都还在。

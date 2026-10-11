@@ -3109,4 +3109,5 @@ git commit -m "feat(session): 会话失效回登录屏、帮助内登出，READM
 - **`/` 改为「筛当前列表」**：设计见 `specs/2026-10-11-tui-redesign-design.md` §10.1。搜索屏改由菜单第 3 项进入（原 `Nav::begin_search_input` 随之删除）。
 - **单例运行**：设计见同文件 §10.2（`flock` + pid 锁文件，`src/instance.rs`）。
 - **去掉菜单栏、切屏只留数字键**：设计见 `specs/2026-10-11-tui-redesign-design.md` §10.3。删掉 `Focus`/`Tab`/`Context::Menu`/`draw/menu.rs` 与窄屏页签断点；§2 里被推翻的两行已就地标注。
+- **全屏歌词（`Y`）与当前句居中**：设计见 `specs/2026-10-11-tui-redesign-design.md` §10.4。删掉 `App::lyric_state`，改成自己算滚动位置（`lyric_rows` + `centered_scroll`，纯函数带单测）；全屏时内容区让给歌词，列表类键在 `Context::LyricFull` 里不绑定。
 

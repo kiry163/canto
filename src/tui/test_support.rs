@@ -36,6 +36,19 @@ pub(super) fn test_app() -> (App, tokio::runtime::Runtime) {
     (app, runtime)
 }
 
+/// 三句歌词，各隔 10 秒（绘制歌词面板 / 全屏用得上）。
+pub(super) fn test_lyric() -> crate::model::Lyric {
+    crate::model::Lyric {
+        lines: (0..3)
+            .map(|index| crate::model::LyricLine {
+                at: std::time::Duration::from_secs(index * 10),
+                text: format!("第 {} 句", index + 1),
+                translation: (index == 1).then(|| "second line".to_string()),
+            })
+            .collect(),
+    }
+}
+
 pub(super) fn test_song(mid: &str) -> Song {
     Song {
         mid: mid.to_string(),

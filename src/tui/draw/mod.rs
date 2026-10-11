@@ -99,11 +99,17 @@ impl App {
             return;
         }
         // 歌词块只在「正在放 + 有歌词 + 面板开着」时占位，不播放时不画空框。
-        let lyric_wanted = self.show_lyric && self.lyric.is_some() && self.player_active();
+        // 全屏歌词时底部不再单开一块——同一份歌词没有画两遍的道理。
+        let lyric_wanted =
+            self.show_lyric && self.lyric.is_some() && self.player_active() && !self.lyric_full;
         let areas = layout(area, lyric_wanted);
-        self.draw_content(frame, areas.content);
+        if self.lyric_full {
+            self.draw_lyric(frame, areas.content, true);
+        } else {
+            self.draw_content(frame, areas.content);
+        }
         if let Some(lyric) = areas.lyric {
-            self.draw_lyric(frame, lyric);
+            self.draw_lyric(frame, lyric, false);
         }
         self.draw_player(frame, areas.player);
         self.draw_status(frame, areas.status);
@@ -127,6 +133,9 @@ pub fn hints(context: keys::Context) -> &'static str {
     match context {
         keys::Context::Content => {
             "Enter 播放 · Space 暂停 · n/b 切歌 · / 筛选 · f 收藏 · p 加歌单 · ? 帮助"
+        }
+        keys::Context::LyricFull => {
+            "Y/Esc 退出 · Space 暂停 · n/b 切歌 · ←/→ 10 秒 · +/- 音量 · ? 帮助"
         }
         keys::Context::SearchInput => "输入关键词 · Enter 搜索 · Esc 退出输入",
         keys::Context::FilterInput => "输入即筛选 · Enter 确认 · Esc 清空",
@@ -269,6 +278,70 @@ mod tests {
         );
         assert!(text.contains("歌单Enter进入曲目"), "当前屏那一行要跟着菜单变：{text}");
         assert!(text.contains("关闭Esc或?"), "关闭方式");
+    }
+
+    /// 全屏歌词：歌词画在内容区，底部不再另开一块（同一份歌词不画两遍）。
+    #[test]
+    fn fullscreen_lyric_takes_over_the_content_area() {
+        let (mut app, _runtime) = test_app();
+        app.nav.favorites.set_items(vec![test_song("a")]);
+        app.lyric = Some(crate::tui::test_support::test_lyric());
+        app.lyric_full = true;
+        let text = frame_flat(&mut app, 120, 30);
+        assert!(text.contains("歌词·"), "内容区标题变成歌词：{text}");
+        assert!(text.contains("第1句"), "歌词正文画出来了：{text}");
+        assert_eq!(text.matches("歌词").count(), 1, "只有一块歌词：{text}");
+        assert!(!text.contains("歌a"), "列表让位给歌词：{text}");
+
+        // 关掉全屏就回到列表。底部那块歌词画不画是另一条规则（只在播放中开），
+        // 这里引擎是空闲的，所以它本来就不出现。
+        app.lyric_full = false;
+        let back = frame_flat(&mut app, 120, 30);
+        assert!(back.contains("歌a"), "回到列表：{back}");
+        assert!(!back.contains("歌词·"), "不再是全屏标题：{back}");
+    }
+
+    /// 全屏歌词里当前句是高亮的（黄 + 粗），别的行不是——看真实单元格的颜色。
+    #[test]
+    fn the_current_lyric_line_is_highlighted() {
+        let (mut app, _runtime) = test_app();
+        app.lyric = Some(crate::tui::test_support::test_lyric());
+        app.lyric_full = true;
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("测试终端");
+        terminal.draw(|frame| app.draw(frame)).expect("绘制");
+        let buffer = terminal.backend().buffer();
+
+        // 引擎是空闲的，位置为 0 → 第 1 句（时间戳 0s）就是当前句。
+        // 跟 `frame_flat` 一样去掉空白：宽字符在缓冲区里占两个单元格，直接拼会多出空格。
+        let rows: Vec<String> = (0..30u16)
+            .map(|y| {
+                (0..120u16)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .chars()
+                    .filter(|character| !character.is_whitespace())
+                    .collect()
+            })
+            .collect();
+        let row_of = |needle: &str| {
+            rows.iter()
+                .position(|row| row.contains(needle))
+                .unwrap_or_else(|| panic!("帧里没有 {needle}"))
+        };
+        let current = row_of("第1句");
+        let other = row_of("第3句");
+        let styled = |y: usize| {
+            (0..120u16).any(|x| buffer[(x, y as u16)].fg == ratatui::style::Color::Yellow)
+        };
+        assert!(styled(current), "当前句该是黄的：{:?}", rows[current]);
+        assert!(!styled(other), "别的行不该染色：{:?}", rows[other]);
+        // 加粗也是高亮的一部分：只要那一行里有粗体就算。
+        let bold = (0..120u16).any(|x| {
+            buffer[(x, current as u16)]
+                .modifier
+                .contains(ratatui::style::Modifier::BOLD)
+        });
+        assert!(bold, "当前句该加粗：{:?}", rows[current]);
     }
 
     /// 队列浮层里的高亮要真画在挪动后的那一行上。
