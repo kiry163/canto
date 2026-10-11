@@ -62,7 +62,7 @@ fn help_lines(menu: Menu) -> Vec<Line<'static>> {
     lines.push(match menu {
         Menu::Favorites => Line::from("收藏  Enter 播放选中 · j/k 选曲目 · / 筛选"),
         Menu::Playlists => Line::from("歌单  Enter 进入曲目 · Esc 回歌单列表 · / 筛选"),
-        Menu::Search => Line::from("搜索  Enter 搜 · Esc 取消输入 · 结果里 Enter 播放"),
+        Menu::Search => Line::from("搜索  Enter 搜 · Esc 取消输入 · 按 3 回到输入框"),
         Menu::History => Line::from("历史  Enter 从那首重播 · / 筛选"),
     });
     lines.push(Line::from("会话  L 登出（清空本地会话，回登录屏）"));
@@ -89,11 +89,12 @@ impl App {
                 ))
             })
             .collect();
+        // 标题只报「看到第几首 / 队列多长」和播放模式；来源（来自《某歌单》）不写，
+        // 队列里可能混着好几个来源，写了反而误导。
         let title = format!(
-            " 队列 {}/{} · 来自《{}》 · {} ",
+            " 队列 {}/{} · {} ",
             playing + 1,
             self.queue.len(),
-            self.queue.origin(),
             self.queue.mode().label()
         );
         let height = items.len() as u16 + 2;

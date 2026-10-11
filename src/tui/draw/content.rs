@@ -45,17 +45,14 @@ impl App {
                 let rows =
                     Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area);
                 let keyword = self.nav.search_text.clone();
+                // 三种状态都是同一句标签（正在输入带光标 / 输入完了 / 还没输入）。
+                // 「按 3 回到输入框」这类操作提示不写在这儿——统一放状态行与帮助浮层。
                 let prompt = if self.nav.search_input {
                     Line::from(vec![
                         Span::styled("搜索：", Style::new().fg(Color::Yellow)),
                         Span::raw(keyword),
                         Span::styled("▏", Style::new().fg(Color::Yellow)),
                     ])
-                } else if keyword.is_empty() {
-                    Line::from(Span::styled(
-                        "按 3 回到输入框（输入框开着时数字键是打字）",
-                        Style::new().fg(Color::DarkGray),
-                    ))
                 } else {
                     Line::from(vec![
                         Span::styled("搜索：", Style::new().fg(Color::DarkGray)),

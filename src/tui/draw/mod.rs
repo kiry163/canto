@@ -104,19 +104,21 @@ impl App {
             self.show_lyric && self.lyric.is_some() && self.player_active() && !self.lyric_full;
         let areas = layout(area, lyric_wanted);
         if self.lyric_full {
-            self.draw_lyric(frame, areas.content, true);
+            self.draw_lyric(frame, areas.content);
         } else {
             self.draw_content(frame, areas.content);
         }
         if let Some(lyric) = areas.lyric {
-            self.draw_lyric(frame, lyric, false);
+            self.draw_lyric(frame, lyric);
         }
         self.draw_player(frame, areas.player);
         self.draw_status(frame, areas.status);
+        // 浮层只盖**内容区**：播放条与状态行是常驻的，不该被挡住
+        // （全屏歌词也是这个规矩）。
         if self.help_open {
             self.draw_help(frame, area);
         } else if self.queue_open {
-            self.draw_queue(frame, area);
+            self.draw_queue(frame, areas.content);
         } else if self.picker.is_some() {
             self.draw_picker(frame, area);
         }
@@ -188,6 +190,23 @@ mod tests {
     use crate::tui::queue;
     use crate::tui::state::Menu;
     use crate::tui::test_support::{test_app, test_song};
+
+    /// 把一帧按行铺开（每行去空白），要比较「谁在上面」时用得上。
+    fn frame_rows(app: &mut App, width: u16, height: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("测试终端");
+        terminal.draw(|frame| app.draw(frame)).expect("绘制");
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .chars()
+                    .filter(|character| !character.is_whitespace())
+                    .collect()
+            })
+            .collect()
+    }
 
     /// 把一帧铺成字符串并去掉所有空白。
     ///
@@ -288,9 +307,21 @@ mod tests {
         app.lyric = Some(crate::tui::test_support::test_lyric());
         app.lyric_full = true;
         let text = frame_flat(&mut app, 120, 30);
-        // 空闲时没有歌名，标题就只有「歌词」+ 退出提示（不再写行数）。
-        assert!(text.contains("歌词（Y或Esc退出）"), "内容区标题变成歌词：{text}");
-        assert!(!text.contains("行）"), "标题不该再写行数：{text}");
+        // 空闲时没有歌名，标题就只有「歌词」——不写行数，也不写操作提示。
+        assert!(text.contains("歌词"), "内容区标题变成歌词：{text}");
+        assert!(!text.contains("行）"), "标题不该写行数：{text}");
+        // 操作提示统一在底部状态行：标题里没有，状态行里得有（这才是「统一交互」）。
+        let rows = frame_rows(&mut app, 120, 30);
+        let title_row = rows
+            .iter()
+            .find(|row| row.starts_with("┌歌词"))
+            .expect("歌词块标题");
+        assert!(!title_row.contains("退出"), "标题不写操作提示：{title_row}");
+        let status_row = rows.last().expect("状态行");
+        assert!(
+            status_row.contains("Y/Esc退出"),
+            "操作提示该在状态行：{status_row}"
+        );
         assert!(text.contains("第1句"), "歌词正文画出来了：{text}");
         assert_eq!(text.matches("歌词").count(), 1, "只有一块歌词：{text}");
         assert!(!text.contains("歌a"), "列表让位给歌词：{text}");
@@ -300,7 +331,7 @@ mod tests {
         app.lyric_full = false;
         let back = frame_flat(&mut app, 120, 30);
         assert!(back.contains("歌a"), "回到列表：{back}");
-        assert!(!back.contains("退出）"), "不再是全屏标题：{back}");
+        assert!(!back.contains("歌词"), "回到列表就没有歌词块了：{back}");
     }
 
     /// 全屏歌词里当前句是高亮的（黄 + 粗），别的行不是——看真实单元格的颜色。
@@ -379,6 +410,43 @@ mod tests {
         let text = frame_flat(&mut app, 120, 30);
         assert!(text.contains("我的收藏"), "标题还是当前屏：{text}");
         assert!(!text.contains("历史（"), "不该出现历史标题：{text}");
+    }
+
+    /// 队列浮层只盖内容区：播放条还在下面，标题也不写「来自某歌单」。
+    #[test]
+    fn the_queue_overlay_sits_above_the_player_bar() {
+        let (mut app, _runtime) = test_app();
+        app.queue = queue::Queue::new(vec![test_song("a"), test_song("b")], 0, "嗯");
+        app.apply(crate::tui::keys::Action::QueueOverlay);
+
+        let rows = frame_rows(&mut app, 120, 30);
+        let queue_row = rows
+            .iter()
+            .position(|row| row.contains("队列1/2"))
+            .expect("该有队列浮层");
+        let player_row = rows
+            .iter()
+            .position(|row| row.contains("已停止"))
+            .expect("播放条还在");
+        assert!(
+            queue_row < player_row,
+            "浮层该在播放条上面（队列在第 {queue_row} 行，播放条在第 {player_row} 行）"
+        );
+        let text = frame_flat(&mut app, 120, 30);
+        assert!(!text.contains("来自"), "标题不写来源：{text}");
+        assert!(text.contains("队列1/2"), "标题报进度与模式：{text}");
+    }
+
+    /// 操作提示统一在底部状态行/帮助里：内容区不再出现「按 3 回到输入框」这类字样。
+    #[test]
+    fn the_content_area_has_no_key_hints() {
+        let (mut app, _runtime) = test_app();
+        app.nav.switch_menu(Menu::Search);
+        app.nav.end_search_input();
+        let text = frame_flat(&mut app, 120, 30);
+        assert!(text.contains("搜索："), "搜索行只留标签：{text}");
+        assert!(!text.contains("回到输入框"), "提示该收进帮助浮层：{text}");
+        assert!(!text.contains("按3"), "提示该收进帮助浮层：{text}");
     }
 
     /// 队列浮层里的高亮要真画在挪动后的那一行上。

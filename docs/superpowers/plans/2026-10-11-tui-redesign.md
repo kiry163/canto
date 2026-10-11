@@ -3116,4 +3116,5 @@ git commit -m "feat(session): 会话失效回登录屏、帮助内登出，READM
 - **播放缓存 / 歌词目录 / 配置说清楚**：设计见 `specs/2026-10-11-tui-redesign-design.md` §10.6。新增 `src/cache.rs`（只有顺序读完整首才进缓存，`Drop` 清半截，启动按 mtime 压上限）；`Quality::token()` 取代「无损要特判」的写法，默认档位改 320；`Config` 加 `lyrics_dir` / `cache_mb`。
 - **缓存四处补强**：设计见 `specs/2026-10-11-tui-redesign-design.md` §10.7。列表档位列改按配置算（`FileSizes::at_or_below`）；新增「已缓存」标记（`cached_mids` + `Engine::take_cached`）；缓存文件名改成 `<mid>.<档位>.<ext>` 并提供 `cache::for_song`；下载命中缓存直接复制；歌词缓存（`lyrics/<mid>.lrc`，空文件 = 没有歌词）。
 - **默认 128 / 标签带格式 / 标题派生**：设计见 `specs/2026-10-11-tui-redesign-design.md` §10.8。默认档位改 `Low128`（模板的「默认」标记跟着默认值算）；`Quality::label()` 统一成 `MP3 128k` / `FLAC` 这类带格式的写法；删掉 `Nav::breadcrumb`，标题由 `title_chain()` + 历史条数现算（修掉「记一条历史就把当前屏标题改成历史」的 bug）；已缓存那行显示缓存里那份的档位与真实大小。
+- **浮层不盖播放条 / 标题不挂提示**：设计见 `specs/2026-10-11-tui-redesign-design.md` §10.9。队列浮层只画在内容区且标题去掉来源；`lyric_title()` 两种画法完全一致、不带操作提示；操作提示统一由状态行（`hints(Context)`）与帮助浮层承载，搜索屏占位提示同步收干净。
 

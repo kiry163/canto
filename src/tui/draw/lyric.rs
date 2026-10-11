@@ -41,17 +41,15 @@ fn centered_scroll(rows_before: usize, span: usize, total_rows: usize, height: u
     rows_before.saturating_sub(half).min(total_rows - height)
 }
 
-/// 歌词块左上角的标题：底部那块与全屏**共用同一句**「歌词 · 歌名」，全屏再加退出提示。
+/// 歌词块左上角的标题：底部那块与全屏**完全同一句**「歌词 · 歌名」。
 ///
-/// 不写歌词行数：那是只有调试才关心的数字，占着标题最显眼的位置纯属噪音。
-fn lyric_title(song: Option<&str>, full: bool) -> String {
+/// 不写歌词行数（只有调试才关心的数字），也不写「按什么键退出」之类的操作提示
+/// ——操作提示统一放底部状态行，标题只报「这是什么」。
+fn lyric_title(song: Option<&str>) -> String {
     let mut title = String::from("歌词");
     if let Some(song) = song.filter(|song| !song.is_empty()) {
         title.push_str(" · ");
         title.push_str(song);
-    }
-    if full {
-        title.push_str("（Y 或 Esc 退出）");
     }
     format!(" {title} ")
 }
@@ -94,9 +92,9 @@ fn lyric_rows(lyric: &Lyric, position: Duration, height: usize) -> (Vec<LyricRow
 }
 
 impl App {
-    /// `full = true` 时占满内容区（全屏歌词）。
-    pub(super) fn draw_lyric(&self, frame: &mut Frame, area: Rect, full: bool) {
-        let title = lyric_title(self.engine.snapshot().title.as_deref(), full);
+    /// 画歌词：底部那一块与全屏（占满内容区）用的是同一份渲染，只是地方不同。
+    pub(super) fn draw_lyric(&self, frame: &mut Frame, area: Rect) {
+        let title = lyric_title(self.engine.snapshot().title.as_deref());
         let block = Block::bordered().title(title);
         // 去掉上下边框之后真正能放歌词的行数。
         let height = area.height.saturating_sub(2) as usize;
@@ -156,19 +154,24 @@ mod tests {
         }
     }
 
-    /// 标题：两种画法共用「歌词 · 歌名」，全屏只多一句退出提示；都不写行数。
+    /// 标题：两种画法完全一样，只有「歌词 · 歌名」——不写行数，也不写操作提示。
     #[test]
-    fn both_panel_and_fullscreen_share_the_same_title() {
-        let song = Some("曲终人散 — 张宇");
-        assert_eq!(lyric_title(song, false), " 歌词 · 曲终人散 — 张宇 ");
+    fn the_title_is_just_the_song_and_no_hints() {
         assert_eq!(
-            lyric_title(song, true),
-            " 歌词 · 曲终人散 — 张宇（Y 或 Esc 退出） "
+            lyric_title(Some("曲终人散 — 张宇")),
+            " 歌词 · 曲终人散 — 张宇 "
         );
-        // 还没开始放（拿不到歌名）也不能出现空的一段或行数。
-        assert_eq!(lyric_title(None, false), " 歌词 ");
-        assert_eq!(lyric_title(Some(""), false), " 歌词 ");
-        assert_eq!(lyric_title(None, true), " 歌词（Y 或 Esc 退出） ");
+        // 还没开始放（拿不到歌名）也不能出现空的一段。
+        assert_eq!(lyric_title(None), " 歌词 ");
+        assert_eq!(lyric_title(Some("")), " 歌词 ");
+        for title in [
+            lyric_title(Some("曲终人散 — 张宇")),
+            lyric_title(None),
+        ] {
+            for hint in ["Y", "Esc", "退出", "行）"] {
+                assert!(!title.contains(hint), "{title} 不该带 {hint}");
+            }
+        }
     }
 
     /// 整首歌、10 行窗口：当前句落在正中（上下各留 4 行，末行则是 4/5 分摊）。
