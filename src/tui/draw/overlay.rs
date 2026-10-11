@@ -32,7 +32,7 @@ impl App {
 }
 
 impl App {
-    /// 帮助浮层：按当前菜单项列出**真的接了行为**的键，底部一行说明怎么关。
+    /// 帮助浮层：按当前屏列出**真的接了行为**的键，底部一行说明怎么关。这是唯一的键位表。
     pub(super) fn draw_help(&self, frame: &mut Frame, area: Rect) {
         let lines = help_lines(self.nav.menu);
         // 宽度要装得下最长那行（「歌曲 …」约 62 个显示列），否则 Wrap 会把它折成两行、
@@ -49,18 +49,21 @@ impl App {
     }
 }
 
-/// 每个菜单项一套键位说明：全局 + 播放 + 歌曲 + 这一屏特有的 + 关闭方式。
+/// 每屏一套键位说明：切屏 + 全局 + 播放 + 歌曲 + 这一屏特有的 + 关闭方式。
+///
+/// **这里是唯一的键位表**：菜单栏没了，切屏只有数字键，得让人在哪儿都能查到。
 fn help_lines(menu: Menu) -> Vec<Line<'static>> {
     let mut lines = vec![
-        Line::from("全局  Tab 焦点 · 1-4 菜单 · / 搜索 · ? 帮助 · q 退出"),
+        Line::from("切屏  1 我的收藏 · 2 我的歌单 · 3 搜索 · 4 历史"),
+        Line::from("全局  / 筛选当前列表 · ? 帮助 · q 退出"),
         Line::from("播放  Space 暂停 · n/b 切歌 · ←/→ 10 秒 · +/- 音量"),
         Line::from("歌曲  Enter 播放 · f 收藏 · d 下载 · p 加进歌单 · x 从歌单移除"),
     ];
     lines.push(match menu {
-        Menu::Favorites => Line::from("收藏  Enter 播放选中 · j/k 选曲目"),
-        Menu::Playlists => Line::from("歌单  Enter 进入曲目 · Esc 返回歌单列表"),
+        Menu::Favorites => Line::from("收藏  Enter 播放选中 · j/k 选曲目 · / 筛选"),
+        Menu::Playlists => Line::from("歌单  Enter 进入曲目 · Esc 回歌单列表 · / 筛选"),
         Menu::Search => Line::from("搜索  Enter 搜 · Esc 取消输入 · 结果里 Enter 播放"),
-        Menu::History => Line::from("历史  Enter 从那首重播"),
+        Menu::History => Line::from("历史  Enter 从那首重播 · / 筛选"),
     });
     lines.push(Line::from("会话  L 登出（清空本地会话，回登录屏）"));
     lines.push(Line::from("关闭  Esc 或 ?"));

@@ -15,7 +15,7 @@ pub enum Action {
     Quit,
     /// `?`：帮助浮层开 / 关。
     Help,
-    /// 数字键直达菜单项（下标对应 `Menu::ALL`）。
+    /// 数字键切屏（下标对应 `Menu::ALL`）。
     Menu(usize),
     Up,
     Down,
@@ -23,8 +23,6 @@ pub enum Action {
     Last,
     PageUp,
     PageDown,
-    FocusNext,
-    FocusPrev,
     Enter,
     Back,
     PlayPause,
@@ -72,9 +70,7 @@ pub enum Action {
 /// 按键时的上下文：模态与输入态在这里体现，`resolve` 不再自己猜。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Context {
-    /// 焦点在左栏（歌单）。
-    Menu,
-    /// 焦点在右栏（曲目）。
+    /// 主界面（菜单栏去掉后只剩这一块内容区）。
     Content,
     /// 搜索输入框正在吃键。
     SearchInput,
@@ -144,20 +140,18 @@ pub fn resolve(context: Context, key: KeyEvent) -> Option<Action> {
             KeyCode::Char('k') | KeyCode::Up => Some(Action::Up),
             _ => None,
         },
-        Context::Menu | Context::Content => common(key, context),
+        Context::Content => common(key),
     }
 }
 
-/// 左栏 / 右栏共用的键位（焦点差异只有 `Tab` 与 `Enter` 的落点，都在 `state` 里判）。
-fn common(key: KeyEvent, context: Context) -> Option<Action> {
+/// 主界面的键位（`Enter` 的落点由 `state` 按当前屏决定）。
+fn common(key: KeyEvent) -> Option<Action> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
-        // 数字键从任何焦点位置直达菜单项（后台菜单的惯例）。
+        // 数字键切屏——菜单栏去掉后这是唯一的切屏入口，帮助浮层里有这张表。
         KeyCode::Char(digit @ '1'..='4') => Some(Action::Menu(digit as usize - '1' as usize)),
         KeyCode::Char('q') => Some(Action::Quit),
         KeyCode::Char('?') | KeyCode::F(1) => Some(Action::Help),
-        KeyCode::Tab => Some(Action::FocusNext),
-        KeyCode::BackTab => Some(Action::FocusPrev),
         KeyCode::Char('j') | KeyCode::Down => Some(Action::Down),
         KeyCode::Char('k') | KeyCode::Up => Some(Action::Up),
         KeyCode::Char('g') | KeyCode::Home => Some(Action::First),
@@ -186,8 +180,8 @@ fn common(key: KeyEvent, context: Context) -> Option<Action> {
         KeyCode::Char('y') => Some(Action::ToggleLyric),
         // `/` 筛当前列表；搜索屏有自己的入口（菜单第 3 项）。
         KeyCode::Char('/') => Some(Action::Filter),
-        // 主区可能有上一层（「我的歌单 › 某歌单」），菜单没有——它是导航的最外层。
-        KeyCode::Esc | KeyCode::Backspace if context == Context::Content => Some(Action::Back),
+        // 可能有上一层（「我的歌单 › 某歌单」）：Esc 一层层退。
+        KeyCode::Esc | KeyCode::Backspace => Some(Action::Back),
         _ => None,
     }
 }
@@ -207,13 +201,10 @@ mod tests {
     /// `/` 是「筛当前列表」，不再跳去搜索屏（搜索屏有自己的入口：菜单第 3 项）。
     #[test]
     fn slash_filters_the_current_list() {
-        for context in [Context::Menu, Context::Content] {
-            assert_eq!(
-                press(context, KeyCode::Char('/')),
-                Some(Action::Filter),
-                "{context:?} 里 / 该是筛选"
-            );
-        }
+        assert_eq!(
+            press(Context::Content, KeyCode::Char('/')),
+            Some(Action::Filter)
+        );
         assert_eq!(
             press(Context::FilterInput, KeyCode::Char('/')),
             Some(Action::FilterChar('/')),
@@ -255,7 +246,6 @@ mod tests {
     #[test]
     fn ctrl_c_quits_from_every_context() {
         for context in [
-            Context::Menu,
             Context::Content,
             Context::SearchInput,
             Context::PlaylistPicker,
@@ -296,22 +286,31 @@ mod tests {
     }
 
     #[test]
-    fn the_two_lists_share_one_key_table() {
-        for context in [Context::Menu, Context::Content] {
-            assert_eq!(press(context, KeyCode::Char('j')), Some(Action::Down));
-            assert_eq!(press(context, KeyCode::Char('G')), Some(Action::Last));
-            assert_eq!(press(context, KeyCode::PageDown), Some(Action::PageDown));
-            assert_eq!(press(context, KeyCode::Char('n')), Some(Action::Next));
-            assert_eq!(press(context, KeyCode::Char(' ')), Some(Action::PlayPause));
-            assert_eq!(press(context, KeyCode::Enter), Some(Action::Enter));
-            assert_eq!(press(context, KeyCode::Char('a')), Some(Action::AppendQueue));
-            assert_eq!(press(context, KeyCode::Char('A')), Some(Action::InsertQueue));
-            assert_eq!(press(context, KeyCode::Char('m')), Some(Action::CycleMode));
-            assert_eq!(press(context, KeyCode::Char('u')), Some(Action::QueueOverlay));
-            assert_eq!(press(context, KeyCode::Char('D')), Some(Action::HistoryClear));
-            assert_eq!(press(context, KeyCode::Char('p')), Some(Action::AddToPlaylist));
-            assert_eq!(press(context, KeyCode::Tab), Some(Action::FocusNext));
+    fn the_main_screen_has_one_key_table() {
+        for code in [
+            KeyCode::Char('j'),
+            KeyCode::Char('G'),
+            KeyCode::PageDown,
+            KeyCode::Char('n'),
+            KeyCode::Char(' '),
+            KeyCode::Enter,
+            KeyCode::Char('a'),
+            KeyCode::Char('A'),
+            KeyCode::Char('m'),
+            KeyCode::Char('u'),
+            KeyCode::Char('D'),
+            KeyCode::Char('p'),
+        ] {
+            assert!(
+                press(Context::Content, code).is_some(),
+                "{code:?} 该有绑定"
+            );
         }
+        assert_eq!(
+            press(Context::Content, KeyCode::Tab),
+            None,
+            "菜单栏没了，Tab 没有第二站可去"
+        );
     }
 
     #[test]
@@ -328,26 +327,23 @@ mod tests {
     }
 
     #[test]
-    fn digits_jump_between_menu_items_from_any_focus() {
-        assert_eq!(press(Context::Menu, KeyCode::Char('1')), Some(Action::Menu(0)));
+    fn digits_are_the_only_way_to_switch_screens() {
+        assert_eq!(press(Context::Content, KeyCode::Char('1')), Some(Action::Menu(0)));
         assert_eq!(press(Context::Content, KeyCode::Char('3')), Some(Action::Menu(2)));
         assert_eq!(press(Context::Content, KeyCode::Char('4')), Some(Action::Menu(3)));
         assert_eq!(press(Context::Content, KeyCode::Char('5')), None, "只有四项");
     }
 
     #[test]
-    fn esc_goes_back_in_the_content_area_but_not_from_the_menu() {
+    fn esc_and_backspace_go_back_a_level() {
         assert_eq!(press(Context::Content, KeyCode::Esc), Some(Action::Back));
         assert_eq!(press(Context::Content, KeyCode::Backspace), Some(Action::Back));
-        assert_eq!(press(Context::Menu, KeyCode::Esc), None, "菜单是最外层");
     }
 
     #[test]
-    fn help_overlay_opens_from_both_panes_and_only_esc_or_question_closes_it() {
-        for context in [Context::Menu, Context::Content] {
-            assert_eq!(press(context, KeyCode::Char('?')), Some(Action::Help));
-            assert_eq!(press(context, KeyCode::F(1)), Some(Action::Help));
-        }
+    fn help_overlay_opens_and_only_esc_or_question_closes_it() {
+        assert_eq!(press(Context::Content, KeyCode::Char('?')), Some(Action::Help));
+        assert_eq!(press(Context::Content, KeyCode::F(1)), Some(Action::Help));
         assert_eq!(press(Context::HelpOverlay, KeyCode::Esc), Some(Action::Help));
         assert_eq!(press(Context::HelpOverlay, KeyCode::Char('?')), Some(Action::Help));
         assert_eq!(press(Context::HelpOverlay, KeyCode::Char('L')), Some(Action::Logout));

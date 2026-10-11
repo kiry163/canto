@@ -1,4 +1,4 @@
-//! 主区：按菜单项渲染当前这一屏。
+//! 内容区：按当前屏渲染。
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -10,8 +10,8 @@ use std::time::Duration as StdDuration;
 
 use crate::player::Phase;
 
-use super::super::state::{App, Focus, Menu};
-use super::{focused_block, format_duration, format_size, highlight};
+use super::super::state::{App, Menu};
+use super::{format_duration, format_size, highlight, panel_block};
 
 impl App {
     pub(super) fn draw_content(&mut self, frame: &mut Frame, area: Rect) {
@@ -24,7 +24,6 @@ impl App {
         } else {
             area
         };
-        let focused = self.nav.focus == Focus::Content;
         match self.nav.menu {
             Menu::Playlists if self.nav.shown.is_none() => {
                 let items: Vec<ListItem> = self
@@ -36,7 +35,7 @@ impl App {
                     })
                     .collect();
                 let list = List::new(items)
-                    .block(focused_block(&title, focused))
+                    .block(panel_block(&title))
                     .highlight_style(highlight())
                     .highlight_symbol("▶ ");
                 frame.render_stateful_widget(list, area, &mut self.nav.playlists.state);
@@ -54,7 +53,7 @@ impl App {
                     ])
                 } else if keyword.is_empty() {
                     Line::from(Span::styled(
-                        "按 3（或菜单里选「搜索」）回到输入框",
+                        "按 3 回到输入框（输入框开着时数字键是打字）",
                         Style::new().fg(Color::DarkGray),
                     ))
                 } else {
@@ -64,10 +63,10 @@ impl App {
                     ])
                 };
                 frame.render_widget(Paragraph::new(prompt), rows[0]);
-                self.draw_songs(frame, rows[1], &title, focused);
+                self.draw_songs(frame, rows[1], &title);
             }
-            Menu::History => self.draw_history(frame, area, &title, focused),
-            _ => self.draw_songs(frame, area, &title, focused),
+            Menu::History => self.draw_history(frame, area, &title),
+            _ => self.draw_songs(frame, area, &title),
         }
     }
 
@@ -96,8 +95,8 @@ impl App {
     ///
     /// 不画时长 / 档位 / 体积那三列——历史里只有 mid / 标题 / 歌手，
     /// 画出来会是假的 00:00。
-    fn draw_history(&mut self, frame: &mut Frame, area: Rect, title: &str, focused: bool) {
-        let block = focused_block(title, focused);
+    fn draw_history(&mut self, frame: &mut Frame, area: Rect, title: &str) {
+        let block = panel_block(title);
         if self.history.is_empty() {
             frame.render_widget(
                 Paragraph::new("暂无播放历史")
@@ -136,7 +135,7 @@ impl App {
     }
 
     /// 曲目列表：所有「装着一堆歌」的屏共用（收藏 / 歌单曲目 / 搜索）。
-    pub(super) fn draw_songs(&mut self, frame: &mut Frame, area: Rect, title: &str, focused: bool) {
+    pub(super) fn draw_songs(&mut self, frame: &mut Frame, area: Rect, title: &str) {
         let playing = self.now_playing_mid();
         let items: Vec<ListItem> = self
             .nav
@@ -162,7 +161,7 @@ impl App {
             .collect();
         let mut state = std::mem::take(&mut self.nav.song_view_mut().state);
         let list = List::new(items)
-            .block(focused_block(title, focused))
+            .block(panel_block(title))
             .highlight_style(highlight())
             .highlight_symbol("▶ ");
         frame.render_stateful_widget(list, area, &mut state);

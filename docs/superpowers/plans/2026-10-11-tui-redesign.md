@@ -3108,4 +3108,5 @@ git commit -m "feat(session): 会话失效回登录屏、帮助内登出，READM
 - **队列浮层 / 歌单选择框的 `j`/`k` 穿透**（`3da631d`）：`apply` 的 `Down`/`Up` 一路落到主区列表，浮层自己那份 `ListState` 从没被挪动，表现为「浮层里选不动」。修法按「谁在最上层」路由；补了状态层与渲染层两条回归测试（把修复摘掉两条都会红）。
 - **`/` 改为「筛当前列表」**：设计见 `specs/2026-10-11-tui-redesign-design.md` §10.1。搜索屏改由菜单第 3 项进入（原 `Nav::begin_search_input` 随之删除）。
 - **单例运行**：设计见同文件 §10.2（`flock` + pid 锁文件，`src/instance.rs`）。
+- **去掉菜单栏、切屏只留数字键**：设计见 `specs/2026-10-11-tui-redesign-design.md` §10.3。删掉 `Focus`/`Tab`/`Context::Menu`/`draw/menu.rs` 与窄屏页签断点；§2 里被推翻的两行已就地标注。
 

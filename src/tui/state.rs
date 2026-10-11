@@ -93,14 +93,7 @@ pub(super) enum Msg {
     },
 }
 
-/// 焦点所在的区域。菜单与主区之外，歌词在 Task 8 加进来。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Focus {
-    Menu,
-    Content,
-}
-
-/// 左侧菜单项。顺序即数字键 `1`–`4` 的顺序。
+/// 四个主界面屏（原左栏菜单项）。顺序即数字键 `1`–`4` 的顺序。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Menu {
     Favorites,
@@ -111,10 +104,6 @@ pub(super) enum Menu {
 
 impl Menu {
     pub const ALL: [Menu; 4] = [Menu::Favorites, Menu::Playlists, Menu::Search, Menu::History];
-
-    pub fn index(self) -> usize {
-        Menu::ALL.iter().position(|item| *item == self).unwrap_or(0)
-    }
 
     pub fn title(self) -> &'static str {
         match self {
@@ -298,18 +287,15 @@ impl<T> ListView<T> {
     }
 }
 
-/// 界面导航状态：哪个菜单项、焦点在哪、四屏各自的列表与选中位置。
+/// 界面导航状态：正在看哪一屏、四屏各自的列表与选中位置。
 ///
 /// 每个菜单项各存一份列表，所以「切走再切回」不会丢上下文——这正是旧界面
-/// 「搜一下歌单就没了」的修法。
+/// 「搜一下歌单就没了」的修法。切屏只有数字键 `1`–`4` 一个入口（菜单栏已经去掉），
+/// 所以也没有「菜单游标」这种「高亮了但还没进去」的中间态。
 #[derive(Debug)]
 pub(super) struct Nav {
-    /// 主区正在显示的那一屏。所有按菜单分派的东西（列表、面包屑、来源名）都看它。
+    /// 正在显示的那一屏。所有按屏分派的东西（列表、面包屑、来源名）都看它。
     pub menu: Menu,
-    /// 菜单上高亮的那一项。焦点在菜单上时用它；按 `j`/`k` 只动它，不动 `menu`
-    /// ——「移动 ≠ 切屏」，得按 Enter 才进去（数字键是显式意图，直接切）。
-    pub cursor: Menu,
-    pub focus: Focus,
     pub favorites: ListView<Song>,
     pub playlists: ListView<Playlist>,
     /// 「我的歌单 › 某歌单」这一层的曲目。
@@ -333,8 +319,6 @@ impl Nav {
     pub fn new() -> Self {
         Self {
             menu: Menu::Favorites,
-            cursor: Menu::Favorites,
-            focus: Focus::Menu,
             favorites: ListView::songs(),
             playlists: ListView::playlists(),
             tracks: ListView::songs(),
@@ -349,13 +333,18 @@ impl Nav {
         }
     }
 
-    /// 切菜单项：内容换屏，但每屏自己的选中位置都留着。
+    /// 切到某一屏：内容换屏，但每屏自己的选中位置都留着（「换一屏内容，不是清空一屏内容」）。
+    ///
+    /// 「我的歌单」这一屏可能还停在某个歌单的曲目里（`shown`），这时面包屑也要跟着
+    /// 还原成「我的歌单 › 嗯」——否则标题说「我的歌单」、内容却是曲目，对不上。
+    /// 数字键切屏是**回到上次的位置**，退层交给 `Esc`。
     pub fn switch_menu(&mut self, menu: Menu) {
         self.menu = menu;
-        self.cursor = menu;
-        self.focus = Focus::Content;
-        self.breadcrumb = vec![menu.title().to_string()];
-        // 搜索屏进来就该能打字，不用先按一下 `/`。
+        self.breadcrumb = match (menu, &self.shown) {
+            (Menu::Playlists, Some((_, name))) => vec!["我的歌单".to_string(), name.clone()],
+            _ => vec![menu.title().to_string()],
+        };
+        // 搜索屏进来就该能打字，不用先按一下别的键。
         self.search_input = menu == Menu::Search;
     }
 
@@ -450,11 +439,10 @@ impl Nav {
         }
     }
 
-    /// 焦点在主区时「Enter / a / f / d 作用的那份曲目列表」。
-    pub fn focused_songs(&self) -> Option<&ListView<Song>> {
-        if self.focus != Focus::Content {
-            return None;
-        }
+    /// 当前屏「Enter / a / f / d / 筛选 作用的那份曲目列表」。
+    ///
+    /// 歌单屏不在某个歌单里时没有曲目列表（那一屏显示的是歌单列表），返回 `None`。
+    pub fn active_songs(&self) -> Option<&ListView<Song>> {
         match self.menu {
             Menu::Favorites => Some(&self.favorites),
             Menu::Playlists => self.shown.as_ref().map(|_| &self.tracks),
@@ -464,10 +452,7 @@ impl Nav {
     }
 
     /// 上面那份列表的可变版本。
-    pub fn focused_songs_mut(&mut self) -> Option<&mut ListView<Song>> {
-        if self.focus != Focus::Content {
-            return None;
-        }
+    pub fn active_songs_mut(&mut self) -> Option<&mut ListView<Song>> {
         match self.menu {
             Menu::Favorites => Some(&mut self.favorites),
             Menu::Playlists => self.shown.as_ref().map(|_| &mut self.tracks),
@@ -476,29 +461,29 @@ impl Nav {
         }
     }
 
-    pub fn move_focus_by(&mut self, delta: isize) {
+    pub fn move_selection(&mut self, delta: isize) {
         if self.menu == Menu::Playlists && self.shown.is_none() {
             self.playlists.move_by(delta);
             return;
         }
-        if let Some(view) = self.focused_songs_mut() {
+        if let Some(view) = self.active_songs_mut() {
             view.move_by(delta);
         }
     }
 
-    pub fn focus_edge(&mut self, last: bool) {
+    pub fn edge_selection(&mut self, last: bool) {
         if self.menu == Menu::Playlists && self.shown.is_none() {
             self.playlists.edge(last);
             return;
         }
-        if let Some(view) = self.focused_songs_mut() {
+        if let Some(view) = self.active_songs_mut() {
             view.edge(last);
         }
     }
 
-    pub fn page_focus(&mut self, pages: isize) {
+    pub fn page_selection(&mut self, pages: isize) {
         // 一屏按 10 行挪：终端高度可变，10 行在常见窗口里都不到一屏，够用且不越界。
-        self.move_focus_by(pages * 10);
+        self.move_selection(pages * 10);
     }
 }
 
@@ -542,10 +527,7 @@ pub(super) struct App {
     /// 历史文件路径（测试注入临时路径用）。
     pub(super) history_path: std::path::PathBuf,
 
-    /// 菜单列表的高亮位置（每帧跟当前菜单项对齐）。
-    pub(super) menu_state: ListState,
-
-    /// 菜单、焦点、四屏列表与选中位置。
+    /// 正在看哪一屏、四屏各自的列表与选中位置。
     pub(super) nav: Nav,
 
     /// 播放队列。按 Enter 把当前列表灌进来，之后增删插改的都是它；
@@ -599,7 +581,6 @@ impl App {
             screen: Screen::Main,
             history: History::default(),
             history_path,
-            menu_state: ListState::default(),
             nav: Nav::new(),
             queue: queue::Queue::new(Vec::new(), 0, String::new()),
             request: 0,
@@ -640,12 +621,12 @@ impl App {
         });
     }
 
-    /// 启动：菜单停在「我的收藏」，并把它拉下来。
+    /// 启动：停在「我的收藏」，并把它拉下来。
     pub(super) fn load_initial(&mut self) {
         self.switch_menu(Menu::Favorites);
     }
 
-    /// 切菜单项。这一屏没拉过数据就顺手拉一次——每屏的选中位置由 `Nav` 留着，
+    /// 切屏。这一屏没拉过数据就顺手拉一次——每屏的选中位置由 `Nav` 留着，
     /// 所以来回切不会丢上下文。
     pub(super) fn switch_menu(&mut self, menu: Menu) {
         self.nav.switch_menu(menu);
@@ -737,10 +718,10 @@ impl App {
         });
     }
 
-    /// 焦点所在曲目列表里选中的那首。
+    /// 当前屏曲目列表里选中的那首。
     fn selected_song(&self) -> Option<Song> {
         self.nav
-            .focused_songs()
+            .active_songs()
             .and_then(|view| view.selected().cloned())
     }
 
@@ -915,9 +896,9 @@ impl App {
         self.start(self.queue.index());
     }
 
-    /// 当前焦点列表 → `(曲目, 选中下标, 来源名)`。`Enter` 与 `a`/`A`（空队列时）都走这里。
+    /// 当前屏的曲目列表 → `(曲目, 选中下标, 来源名)`。`Enter` 与 `a`/`A`（空队列时）都走这里。
     fn queue_from_focus(&self) -> Option<(Vec<Song>, usize, String)> {
-        let view = self.nav.focused_songs()?;
+        let view = self.nav.active_songs()?;
         // 灌的是**当前看得见**的那几首：筛过之后播的就是筛出来的子集。
         if view.is_empty() {
             return None;
@@ -1066,8 +1047,6 @@ impl App {
                     Ok(songs) => {
                         self.status = format!("搜索「{keyword}」：{} 首", songs.len());
                         self.nav.search_results.set_items(songs);
-                        // 结果一到就把焦点放进结果列表，`j`/`k` 立刻可用。
-                        self.nav.focus = Focus::Content;
                     }
                     Err(error) => {
                         self.nav.search_results.error = Some(format!("{error:#}"));
@@ -1187,10 +1166,7 @@ impl App {
         if self.nav.search_input {
             return keys::Context::SearchInput;
         }
-        match self.nav.focus {
-            Focus::Menu => keys::Context::Menu,
-            Focus::Content => keys::Context::Content,
-        }
+        keys::Context::Content
     }
 
     pub(super) fn apply(&mut self, action: keys::Action) {
@@ -1226,18 +1202,8 @@ impl App {
             keys::Action::Down => self.move_selection(1),
             keys::Action::First => self.select_edge(false),
             keys::Action::Last => self.select_edge(true),
-            keys::Action::PageUp => self.nav.page_focus(-1),
-            keys::Action::PageDown => self.nav.page_focus(1),
-            keys::Action::FocusNext | keys::Action::FocusPrev => {
-                self.nav.focus = match self.nav.focus {
-                    // 回到菜单时高亮落在「正在看的那一屏」上，不跳到别处。
-                    Focus::Menu => Focus::Content,
-                    Focus::Content => {
-                        self.nav.cursor = self.nav.menu;
-                        Focus::Menu
-                    }
-                };
-            }
+            keys::Action::PageUp => self.nav.page_selection(-1),
+            keys::Action::PageDown => self.nav.page_selection(1),
             keys::Action::Enter => {
                 if self.picker.is_some() {
                     self.confirm_picker();
@@ -1245,12 +1211,6 @@ impl App {
                 }
                 if self.queue_open {
                     self.jump_in_queue();
-                    return;
-                }
-                if self.nav.focus == Focus::Menu {
-                    // 菜单上回车 = 进入高亮那一项（切屏并落焦到主区）。
-                    let target = self.nav.cursor;
-                    self.switch_menu(target);
                     return;
                 }
                 self.enter_selected();
@@ -1325,8 +1285,8 @@ impl App {
                 } else if !self.nav.filter_text().is_empty() {
                     // 筛选也算一层：Esc 先清掉它，再按才退上一层视图。
                     self.nav.set_filter("");
-                } else if self.nav.pop_tracks() {
-                    self.nav.focus = Focus::Content;
+                } else {
+                    self.nav.pop_tracks();
                 }
             }
         }
@@ -1573,7 +1533,7 @@ impl App {
         }
     }
 
-    /// `j`/`k` 的落点：浮层开着就挪浮层自己的列表，否则按焦点走。
+    /// `j`/`k` 的落点：浮层开着就挪浮层自己的列表，否则挪当前屏的列表。
     ///
     /// 队列浮层与歌单选择框各有一份 `ListState`——它们盖在主区上，方向键绝不该
     /// 穿透到底下的列表去（那正是「浮层里选不动」这个 bug 的成因）。
@@ -1586,13 +1546,7 @@ impl App {
             step_state(state, playlists.len(), delta);
             return;
         }
-        if self.nav.focus == Focus::Menu {
-            let next = (self.nav.cursor.index() as isize + delta)
-                .clamp(0, Menu::ALL.len() as isize - 1);
-            self.nav.cursor = Menu::ALL[next as usize];
-            return;
-        }
-        self.nav.move_focus_by(delta);
+        self.nav.move_selection(delta);
     }
 
     /// `g`/`G`（Home/End）：落点同上，跳到首 / 尾。
@@ -1605,11 +1559,7 @@ impl App {
             edge_state(state, playlists.len(), last);
             return;
         }
-        if self.nav.focus == Focus::Menu {
-            self.nav.cursor = if last { Menu::History } else { Menu::Favorites };
-            return;
-        }
-        self.nav.focus_edge(last);
+        self.nav.edge_selection(last);
     }
 
     /// 每帧收尾：引擎死了要报，播完了要接上下一首，下载进度刷到状态栏。
@@ -1714,12 +1664,12 @@ mod tests {
         nav.switch_menu(Menu::Favorites);
         nav.favorites.set_items((0..25).map(|index| test_song(&format!("m{index}"))).collect());
         nav.favorites.select_first();
-        nav.page_focus(1);
+        nav.page_selection(1);
         assert_eq!(nav.favorites.state.selected(), Some(10));
-        nav.page_focus(1);
-        nav.page_focus(1);
+        nav.page_selection(1);
+        nav.page_selection(1);
         assert_eq!(nav.favorites.state.selected(), Some(24), "到尾就停，不越界");
-        nav.page_focus(-1);
+        nav.page_selection(-1);
         assert_eq!(nav.favorites.state.selected(), Some(14));
     }
 
@@ -1731,7 +1681,7 @@ mod tests {
         nav.push_tracks("1", "嗯", vec![test_song("keep")]);
         nav.search_results.set_items(vec![test_song("found")]);
         nav.switch_menu(Menu::Search);
-        assert_eq!(nav.focused_songs().unwrap().items()[0].mid, "found");
+        assert_eq!(nav.active_songs().unwrap().items()[0].mid, "found");
         nav.switch_menu(Menu::Playlists);
         assert_eq!(nav.tracks.items()[0].mid, "keep", "歌单曲目没被搜索顶掉");
     }
@@ -1908,37 +1858,70 @@ mod tests {
         assert_eq!(nav.search_text, "晴天", "退出输入态不丢关键词");
     }
 
-    /// 焦点在菜单上时，主区列表不该被 `j`/`k` 动到。
+    /// 数字键切屏 = 「回到这一屏上次的位置」：正在某个歌单的曲目里，
+    /// 切走再切回来要还在那个歌单里（面包屑、曲目、选中位置一起回去）。
     #[test]
-    fn movement_only_touches_the_focused_list() {
+    fn switching_back_returns_to_where_you_left_the_screen() {
+        let (mut app, _runtime) = test_app();
+        app.apply(keys::Action::Menu(1));
+        app.nav.playlists.set_items(vec![playlist("1", "嗯")]);
+        // 进歌单（真请求会另外回填，这里只关心导航），再塞两首进去。
+        app.nav.begin_tracks("1", "嗯");
+        app.nav.tracks.set_items(vec![test_song("a"), test_song("b")]);
+        app.nav.tracks.move_by(1);
+        assert_eq!(app.nav.breadcrumb, ["我的歌单", "嗯"]);
+
+        app.apply(keys::Action::Menu(3));
+        assert_eq!(app.nav.breadcrumb, ["历史"]);
+
+        app.apply(keys::Action::Menu(1));
+        assert_eq!(
+            app.nav.breadcrumb,
+            ["我的歌单", "嗯"],
+            "回到这一屏要还原「还在哪个歌单里」，否则标题和内容对不上"
+        );
+        assert_eq!(
+            app.nav
+                .active_songs()
+                .and_then(|view| view.selected())
+                .map(|song| song.mid.as_str()),
+            Some("b"),
+            "选中位置也留着"
+        );
+
+        // Esc 才是退层：退出歌单，回到歌单列表。
+        app.apply(keys::Action::Back);
+        assert_eq!(app.nav.breadcrumb, ["我的歌单"]);
+    }
+
+    /// `j`/`k` 直接挪当前屏的列表（没有「菜单游标」这层中间态了）。
+    #[test]
+    fn movement_goes_straight_to_the_list() {
         let mut nav = Nav::new();
         nav.favorites.set_items(vec![test_song("a"), test_song("b")]);
         nav.favorites.select_first();
-        nav.focus = Focus::Menu;
-        assert!(nav.focused_songs().is_none());
-        nav.focus = Focus::Content;
-        nav.move_focus_by(1);
+        assert_eq!(nav.favorites.state.selected(), Some(0));
+        nav.move_selection(1);
         assert_eq!(nav.favorites.state.selected(), Some(1));
     }
 
     #[test]
     fn help_overlay_toggles_and_swallows_everything_else() {
         let (mut app, _runtime) = crate::tui::test_support::test_app();
-        assert_eq!(app.context(), keys::Context::Menu);
+        assert_eq!(app.context(), keys::Context::Content);
         app.apply(keys::Action::Help);
         assert!(app.help_open);
         assert_eq!(app.context(), keys::Context::HelpOverlay);
         app.apply(keys::Action::Help);
         assert!(!app.help_open);
-        assert_eq!(app.context(), keys::Context::Menu, "关掉后回到原来的焦点");
+        assert_eq!(app.context(), keys::Context::Content, "关掉后回到主界面");
     }
 
     #[test]
-    fn digits_switch_menu_and_move_focus_to_content() {
+    fn digits_switch_screens() {
         let (mut app, _runtime) = crate::tui::test_support::test_app();
         app.apply(keys::Action::Menu(2));
         assert_eq!(app.nav.menu, Menu::Search);
-        assert_eq!(app.nav.focus, Focus::Content);
         assert!(app.nav.search_input, "进搜索屏直接能输入");
         app.apply(keys::Action::Menu(1));
         assert_eq!(app.nav.menu, Menu::Playlists);
@@ -2096,57 +2079,6 @@ mod tests {
         app.nav.switch_menu(Menu::Favorites);
         app.apply(keys::Action::HistoryClear);
         assert_eq!(app.history.len(), 1);
-    }
-
-    /// `j`/`k` 在菜单上只挪高亮，右侧保持原样；Enter 才进去。
-    #[test]
-    fn moving_the_menu_cursor_does_not_switch_the_view() {
-        let (mut app, _runtime) = crate::tui::test_support::test_app();
-        app.switch_menu(Menu::Favorites);
-        app.nav.favorites.set_items(vec![test_song("a"), test_song("b")]);
-        app.nav.favorites.select_first();
-        app.nav.favorites.move_by(1);
-        app.nav.focus = Focus::Menu;
-        app.nav.cursor = Menu::Favorites;
-
-        app.apply(keys::Action::Down);
-        assert_eq!(app.nav.cursor, Menu::Playlists, "高亮跟着 j 走");
-        assert_eq!(app.nav.menu, Menu::Favorites, "右侧还停在原来看的那一屏");
-        assert_eq!(
-            app.nav.favorites.state.selected(),
-            Some(1),
-            "主区连选中行都不该被动到"
-        );
-
-        app.apply(keys::Action::Enter);
-        assert_eq!(app.nav.menu, Menu::Playlists, "Enter 才切过去");
-        assert_eq!(app.nav.focus, Focus::Content, "并且把焦点放进主区");
-    }
-
-    /// `g`/`G` 在菜单上同理：只挪高亮。
-    #[test]
-    fn menu_edges_only_move_the_cursor() {
-        let (mut app, _runtime) = crate::tui::test_support::test_app();
-        app.nav.focus = Focus::Menu;
-        app.apply(keys::Action::Last);
-        assert_eq!(app.nav.cursor, Menu::History);
-        assert_eq!(app.nav.menu, Menu::Favorites);
-        app.apply(keys::Action::First);
-        assert_eq!(app.nav.cursor, Menu::Favorites);
-    }
-
-    /// Tab 从主区回到菜单时，高亮落在「正在看的那一屏」上。
-    #[test]
-    fn tab_back_to_the_menu_puts_the_cursor_on_the_current_view() {
-        let (mut app, _runtime) = crate::tui::test_support::test_app();
-        app.switch_menu(Menu::History);
-        app.nav.cursor = Menu::Favorites;
-        app.apply(keys::Action::FocusNext);
-        assert_eq!(app.nav.focus, Focus::Menu);
-        assert_eq!(app.nav.cursor, Menu::History, "回到菜单不该跳到别的项上");
-
-        app.apply(keys::Action::FocusNext);
-        assert_eq!(app.nav.focus, Focus::Content, "Tab 再按一次回主区");
     }
 
     /// 「我喜欢」在菜单里是单独一项，不该在「我的歌单」里再出现一次。

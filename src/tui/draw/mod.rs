@@ -1,6 +1,6 @@
 //! 绘制：骨架布局与各面板。
 //!
-//! 骨架（菜单 / 主区 / 歌词 / 播放条 / 状态行）、断点与共用的小工具都在这里；
+//! 骨架（内容区 / 歌词 / 播放条 / 状态行）、断点与共用的小工具都在这里；
 //! 各面板自己的画法在子模块里。状态与按键在 [`super::state`]。
 
 use std::time::Duration as StdDuration;
@@ -12,7 +12,6 @@ use ratatui::widgets::Block;
 
 pub mod content;
 pub mod lyric;
-pub mod menu;
 pub mod overlay;
 pub mod player;
 pub mod status;
@@ -22,10 +21,6 @@ use crate::player::Phase;
 use super::keys;
 use super::state::{App, Screen};
 
-/// 菜单列宽。
-pub const MENU_WIDTH: u16 = 16;
-/// 低于这个宽度就把菜单横过来当顶部页签行。
-pub const NARROW_WIDTH: u16 = 100;
 /// 低于这个高度就不展开歌词块（矮屏里歌词会把主区挤成一两行）。
 pub const MIN_LYRIC_HEIGHT: u16 = 20;
 /// 窗口小于这个尺寸就只画一行提示。
@@ -36,52 +31,36 @@ pub const MAX_LYRIC_HEIGHT: u16 = 12;
 
 /// 骨架切出来的几块。
 pub struct Areas {
-    pub menu: Rect,
     pub content: Rect,
     pub lyric: Option<Rect>,
     pub player: Rect,
     pub status: Rect,
-    /// 窄屏：菜单在顶部一行，不在左列。
-    pub narrow: bool,
 }
 
 /// 切骨架。`lyric_wanted` 由调用方判断（有没有在放 + 歌词拿没拿到 + 面板开没开）。
+///
+/// 菜单栏去掉后左右只有一列，宽度不再是变量：内容区吃满全宽，歌词块在最下面。
 pub fn layout(area: Rect, lyric_wanted: bool) -> Areas {
-    let narrow = area.width < NARROW_WIDTH;
     let rows = Layout::vertical([
-        // 窄屏时这里给顶部页签行留一行，宽屏时长度为 0（不占位）。
-        Constraint::Length(u16::from(narrow)),
         Constraint::Min(3),
         // 播放条：上下边框各 1 行 + 标题行 + 进度条行。
         Constraint::Length(4),
         Constraint::Length(1),
     ])
     .split(area);
-    let body = rows[1];
+    let body = rows[0];
     let lyric_height = if lyric_wanted && area.height >= MIN_LYRIC_HEIGHT {
         (body.height / 3).clamp(5, MAX_LYRIC_HEIGHT)
     } else {
         0
     };
-    let lyric_area = |area: Rect| (lyric_height > 0).then_some(area);
-    let (menu, content, lyric) = if narrow {
-        let inner = Layout::vertical([Constraint::Min(3), Constraint::Length(lyric_height)])
-            .split(body);
-        (rows[0], inner[0], lyric_area(inner[1]))
-    } else {
-        let columns = Layout::horizontal([Constraint::Length(MENU_WIDTH), Constraint::Min(20)])
-            .split(body);
-        let inner = Layout::vertical([Constraint::Min(3), Constraint::Length(lyric_height)])
-            .split(columns[1]);
-        (columns[0], inner[0], lyric_area(inner[1]))
-    };
+    let inner =
+        Layout::vertical([Constraint::Min(3), Constraint::Length(lyric_height)]).split(body);
     Areas {
-        menu,
-        content,
-        lyric,
-        player: rows[2],
-        status: rows[3],
-        narrow,
+        content: inner[0],
+        lyric: (lyric_height > 0).then_some(inner[1]),
+        player: rows[1],
+        status: rows[2],
     }
 }
 
@@ -122,11 +101,6 @@ impl App {
         // 歌词块只在「正在放 + 有歌词 + 面板开着」时占位，不播放时不画空框。
         let lyric_wanted = self.show_lyric && self.lyric.is_some() && self.player_active();
         let areas = layout(area, lyric_wanted);
-        if areas.narrow {
-            self.draw_tabs(frame, areas.menu);
-        } else {
-            self.draw_menu(frame, areas.menu);
-        }
         self.draw_content(frame, areas.content);
         if let Some(lyric) = areas.lyric {
             self.draw_lyric(frame, lyric);
@@ -151,7 +125,6 @@ impl App {
 /// 状态行左侧的键位提示：按当前上下文给三到五个，只写**真的接了行为**的键。
 pub fn hints(context: keys::Context) -> &'static str {
     match context {
-        keys::Context::Menu => "j/k 选菜单 · Enter 进入 · 1-4 直达 · Tab 到主区 · ? 帮助",
         keys::Context::Content => {
             "Enter 播放 · Space 暂停 · n/b 切歌 · / 筛选 · f 收藏 · p 加歌单 · ? 帮助"
         }
@@ -166,13 +139,9 @@ pub fn hints(context: keys::Context) -> &'static str {
     }
 }
 
-fn focused_block(title: &str, focused: bool) -> Block<'static> {
-    let block = Block::bordered().title(title.to_string());
-    if focused {
-        block.border_style(Style::new().fg(Color::Yellow))
-    } else {
-        block
-    }
+/// 内容块：只有一块内容区，所以不再有「焦点在这块」的黄边框。
+fn panel_block(title: &str) -> Block<'static> {
+    Block::bordered().title(title.to_string())
 }
 
 fn highlight() -> Style {
@@ -230,28 +199,27 @@ mod tests {
     }
 
     #[test]
-    fn wide_screen_shows_menu_breadcrumb_and_two_part_status_row() {
+    fn the_breadcrumb_and_the_status_row_share_the_frame() {
         let (mut app, _runtime) = test_app();
         app.nav.switch_menu(Menu::Playlists);
         app.nav.push_tracks("1", "嗯", vec![test_song("a")]);
         app.status = "已加载《嗯》".to_string();
         let text = frame_flat(&mut app, 160, 40);
-        for item in ["♥我的收藏", "≡我的歌单", "⌕搜索", "↺历史"] {
-            assert!(text.contains(item), "菜单里缺 {item}：{text}");
-        }
         assert!(text.contains("我的歌单›嗯"), "面包屑要带层级：{text}");
+        // 菜单栏没了：整帧里不该再出现菜单那几行。
+        assert!(!text.contains("♥我的收藏"), "菜单项不该再画出来：{text}");
         assert!(text.contains("已加载《嗯》"), "状态行右侧：{text}");
         assert!(text.contains("Enter播放"), "状态行左侧的键位提示不能被状态顶掉：{text}");
         assert!(text.contains("已停止"), "空闲时播放条也要在：{text}");
     }
 
+    /// 窄屏不再有「页签行」这一层：内容区就是全部宽度（画出来的东西和宽屏一致）。
     #[test]
-    fn narrow_screen_turns_the_menu_into_a_tab_row() {
+    fn a_narrow_window_has_no_tab_row_any_more() {
         let (mut app, _runtime) = test_app();
         let text = frame_flat(&mut app, 90, 24);
-        assert!(text.contains("1♥我的收藏"), "窄屏菜单收成页签行：{text}");
-        assert!(text.contains("4↺历史"), "四项都在：{text}");
-        assert!(!text.contains("┌菜单"), "窄屏不再画左侧菜单块：{text}");
+        assert!(!text.contains("♥我的收藏"), "窄屏也不该有页签行：{text}");
+        assert!(text.contains("我的收藏"), "当前屏写在内容块标题里：{text}");
     }
 
     /// 歌词块只在「要它 + 屏幕够高」时占位，否则主区吃满。
@@ -277,14 +245,15 @@ mod tests {
         assert_eq!(wide.content.width, without.content.width, "宽度不受歌词块影响");
     }
 
-    /// 窄屏：菜单收成一行页签，主区吃满宽度。
+    /// 菜单栏去掉后布局与宽度无关：任何宽度下内容区都吃满全宽。
     #[test]
-    fn narrow_layout_moves_the_menu_to_a_single_row() {
-        let narrow = layout(Rect::new(0, 0, 90, 24), true);
-        assert!(narrow.narrow);
-        assert_eq!(narrow.menu.height, 1, "窄屏菜单只有一行");
-        assert_eq!(narrow.menu.width, 90, "页签行横跨全宽");
-        assert_eq!(narrow.content.width, 90, "主区也吃满宽");
+    fn the_content_area_takes_the_full_width_at_any_window_size() {
+        for width in [60, 90, 100, 160, 240] {
+            let areas = layout(Rect::new(0, 0, width, 30), true);
+            assert_eq!(areas.content.width, width, "{width} 列时内容区该吃满");
+            assert_eq!(areas.content.x, 0, "内容区从最左边开始");
+            assert_eq!(areas.player.width, width, "播放条同样横跨全宽");
+        }
     }
 
     #[test]
@@ -294,7 +263,10 @@ mod tests {
         app.apply(crate::tui::keys::Action::Help);
         let text = frame_flat(&mut app, 160, 40);
         assert!(text.contains("帮助"), "浮层标题");
-        assert!(text.contains("全局Tab焦点"), "全局键位：{text}");
+        assert!(
+            text.contains("切屏1我的收藏·2我的歌单·3搜索·4历史"),
+            "切屏表：{text}"
+        );
         assert!(text.contains("歌单Enter进入曲目"), "当前屏那一行要跟着菜单变：{text}");
         assert!(text.contains("关闭Esc或?"), "关闭方式");
     }
@@ -334,7 +306,7 @@ mod tests {
         let before = frame_flat(&mut app, 160, 40);
         assert!(before.contains("队列1/2"), "浮层标题要显示序号：{before}");
 
-        // 第 2 行（歌 b）与第 1 行之间有没有高亮符号——菜单那个 ▶ 不算。
+        // 第 2 行（歌 b）与第 1 行之间有没有高亮符号——主区列表那个 ▶ 不算。
         let arrow_between = |text: &str| {
             let (first, second) = (
                 text.find("歌a").expect("第 1 行还在"),
