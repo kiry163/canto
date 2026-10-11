@@ -43,6 +43,7 @@ impl Instance {
             }
         }
         // 锁拿到手了：把 pid 写进去，第二个实例能报出「谁在跑」。
+        // 只有 Unix 读得到：Windows 那边锁是强制的，别人正持锁时读不了文件内容（见 `pid_in`）。
         let _ = file.set_len(0);
         let _ = file.rewind();
         let _ = write!(file, "{}", std::process::id());
@@ -51,6 +52,10 @@ impl Instance {
 }
 
 /// 读锁文件里的 pid（只为把错误信息说清楚，读不到就当没有）。
+///
+/// Windows 上「别人正持锁」时这里必然读不到：`LockFileEx` 的字节范围锁是**强制**的，
+/// 另一个句柄读被锁住的字节会直接失败（实测 `ERROR_LOCK_VIOLATION`）；Unix 的 `flock`
+/// 只是劝告式锁，不影响读。所以那边第二个实例只会说「已经有一个在跑」，报不出 pid。
 pub fn pid_in(path: &Path) -> Option<u32> {
     let mut text = String::new();
     File::open(path).ok()?.read_to_string(&mut text).ok()?;
@@ -76,10 +81,14 @@ mod tests {
             Instance::acquire(&path).expect("第二次调用本身不该报错").is_none(),
             "已经有一个在跑，第二次必须被拒"
         );
-        assert_eq!(pid_in(&path), Some(std::process::id()), "锁文件里该写着持有者的 pid");
+        // 正持锁时只有 Unix 读得到 pid：Windows 的锁是强制的，另一个句柄读不了被锁住的字节。
+        if cfg!(unix) {
+            assert_eq!(pid_in(&path), Some(std::process::id()), "锁文件里该写着持有者的 pid");
+        }
 
         // 第一个实例退出（drop）后，锁就该能再拿到——不靠删文件自愈。
         drop(first);
+        assert_eq!(pid_in(&path), Some(std::process::id()), "锁一松，pid 就该读得到");
         assert!(
             Instance::acquire(&path).expect("释放后该能拿").is_some(),
             "上一个实例退出后锁要能重新拿到"

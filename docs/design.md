@@ -175,6 +175,8 @@ src/
 
 - 年内第几天（判断「昨天」）不用系统的 `tm_yday` / `wDayOfYear`：Windows 的 `SYSTEMTIME` 里根本没
   这个字段，统一从年月日自己算（闰年规则也一起测了）。
+- Windows 的字节范围锁是**强制**的：正持锁时另一个句柄读不了锁文件内容，所以那边第二个实例报不出
+  持有者的 pid（Unix 的 `flock` 是劝告式锁，读得到）。
 - 数据目录三平台都是 `~/.config/canto`，刻意不用 `dirs::config_dir()`（macOS 会给
   `~/Library/Application Support`）。
 - 测试走哑音频引擎（`Engine::silent`）：CI 上没有声卡也能跑完整测试，开发机也不会因为声卡被别的
