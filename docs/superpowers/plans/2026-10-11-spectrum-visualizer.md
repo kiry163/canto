@@ -485,7 +485,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use rodio::source::{ChannelCount, SampleRate, SeekError, Source};
+use rodio::source::{SeekError, Source};
+use rodio::{ChannelCount, SampleRate};
 
 use crate::spectrum::WINDOW;
 
@@ -679,24 +680,33 @@ mod tests {
 
     #[test]
     fn a_high_rate_source_is_decimated() {
-        // 96kHz 的源抽稀 2 倍：有效采样率变 48kHz，窗口里是两个采样的平均
-        let samples: Vec<f32> = (0..SLOTS * 2)
-            .map(|index| if index % 2 == 0 { 0.0 } else { 1.0 })
+        // 96kHz 的源抽稀 2 倍：有效采样率变 48kHz，窗口里是两个采样的平均。
+        //
+        // 采样数要算对：填满窗口需要「窗口 × 声道数 × 抽稀倍率」个采样
+        // （立体声每 2 个采样才出一个第 0 声道，再每 2 个才凑成一格）。
+        //
+        // 源是立体声、每帧两个采样同值，于是**第 0 声道**是 0 与 1 交替
+        // （写成「按 index 交替」会让第 0 声道恒为 0——那是两条不同的波形）。
+        let total = SLOTS * 2 * 2;
+        let samples: Vec<f32> = (0..total)
+            .map(|index| if (index / 2) % 2 == 0 { 0.0 } else { 1.0 })
             .collect();
         let levels = Levels::new();
         let (inner, _seeks) = fake(samples, 96_000);
         let mut meter = LevelMeter::new(inner, levels.clone());
         assert_eq!(meter.factor, 2);
-        for _ in 0..SLOTS * 2 {
+        for _ in 0..total {
             meter.next().expect("有采样");
         }
 
         let mut window = Vec::new();
         let rate = levels.read_into(&mut window);
         assert_eq!(rate, 48_000, "有效采样率该是抽稀后的");
+        assert_eq!(window.len(), SLOTS);
         assert!(
             window.iter().all(|&sample| (sample - 0.5).abs() < 1e-6),
-            "0 与 1 交替的源抽稀后应当处处是 0.5"
+            "0 与 1 交替的源抽稀后应当处处是 0.5，实际首个是 {}",
+            window[0]
         );
     }
 
@@ -848,7 +858,9 @@ pub struct Engine {
         let (tx, rx) = channel();
 ```
 
-线程闭包与 `run` 的签名各加一个 `thread_levels` / `levels: Levels` 参数，`run` 再把它交给 `handle`（`handle` 上已有 `#[allow(clippy::too_many_arguments)]`，直接加参数即可）。
+线程闭包与 `run` 的签名各加一个 `thread_levels` / `levels: Levels` 参数，`run` 再把它交给 `handle`。
+
+（两边都会越过 clippy 的 7 参数线：`handle` 上原本就有 `#[allow(clippy::too_many_arguments)]`，`run` 要照着补一个——`-D warnings` 下这是硬错误。函数体本来就是「把上下文原样往下传」，包一个结构体只是把参数搬个家，不值当。）
 
 `Engine::levels` 访问器（放在 `snapshot` 旁边）：
 
@@ -887,6 +899,17 @@ cargo test && cargo clippy --all-targets -- -D warnings
 ```
 
 Expected: 全绿。播放相关的现有测试（`player.rs` 里那几条）不受影响——它们走哑引擎，压根不会 `append`。
+
+- [ ] **Step 9b: 加一条无声卡的端到端冒烟测试**
+
+上面的单测只能零散地验各段（哑引擎没人拉样本，频谱恒为零；`spectrum.rs` 只喂合成正弦）。在 `src/player.rs` 的 `mod tests` 里补一条**直接拉真解码器**的：
+
+- 用 `write_sine_wav()` 手写一个最小 WAV（44 字节头 + 16bit PCM 单声道，440Hz，1 秒）到临时目录（文件名带 pid，测试并行不撞）；
+- `Decoder::new(MediaSource::File(file))` → `LevelMeter::new(decoder, levels.clone())`，拉满 `spectrum::WINDOW` 个采样；
+- 断言 `levels.read_into()` 报的有效采样率是 44100、窗口里有 `|sample| > 0.05` 的波形；
+- 再喂给 `Analyzer::analyze_into`，断言频段不是全零。
+
+`rodio` 的默认 feature 里带 `wav`，所以不需要额外依赖，也不需要声卡。完整代码见实施时写进 `src/player.rs` 的 `a_real_decoder_feeds_the_spectrum_window`（一并带上 `write_sine_wav` 辅助函数）。这条是整条链路**唯一能进 CI 的端到端证据**；「柱子真的跟着音乐动」仍然只能真跑看。
 
 - [ ] **Step 10: `src/tui/state.rs` 加缓冲、平滑与取数**
 
@@ -1254,12 +1277,15 @@ mod tests {
 
     #[test]
     fn the_peak_marker_sits_above_the_bar() {
-        // 柱子 0.25（6 刻度 → 底格 6/8 块），峰值 0.75（18 刻度）→ 峰值画在从底数第 3 格
+        // 柱子 0.25（6 刻度 → 底格 6/8 块），峰值 0.75（18 刻度）→ 峰值画在从底数第 3 格，
+        // 与柱顶之间隔着一格空白（`column` 那种自底向上、遇空即停的读法跨不过这一格）。
         let buffer = bars_of(8, 5, &[0.25], &[0.75]);
         let x = (0..8u16)
             .find(|&x| buffer[(x, 1)].symbol() == "▔")
             .expect("峰值刻度");
-        assert_eq!(column(&buffer, x, 3, 1), "▆▔");
+        assert_eq!(buffer[(x, 3)].symbol(), "▆", "柱顶是 6/8 块");
+        assert_eq!(buffer[(x, 2)].symbol(), " ", "柱与峰值之间是空的");
+        assert_eq!(buffer[(x, 1)].symbol(), "▔", "峰值刻度在柱顶之上");
     }
 
     #[test]
