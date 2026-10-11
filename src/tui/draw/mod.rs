@@ -170,7 +170,8 @@ impl App {
     /// 而正在播但此刻真是静音的歌，画出来的是一条平的柱子（不是提示）。
     fn draw_spectrum_area(&self, frame: &mut Frame, area: Rect, title: &str) {
         if self.spectrum_smooth.is_empty() {
-            spectrum::draw_spectrum_message(frame, area, title, "未在播放");
+            let message = spectrum_message(&self.engine.snapshot().phase);
+            spectrum::draw_spectrum_message(frame, area, title, message);
             return;
         }
         spectrum::draw_spectrum(
@@ -231,6 +232,15 @@ fn format_duration(duration: StdDuration) -> String {
         format!("{hours}:{minutes:02}:{seconds:02}")
     } else {
         format!("{minutes:02}:{seconds:02}")
+    }
+}
+
+/// 频谱块没数据可画时那句话。缓冲与「没在播」要分开报——前者等一会儿就有了。
+fn spectrum_message(phase: &Phase) -> &'static str {
+    match phase {
+        Phase::Buffering => "缓冲中…",
+        // Idle / Paused / Failed / Playing（刚起播、窗口还没填满）
+        _ => "未在播放",
     }
 }
 
@@ -399,6 +409,18 @@ mod tests {
         assert!(!back.contains("歌词"), "回到列表就没有歌词块了：{back}");
     }
 
+    /// 频谱块的提示文案按播放态选：缓冲中与「没在播」不是一回事（纯函数，所以
+    /// 哑引擎走不到的那些状态也能钉住）。
+    #[test]
+    fn the_spectrum_message_follows_the_playback_phase() {
+        use crate::player::Phase;
+        assert_eq!(spectrum_message(&Phase::Buffering), "缓冲中…");
+        assert_eq!(spectrum_message(&Phase::Idle), "未在播放");
+        assert_eq!(spectrum_message(&Phase::Paused), "未在播放");
+        assert_eq!(spectrum_message(&Phase::Playing), "未在播放");
+        assert_eq!(spectrum_message(&Phase::Failed("x".into())), "未在播放");
+    }
+
     /// 全屏视图：上半屏频谱、下半屏歌词，两块各带自己的标题。
     #[test]
     fn the_now_playing_view_splits_into_spectrum_above_lyric() {
@@ -447,6 +469,58 @@ mod tests {
         assert!(
             !rows.iter().any(|row| row.starts_with("┌歌词")),
             "没有歌名块：{rows:?}"
+        );
+    }
+
+    /// 没在播时：进过 tick 之后不该留着上一帧的柱子（`tick()` 会清掉缓冲）。
+    #[test]
+    fn an_idle_engine_shows_a_message_instead_of_stale_bars() {
+        let (mut app, _runtime) = test_app();
+        app.lyric = Some(crate::tui::test_support::test_lyric());
+        app.now_playing_full = true;
+        // 故意塞一份「上一帧」的柱子：没在播时它不该被画出来
+        app.spectrum_smooth = vec![1.0; crate::spectrum::BANDS];
+        app.spectrum_peak = vec![1.0; crate::spectrum::BANDS];
+        // 真实运行时每帧都会走 tick：它发现「没在播」就把缓冲清空
+        app.tick();
+
+        let rows = frame_rows(&mut app, 120, 30);
+        let spectrum = rows
+            .iter()
+            .position(|row| row.starts_with("┌频谱"))
+            .expect("频谱块");
+        let lyric = rows
+            .iter()
+            .position(|row| row.starts_with("┌歌词"))
+            .expect("歌词块");
+        assert!(
+            rows[spectrum..lyric]
+                .iter()
+                .any(|row| row.contains("未在播放")),
+            "空闲该给提示：{rows:?}"
+        );
+        assert!(
+            !rows[spectrum..lyric].iter().any(|row| row.contains('█')),
+            "不该画残留的柱子：{rows:?}"
+        );
+    }
+
+    /// 太矮的终端不拆：15 行高的窗口只画歌词（就是今天的 Y）。
+    #[test]
+    fn a_short_window_keeps_the_lyric_only_view() {
+        let (mut app, _runtime) = test_app();
+        app.lyric = Some(crate::tui::test_support::test_lyric());
+        app.now_playing_full = true;
+
+        // 15 行的下限窗口：内容区 10 行 < SPLIT_MIN_HEIGHT
+        let rows = frame_rows(&mut app, 100, 15);
+        assert!(
+            rows.iter().any(|row| row.starts_with("┌歌词")),
+            "歌词块还在：{rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.starts_with("┌频谱")),
+            "矮屏不拆：{rows:?}"
         );
     }
 
