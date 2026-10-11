@@ -155,20 +155,26 @@ impl MediaStream {
                 format!("CDN 返回 {status}（文件不存在或已过期）"),
             ));
         }
-        if start > 0 && status == StatusCode::PARTIAL_CONTENT {
-            self.len = response
-                .headers()
-                .get(reqwest::header::CONTENT_RANGE)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.rsplit('/').next())
-                .and_then(|total| total.trim().parse::<u64>().ok())
-                .or(self.len);
-        } else {
-            self.len = response.content_length();
-        }
+        // body 到底从哪儿开始：`206` 的 `Content-Range` 说了算，其它情况一律当作整份从头来
+        // ——服务端/代理不理会 `Range`、直接回 `200` 是真会发生的。
+        let (begins_at, total) = match content_range(&response) {
+            Some((begins_at, total)) => (begins_at, total),
+            None => (0, response.content_length()),
+        };
+        self.len = total.or(self.len);
         self.response = Some(response);
-        self.pos = start;
-        if start == 0 {
+        self.pos = begins_at;
+        if start < begins_at {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("要 {start} 起的字节，服务端却从 {begins_at} 开始给"),
+            ));
+        }
+        if start > begins_at {
+            // 要的起点在 body 之后：把中间这段读掉。少了这一步，后面会按错的位置解码，
+            // 而且文件头的魔数早就嗅过了，不会有任何报错——纯静默错位。
+            self.discard(start - begins_at)?;
+        } else if start == 0 {
             self.sniff(status)?;
         }
         Ok(())
@@ -227,6 +233,21 @@ impl MediaStream {
 
 fn io_error(error: reqwest::Error) -> io::Error {
     io::Error::other(error)
+}
+
+/// 从 `Content-Range: bytes 64-4095/4096` 里读出（body 起点，总长）。
+///
+/// 总长写 `*`（`bytes 64-4095/*`）时给 `None`。头缺失、单位不是 `bytes`、数字解析不了，
+/// 都当没有——调用方按「整份从头来」处理。
+fn content_range(response: &reqwest::blocking::Response) -> Option<(u64, Option<u64>)> {
+    let value = response
+        .headers()
+        .get(reqwest::header::CONTENT_RANGE)?
+        .to_str()
+        .ok()?;
+    let (range, total) = value.trim().strip_prefix("bytes ")?.split_once('/')?;
+    let begins_at = range.split('-').next()?.trim().parse::<u64>().ok()?;
+    Some((begins_at, total.trim().parse::<u64>().ok()))
 }
 
 impl Read for MediaStream {
@@ -314,6 +335,12 @@ mod tests {
     /// 测试内容的第 `i` 个字节：开头是 FLAC 魔数，其余可预测。
     /// 返回 (端口, 收到的请求数)。
     fn serve(len: u32) -> (u16, Arc<AtomicUsize>) {
+        serve_with_range(len, true)
+    }
+
+    /// `honor_range = false`：故意忽略 `Range`、一律回 `200` 整份文件
+    /// ——有些 CDN/代理就是这么干的。
+    fn serve_with_range(len: u32, honor_range: bool) -> (u16, Arc<AtomicUsize>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("测试服务要能监听");
         let port = listener.local_addr().unwrap().port();
         let hits = Arc::new(AtomicUsize::new(0));
@@ -322,17 +349,38 @@ mod tests {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { break };
                 counter.fetch_add(1, Ordering::SeqCst);
-                let mut raw = [0_u8; 2048];
-                let read = stream.read(&mut raw).unwrap_or(0);
-                let request = String::from_utf8_lossy(&raw[..read]).to_string();
-                let start = request
+                // 一次 `read` 不保证拿到整个请求（TCP 只保证字节流），读到头部结束的空行为止，
+                // 免得偶尔漏掉 `Range:` 行。
+                let mut buffer = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                loop {
+                    let read = stream.read(&mut chunk).unwrap_or(0);
+                    if read == 0 {
+                        break;
+                    }
+                    buffer.extend_from_slice(&chunk[..read]);
+                    if buffer.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8_lossy(&buffer).to_string();
+                // 头名字大小写不敏感，得比着来：同一个请求 macOS 上发的是 `Range: bytes=64-`，
+                // Linux 上是 `range: bytes=64-`（实测），按字面匹配就只在一半平台上认得出。
+                let wanted = request
                     .lines()
                     .find_map(|line| {
-                        line.strip_prefix("Range: bytes=")
+                        let (name, value) = line.split_once(':')?;
+                        if !name.eq_ignore_ascii_case("range") {
+                            return None;
+                        }
+                        value
+                            .trim()
+                            .strip_prefix("bytes=")
                             .and_then(|value| value.split('-').next())
                             .and_then(|value| value.trim().parse::<u32>().ok())
                     })
                     .unwrap_or(0);
+                let start = if honor_range { wanted } else { 0 };
                 let body: Vec<u8> = (start..len)
                     .map(|byte| match byte {
                         0 => b'f',
@@ -400,6 +448,24 @@ mod tests {
         let end = stream.seek(SeekFrom::End(-16)).unwrap();
         assert_eq!(end, 4096 - 16);
         assert_eq!(hits.load(Ordering::SeqCst), 2, "文件尾不该真的再发请求");
+    }
+
+    /// 服务端不理会 `Range`、回 `200` 整份文件时，往回跳也必须落到对的位置：
+    /// 要自己把前 `start` 字节读掉。漏了这一步不报错，只是解码从错的位置开始。
+    #[test]
+    fn seeking_works_against_a_server_that_ignores_range() {
+        let (port, hits) = serve_with_range(4096, false);
+        let mut stream =
+            MediaStream::open(&format!("http://127.0.0.1:{port}/x.flac")).expect("打开流");
+        let mut buf = [0_u8; 512];
+        stream.read_exact(&mut buf).unwrap();
+
+        stream.seek(SeekFrom::Start(64)).unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "往回跳还是会重连一次");
+        let mut one = [0_u8; 1];
+        stream.read_exact(&mut one).unwrap();
+        assert_eq!(one[0], 64, "服务端给的是整份，客户端得自己跳过前 64 字节");
+        assert_eq!(stream.stream_position().unwrap(), 65);
     }
 
     /// 错误页不能当音频：CDN 对不存在的文件会回 64 字节 JSON（实测多为 404，
