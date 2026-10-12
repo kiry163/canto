@@ -14,6 +14,7 @@ use ratatui::widgets::ListState;
 use crate::config::Config;
 use crate::session;
 use crate::history::{self, History};
+use crate::hotkeys;
 use crate::download;
 use crate::model::{Lyric, Playlist, Song};
 use crate::player::{Engine, Track};
@@ -551,6 +552,9 @@ pub(super) struct App {
     pub(super) tx: Sender<Msg>,
     /// 启动时载入的配置（音质下限、下载目录、历史上限）。
     pub(super) config: Config,
+    /// 全局快捷键。这里从 `Hotkeys::none()` 起步，真注册只发生在 `tui::run`——
+    /// 放在 `App::new` 里的话，`test_app()` 会跟着注册真的系统热键。
+    pub(super) hotkeys: hotkeys::Hotkeys,
     /// 当前屏幕。
     pub(super) screen: Screen,
     /// 播放历史（内存里这份是权威，落盘在每次追加后同步）。
@@ -624,6 +628,7 @@ impl App {
             engine,
             tx,
             config,
+            hotkeys: hotkeys::Hotkeys::none(),
             // 默认主界面；启动时由 `tui::run` 按会话状态决定，测试里也就不用管登录。
             screen: Screen::Main,
             history: History::default(),
@@ -1251,6 +1256,16 @@ impl App {
         }
     }
 
+    /// 全局热键落到哪：只有主界面有东西可控，登录屏直接丢。
+    ///
+    /// 刻意不走 `apply_login`：热键只有播放 / 音量这一类动作，它们跟登录屏上的
+    /// cookie、二维码不是一码事。
+    pub(super) fn dispatch_hotkey(&mut self, action: keys::Action) {
+        if let Screen::Main = self.screen {
+            self.apply(action);
+        }
+    }
+
     /// 当前按键上下文：模态 > 输入态 > 焦点所在。
     pub(super) fn context(&self) -> keys::Context {
         if let Screen::Login(state) = &self.screen {
@@ -1735,6 +1750,10 @@ impl App {
 
     /// 每帧收尾：引擎死了要报，播完了要接上下一首，下载进度刷到状态栏。
     pub(super) fn tick(&mut self) {
+        // 全局热键：canto 在后台时也要能控制播放（只有主界面收，见 `dispatch_hotkey`）。
+        for action in self.hotkeys.drain() {
+            self.dispatch_hotkey(action);
+        }
         // 频谱：只在全屏视图开着且正在播时取，别的屏不付这份算力。
         let now = std::time::Instant::now();
         // 通知到点自己消失（`notice_seconds = 0` 表示不消失）。
@@ -2172,6 +2191,19 @@ mod tests {
         assert_eq!(nav.favorites.state.selected(), Some(0));
         nav.move_selection(1);
         assert_eq!(nav.favorites.state.selected(), Some(1));
+    }
+
+    /// 全局热键只在主界面生效：登录屏没有播放可控，按了就当没按。
+    #[test]
+    fn hotkeys_never_reach_the_login_screen() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.screen = Screen::Login(LoginState::default());
+        app.dispatch_hotkey(keys::Action::Help);
+        assert!(!app.help_open, "登录屏不该被全局热键穿透");
+
+        app.screen = Screen::Main;
+        app.dispatch_hotkey(keys::Action::Help);
+        assert!(app.help_open, "主界面要跟按 `?` 一样生效");
     }
 
     #[test]

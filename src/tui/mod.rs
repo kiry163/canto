@@ -30,6 +30,7 @@ use crossterm::event::{self, Event, KeyEventKind};
 
 use self::state::{App, Msg};
 use crate::config::Config;
+use crate::hotkeys;
 use crate::player::Engine;
 
 /// 界面刷新间隔，同时也是按键与后台消息的最长等待。
@@ -46,7 +47,14 @@ pub fn run(
     warning: Option<String>,
 ) -> Result<()> {
     let (tx, rx) = channel();
+    // 全局快捷键：`config` 马上被 move 进 `App`，绑定先算出来。
+    let bindings = config.hotkeys.bindings();
     let mut app = App::new(handle, engine, config, history_path, tx);
+    let (hotkeys, report) = hotkeys::install(&bindings);
+    app.hotkeys = hotkeys;
+    if report.registered > 0 {
+        tracing::info!("已注册 {} 个全局热键", report.registered);
+    }
     app.history = crate::history::History::load(&app.history_path.clone(), app.config.history_limit);
     // 没登录就先出登录屏：所有功能都在界面里，命令行不再有 login 这条路。
     if crate::session::jar().state().logged_in {
@@ -56,6 +64,11 @@ pub fn run(
     }
     if let Some(warning) = warning {
         app.notify(warning);
+    }
+    // 注册失败 / 这个平台不支持：接在配置警告后面说。通知槽只有一个，后写的占位，
+    // 两条的细节都在日志里。
+    if let Some(text) = report.notice() {
+        app.notify(text);
     }
     app.load_initial();
 
@@ -71,6 +84,8 @@ fn event_loop(
     rx: &Receiver<Msg>,
 ) -> Result<()> {
     while !app.quit {
+        // 全局热键：只有 macOS 在这里真干活（Carbon 事件得自己泵主 run loop）。
+        app.hotkeys.pump();
         terminal.draw(|frame| app.draw(frame)).context("渲染失败")?;
         // 频谱在动时提速：6.7fps 下柱子是一格一跳。
         let tick = if app.spectrum_animating() {
