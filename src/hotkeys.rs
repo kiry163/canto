@@ -141,7 +141,7 @@ impl Hotkeys {
         actions_from(&self.map, events)
     }
 
-    /// 每帧泵一次平台的活。只有 macOS 需要（Carbon 事件靠主 run loop 派发）。
+    /// 每帧泵一次平台的活。只有 macOS 需要（Carbon 的热键事件得自己从队列里拉出来派发）。
     pub fn pump(&self) {
         self.imp.pump();
     }
@@ -278,9 +278,12 @@ mod imp {
     }
 }
 
-/// macOS：crate 把事件处理器 `InstallEventHandler` 挂在 **application event target** 上，事件靠
-/// 应用主 run loop 派发。canto 没有 NSApplication，所以主线程每轮自己泵一次 CoreFoundation
-/// 的 run loop（见 `pump`）——没泵就没事件，这是这一份实现的关键。
+/// macOS：crate 把事件处理器 `InstallEventHandler` 挂在 **application event target** 上，热键事件由
+/// Carbon 的事件队列送到那个 target。Carbon 的热键事件**不走 CFRunLoop 的 source**：实测同一个
+/// 循环里 `CFRunLoopRunInMode(kCFRunLoopDefaultMode, …)` 一圈圈泵也收不到热键，`CGEventTap` 的回调
+/// 却照收。所以主线程每轮自己用 `ReceiveNextEvent` 把队列里那两类事件拉出来、
+/// `SendEventToEventTarget` 派发掉（见 `pump`）——这正是 `RunApplicationEventLoop` 内部做的事，
+/// 而它要阻塞到退出，塞不进「画帧 + 读键盘」的循环。
 #[cfg(target_os = "macos")]
 mod imp {
     use std::ffi::c_void;
@@ -288,6 +291,31 @@ mod imp {
     use global_hotkey::GlobalHotKeyManager;
 
     use super::{Binding, Outcome, validate};
+
+    /// 不透明的 `EventRef` / `EventTargetRef`。
+    type EventRef = *mut c_void;
+    type EventTargetRef = *mut c_void;
+
+    /// Carbon 的 `EventTypeSpec`：一类事件 = 事件类 + 事件类型。
+    #[repr(C)]
+    struct EventTypeSpec {
+        event_class: u32,
+        event_kind: u32,
+    }
+
+    /// `'keyb'`（`kEventClassKeyboard`）。
+    const KEYBOARD_CLASS: u32 = u32::from_be_bytes(*b"keyb");
+    /// `kEventHotKeyPressed` / `kEventHotKeyReleased`（热键按下与松开各来一条，crate 两边都发事件）。
+    const HOTKEY_PRESSED: u32 = 5;
+    const HOTKEY_RELEASED: u32 = 6;
+    /// Carbon 的 `noErr`。
+    const NO_ERR: i32 = 0;
+
+    /// 只要这两类：按它们取值，队列里别人的事件原样留着不动。
+    const HOTKEY_EVENTS: [EventTypeSpec; 2] = [
+        EventTypeSpec { event_class: KEYBOARD_CLASS, event_kind: HOTKEY_PRESSED },
+        EventTypeSpec { event_class: KEYBOARD_CLASS, event_kind: HOTKEY_RELEASED },
+    ];
 
     pub(super) struct Imp {
         /// 拿住 manager 就等于拿住那几条注册；`None` = 什么都没注册。
@@ -299,26 +327,46 @@ mod imp {
             Self { manager: None }
         }
 
-        /// 泵一次主 run loop：`0.0` 秒 = 处理完手上已有的事件就返回，不阻塞界面。
+        /// 把队列里攒下的热键事件拉空并逐条派发：`0.0` 秒 + `pull` = 有什么拿什么，不阻塞界面。
         pub(super) fn pump(&self) {
             // 没注册过就没什么可泵的（`Hotkeys::none()` 走这条路）。
             if self.manager.is_none() {
                 return;
             }
-            // SAFETY: `CFRunLoopRunInMode` 与 `kCFRunLoopDefaultMode` 是 CoreFoundation 的稳定
-            // ABI；默认 mode 是常驻的全局变量，`0.0` 秒 + `1`(= true) 不会阻塞。
-            unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.0, 1) };
+            loop {
+                let mut event: EventRef = std::ptr::null_mut();
+                // SAFETY: 只按 `HOTKEY_EVENTS` 这两类取值；`0.0` 秒 + `1`(= pull) 立即返回，
+                // 队列里没有这类事件就出循环，不会卡住界面。
+                let status = unsafe { ReceiveNextEvent(HOTKEY_EVENTS.len() as u32, HOTKEY_EVENTS.as_ptr(), 0.0, 1, &mut event) };
+                // 没有这类事件了（超时的 `eventLoopTimedOutErr`）；剩下的都不是我们的事。
+                if status != NO_ERR || event.is_null() {
+                    break;
+                }
+                // SAFETY: `event` 是刚拉出来的一条、所有权已经归我们（`pull` 把它从队列摘掉了），
+                // 派发完必须 `ReleaseEvent` 归还。派发目标跟 crate 装 handler 的那个 target 一致。
+                unsafe {
+                    let dispatched = SendEventToEventTarget(event, GetApplicationEventTarget());
+                    if dispatched != NO_ERR {
+                        tracing::warn!(status = dispatched, "派发热键事件失败");
+                    }
+                    ReleaseEvent(event);
+                }
+            }
         }
     }
 
     // edition 2024 起 `extern` 块必须写 `unsafe extern`。
-    #[link(name = "CoreFoundation", kind = "framework")]
+    #[link(name = "Carbon", kind = "framework")]
     unsafe extern "C" {
-        /// `CFStringRef kCFRunLoopDefaultMode`（系统导出的是个全局变量，不是函数）。
-        static kCFRunLoopDefaultMode: *const c_void;
-        /// `CFRunLoopRunResult CFRunLoopRunInMode(CFStringRef, CFTimeInterval, Boolean)`。
-        /// ⚠️ `Boolean` 是 `unsigned char`，所以第三个参数用 `u8` 而不是 `bool`。
-        fn CFRunLoopRunInMode(mode: *const c_void, seconds: f64, return_after_source_handled: u8) -> i32;
+        /// `EventTargetRef GetApplicationEventTarget()`：crate 的 handler 与热键注册都挂在这个 target 上。
+        fn GetApplicationEventTarget() -> EventTargetRef;
+        /// `OSStatus ReceiveNextEvent(UInt32, const EventTypeSpec *, EventTimeout, Boolean, EventRef *)`。
+        /// ⚠️ `Boolean` 是 `unsigned char`，所以第四个参数（`pull`）用 `u8` 而不是 `bool`。
+        fn ReceiveNextEvent(types: u32, list: *const EventTypeSpec, timeout: f64, pull: u8, event: *mut EventRef) -> i32;
+        /// `OSStatus SendEventToEventTarget(EventRef, EventTargetRef)`。
+        fn SendEventToEventTarget(event: EventRef, target: EventTargetRef) -> i32;
+        /// `void ReleaseEvent(EventRef)`。
+        fn ReleaseEvent(event: EventRef);
     }
 
     pub(super) fn install(bindings: &[Binding]) -> (Imp, Outcome) {

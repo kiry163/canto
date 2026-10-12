@@ -97,7 +97,7 @@ fn event_loop(
     rx: &Receiver<Msg>,
 ) -> Result<()> {
     while !app.quit {
-        // 全局热键：只有 macOS 在这里真干活（Carbon 事件得自己泵主 run loop）。
+        // 全局热键：只有 macOS 在这里真干活（Carbon 的热键事件得自己从队列里拉出来派发）。
         app.hotkeys.pump();
         terminal.draw(|frame| app.draw(frame)).context("渲染失败")?;
         // 频谱在动时提速：6.7fps 下柱子是一格一跳。
