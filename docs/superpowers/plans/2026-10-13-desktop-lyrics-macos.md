@@ -108,7 +108,7 @@ git commit -m "refactor(overlay): Imp::pump —— 每帧泵一次平台事件"
 
 **Files:**
 - Modify: `Cargo.toml`（新增 macOS 直接依赖段）
-- Modify: `src/overlay.rs`（新增 `#[cfg(target_os = "macos")] mod imp`，位置放在 Windows 那份与「其它平台」那份之间）
+- Modify: `src/overlay.rs`（新增 `#[cfg(target_os = "macos")] mod imp`，位置放在 Windows 那份与「其它平台」那份之间；**同时把「其它平台」那份的 `cfg` 从 `not(target_os = "windows")` 收紧成 `not(any(target_os = "windows", target_os = "macos"))`**，否则 macOS 上两份实现会同时存在、编译不过）
 
 **Interfaces:**
 - Consumes: `Payload`（`visible`/`current`/`next`/`translation`/`locked`）、`DesktopLyricsConfig`、`crate::config::Rgb`
@@ -151,6 +151,16 @@ objc2-app-kit = { version = "0.3", features = [
 ```
 
 - [ ] **Step 2: 写 macOS 实现**
+
+先收紧「其它平台」那份的边界（`src/overlay.rs` 里 `#[cfg(not(target_os = "windows"))] mod imp` 那一段）：
+
+```rust
+/// 其它平台（Linux / Wayland 等，macOS 见上面那份）：不建窗口，什么都不做。这份之后不再改。
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+mod imp {
+```
+
+再在 Windows 那份与「其它平台」那份之间插入 macOS 实现：
 
 ```rust
 /// macOS：无边框 `NSPanel` + 三个透明 `NSTextField`，主线程每帧手动泵 AppKit 事件。

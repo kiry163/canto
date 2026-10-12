@@ -233,8 +233,12 @@ impl DesktopLyrics {
         Installed { overlay: Self { state: State::default(), imp }, positions, error }
     }
 
-    /// 每帧调一次；只有变化才会真的推给窗口。
+    /// 每帧调一次：先泵平台那边的事件，再有变化就把新 payload 推给窗口。
+    ///
+    /// 泵必须每帧都跑（payload 没变也要）：macOS 的拖动与重绘全靠它，而拖动过程中 payload
+    /// 恰恰是不变的——只在变化时泵会把拖动冻住。
     pub fn sync(&mut self, frame: Frame<'_>, config: &DesktopLyricsConfig) {
+        self.imp.pump();
         if let Some(payload) = self.state.advance(frame, config) {
             self.imp.push(payload);
         }
@@ -353,6 +357,9 @@ mod imp {
                 unsafe { PostMessageW(self.hwnd as HWND, WM_PAYLOAD, 0, 0) };
             }
         }
+
+        /// Windows 的事件由窗口线程自己跑消息循环，主循环这边不用泵。
+        pub(super) fn pump(&mut self) {}
     }
 
     impl Drop for Imp {
@@ -864,6 +871,9 @@ mod imp {
         }
 
         pub(super) fn push(&mut self, _payload: Payload) {}
+
+        /// 不建窗口，没什么可泵的。
+        pub(super) fn pump(&mut self) {}
     }
 
     /// 平台实现的回报：句柄、位置通道（拖完回传中心点）、失败原因。
