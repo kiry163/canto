@@ -14,6 +14,7 @@ mod instance;
 mod levels;
 mod media;
 mod model;
+mod overlay;
 mod paths;
 mod player;
 mod qq;

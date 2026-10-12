@@ -68,6 +68,11 @@ pub fn history_path() -> PathBuf {
     data_dir().join("history.json")
 }
 
+/// 桌面歌词窗口的位置（中心点）。这是**状态**不是配置，所以不写进 `config.toml`。
+pub fn desktop_lyrics_path() -> PathBuf {
+    data_dir().join("desktop-lyrics.json")
+}
+
 /// 日志文件。
 pub fn log_path() -> PathBuf {
     data_dir().join("canto.log")
