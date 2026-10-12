@@ -268,24 +268,79 @@ mod imp {
     }
 }
 
-/// macOS：真实现见 Task 5（主线程建 manager + 每轮泵 run loop）。
+/// macOS：crate 把事件处理器 `InstallEventHandler` 挂在 **application event target** 上，事件靠
+/// 应用主 run loop 派发。canto 没有 NSApplication，所以主线程每轮自己泵一次 CoreFoundation
+/// 的 run loop（见 `pump`）——没泵就没事件，这是这一份实现的关键。
 #[cfg(target_os = "macos")]
 mod imp {
-    use super::{Binding, Outcome};
+    use std::ffi::c_void;
 
-    pub(super) struct Imp;
+    use global_hotkey::GlobalHotKeyManager;
+
+    use super::{Binding, Outcome, validate};
+
+    pub(super) struct Imp {
+        /// 拿住 manager 就等于拿住那几条注册；`None` = 什么都没注册。
+        manager: Option<GlobalHotKeyManager>,
+    }
 
     impl Imp {
         pub(super) fn none() -> Self {
-            Self
+            Self { manager: None }
         }
 
-        /// macOS 的 Carbon 事件靠主 run loop 派发，真实现里这里会泵一次。
-        pub(super) fn pump(&self) {}
+        /// 泵一次主 run loop：`0.0` 秒 = 处理完手上已有的事件就返回，不阻塞界面。
+        pub(super) fn pump(&self) {
+            // 没注册过就没什么可泵的（`Hotkeys::none()` 走这条路）。
+            if self.manager.is_none() {
+                return;
+            }
+            // SAFETY: `CFRunLoopRunInMode` 与 `kCFRunLoopDefaultMode` 是 CoreFoundation 的稳定
+            // ABI；默认 mode 是常驻的全局变量，`0.0` 秒 + `1`(= true) 不会阻塞。
+            unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.0, 1) };
+        }
     }
 
-    pub(super) fn install(_bindings: &[Binding]) -> (Imp, Outcome) {
-        (Imp, Outcome::default())
+    // edition 2024 起 `extern` 块必须写 `unsafe extern`。
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        /// `CFStringRef kCFRunLoopDefaultMode`（系统导出的是个全局变量，不是函数）。
+        static kCFRunLoopDefaultMode: *const c_void;
+        /// `CFRunLoopRunResult CFRunLoopRunInMode(CFStringRef, CFTimeInterval, Boolean)`。
+        /// ⚠️ `Boolean` 是 `unsigned char`，所以第三个参数用 `u8` 而不是 `bool`。
+        fn CFRunLoopRunInMode(mode: *const c_void, seconds: f64, return_after_source_handled: u8) -> i32;
+    }
+
+    pub(super) fn install(bindings: &[Binding]) -> (Imp, Outcome) {
+        // 必须在主线程建：`InstallEventHandler` 挂在 application event target 上。
+        let manager = match GlobalHotKeyManager::new() {
+            Ok(manager) => manager,
+            Err(error) => {
+                tracing::warn!(%error, "全局热键管理器建不起来");
+                return (Imp::none(), Outcome { fatal: Some("无法初始化热键".to_string()), ..Outcome::default() });
+            }
+        };
+        let mut pairs = Vec::new();
+        let mut failed = Vec::new();
+        for (index, binding) in bindings.iter().enumerate() {
+            let hotkey = match validate(&binding.keys) {
+                Ok(hotkey) => hotkey,
+                Err(why) => {
+                    tracing::warn!(combo = %binding.keys, %why, "全局热键不合法");
+                    failed.push(index);
+                    continue;
+                }
+            };
+            match manager.register(hotkey) {
+                Ok(()) => pairs.push((hotkey.id(), index)),
+                Err(error) => {
+                    tracing::warn!(combo = %binding.keys, %error, "全局热键注册失败");
+                    failed.push(index);
+                }
+            }
+        }
+        let outcome = Outcome { pairs, failed, ..Outcome::default() };
+        (Imp { manager: Some(manager) }, outcome)
     }
 }
 
