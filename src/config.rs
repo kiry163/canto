@@ -30,6 +30,8 @@ pub struct Config {
     pub notice_seconds: u64,
     /// 系统级全局快捷键（`[hotkeys]` 段）；空串 = 那个动作不注册。
     pub hotkeys: HotkeyConfig,
+    /// 桌面歌词（`[desktop_lyrics]` 段；只 Windows 生效）。
+    pub desktop_lyrics: DesktopLyricsConfig,
 }
 
 impl Default for Config {
@@ -43,6 +45,7 @@ impl Default for Config {
             history_limit: 500,
             notice_seconds: 4,
             hotkeys: HotkeyConfig::default(),
+            desktop_lyrics: DesktopLyricsConfig::default(),
         }
     }
 }
@@ -140,6 +143,97 @@ impl HotkeyConfig {
     }
 }
 
+/// 一个 `#RRGGBB` 颜色。认不认由这里管，写坏了怎么报由调用方决定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rgb {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+}
+
+impl Rgb {
+    /// 认 `#RRGGBB` 与 `RRGGBB`，十六进制大小写都行；其余（含长度不对）一律 `None`。
+    pub fn parse(text: &str) -> Option<Self> {
+        let digits = text.strip_prefix('#').unwrap_or(text);
+        if digits.len() != 6 || !digits.chars().all(|character| character.is_ascii_hexdigit()) {
+            return None;
+        }
+        Some(Self {
+            r: u8::from_str_radix(&digits[0..2], 16).ok()?,
+            g: u8::from_str_radix(&digits[2..4], 16).ok()?,
+            b: u8::from_str_radix(&digits[4..6], 16).ok()?,
+        })
+    }
+}
+
+/// `[desktop_lyrics]` 段：桌面歌词（Windows 覆盖层）。
+///
+/// 九个字段全是**偏好**；窗口位置是状态，写在 `desktop-lyrics.json` 里，不在这儿。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesktopLyricsConfig {
+    /// 关掉 = 不建线程、不建窗口（零成本）。
+    pub enabled: bool,
+    /// 字体面；系统里没有这个字体就让 GDI 自己回退。
+    pub font: String,
+    /// 逻辑像素，实际按窗口 DPI 缩放。
+    pub font_size: u32,
+    /// 当前句的颜色。
+    pub color: Rgb,
+    /// 描边颜色。
+    pub outline: Rgb,
+    /// 下一句与译文的颜色。
+    pub next_color: Rgb,
+    /// 整层透明度（0-100）。
+    pub opacity: u8,
+    /// 当前句有译文时是否一起显示。
+    pub show_translation: bool,
+    /// 暂停时是否隐藏（默认留着）。
+    pub hide_when_paused: bool,
+}
+
+impl Default for DesktopLyricsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            font: "Microsoft YaHei UI".to_string(),
+            font_size: 28,
+            color: Rgb { r: 255, g: 255, b: 255 },
+            outline: Rgb { r: 0, g: 0, b: 0 },
+            next_color: Rgb { r: 158, g: 158, b: 158 },
+            opacity: 90,
+            show_translation: true,
+            hide_when_paused: false,
+        }
+    }
+}
+
+/// 解析一个颜色字段：写坏了给一条点名警告并**保持默认值**。
+///
+/// 跟 `[hotkeys]` 的「清成空串」不同——这里没有「禁用」的语义，退回默认比留个空值清楚。
+fn take_color(field: &str, text: Option<String>, slot: &mut Rgb, warnings: &mut Vec<String>) {
+    let Some(text) = text else {
+        return;
+    };
+    match Rgb::parse(&text) {
+        Some(rgb) => *slot = rgb,
+        None => warnings.push(format!("[desktop_lyrics] {field} 不是 #RRGGBB：{text:?}（用默认值）")),
+    }
+}
+
+/// `[desktop_lyrics]` 的原始形状：全 `Option`，三个颜色先当字符串收（人会写错）。
+#[derive(Debug, Default, Deserialize)]
+struct RawDesktopLyrics {
+    enabled: Option<bool>,
+    font: Option<String>,
+    font_size: Option<u32>,
+    color: Option<String>,
+    outline: Option<String>,
+    next_color: Option<String>,
+    opacity: Option<u8>,
+    show_translation: Option<bool>,
+    hide_when_paused: Option<bool>,
+}
+
 /// 文件里能写的字段；全 `Option`——缺字段就用默认值，不要求写全。
 #[derive(Debug, Deserialize)]
 struct Raw {
@@ -152,6 +246,8 @@ struct Raw {
     notice_seconds: Option<u64>,
     /// 全局快捷键；缺这一整段就用默认组合。
     hotkeys: Option<HotkeyConfig>,
+    /// 桌面歌词；缺这一整段就用默认值。
+    desktop_lyrics: Option<RawDesktopLyrics>,
 }
 
 impl Raw {
@@ -196,6 +292,35 @@ impl Raw {
             }
         }
         config.hotkeys = hotkeys;
+        // 桌面歌词：全 `Option` 的原始形状折成配置。颜色写坏了退回默认值 + 一条点名警告。
+        let raw = self.desktop_lyrics.unwrap_or_default();
+        let mut lyrics = DesktopLyricsConfig::default();
+        if let Some(enabled) = raw.enabled {
+            lyrics.enabled = enabled;
+        }
+        if let Some(font) = raw.font.filter(|font| !font.trim().is_empty()) {
+            lyrics.font = font;
+        }
+        if let Some(size) = raw.font_size {
+            // 小到画不出来没意义；上限不管（谁想写 400 就让他写）。
+            lyrics.font_size = size.max(8);
+        }
+        take_color("color", raw.color, &mut lyrics.color, warnings);
+        take_color("outline", raw.outline, &mut lyrics.outline, warnings);
+        take_color("next_color", raw.next_color, &mut lyrics.next_color, warnings);
+        if let Some(opacity) = raw.opacity {
+            if opacity > 100 {
+                warnings.push(format!("[desktop_lyrics] opacity = {opacity} 超出 0-100，用 100"));
+            }
+            lyrics.opacity = opacity.min(100);
+        }
+        if let Some(show) = raw.show_translation {
+            lyrics.show_translation = show;
+        }
+        if let Some(hide) = raw.hide_when_paused {
+            lyrics.hide_when_paused = hide;
+        }
+        config.desktop_lyrics = lyrics;
         config
     }
 }
@@ -322,7 +447,21 @@ fn write_default(path: &Path) -> Result<()> {
          # （win = super = cmd），键名如 space / up / down / left / f5 / a；\n\
          # 别用媒体键名（macOS 上那要走系统授权）。空字符串 = 这个动作不注册。\n\
          [hotkeys]\n\
-         {hotkey_lines}",
+         {hotkey_lines}\
+         #\n\
+         # 桌面歌词（Windows）：播放时在桌面之上浮一条歌词，默认点不着；\n\
+         # 全局热键 lock 解锁后能拖动（位置记在 desktop-lyrics.json）。\n\
+         # enabled = false 就完全不起这个窗口；颜色写 #RRGGBB，opacity 是 0-100。\n\
+         [desktop_lyrics]\n\
+         enabled = true\n\
+         font = \"Microsoft YaHei UI\"\n\
+         font_size = 28\n\
+         color = \"#FFFFFF\"\n\
+         outline = \"#000000\"\n\
+         next_color = \"#9E9E9E\"\n\
+         opacity = 90\n\
+         show_translation = true\n\
+         hide_when_paused = false\n",
         default.quality.token(),
         download_dir,
         lyrics_dir,
@@ -423,6 +562,84 @@ mod tests {
             assert!(text.contains(&format!("{field} = \"{keys}\"")), "模板里缺 {field}：{text}");
         }
         assert!(text.contains("别的程序收不到"), "得说清注册期间组合是被独占的：{text}");
+    }
+
+    #[test]
+    fn the_missing_desktop_lyrics_section_gives_the_documented_defaults() {
+        let (config, warning) = load_from("lyrics-missing", "quality = \"flac\"\n");
+        assert_eq!(config.desktop_lyrics, DesktopLyricsConfig::default());
+        assert!(config.desktop_lyrics.enabled, "默认就开（跟 [hotkeys] 一个口径）");
+        assert_eq!(config.desktop_lyrics.font, "Microsoft YaHei UI");
+        assert_eq!(config.desktop_lyrics.font_size, 28);
+        assert_eq!(config.desktop_lyrics.opacity, 90);
+        assert!(!config.desktop_lyrics.hide_when_paused);
+        assert!(warning.is_none(), "缺段不是错误：{warning:?}");
+    }
+
+    #[test]
+    fn colors_parse_in_both_cases_and_warn_on_garbage() {
+        assert_eq!(Rgb::parse("#FFFFFF"), Some(Rgb { r: 255, g: 255, b: 255 }));
+        assert_eq!(Rgb::parse("ff0000"), Some(Rgb { r: 255, g: 0, b: 0 }));
+        assert_eq!(Rgb::parse("#00ff7F"), Some(Rgb { r: 0, g: 255, b: 127 }));
+        assert_eq!(Rgb::parse("red"), None);
+        assert_eq!(Rgb::parse("#12345"), None);
+        assert_eq!(Rgb::parse(""), None);
+
+        // 写坏了只影响那一个字段：用默认值 + 点名字段的一条警告。
+        let (config, warning) = load_from("lyrics-color", "[desktop_lyrics]\ncolor = \"red\"\n");
+        assert_eq!(config.desktop_lyrics.color, DesktopLyricsConfig::default().color);
+        let warning = warning.expect("应给出警告");
+        assert!(warning.contains("[desktop_lyrics] color"), "{warning}");
+        assert!(warning.contains("red"), "{warning}");
+    }
+
+    #[test]
+    fn opacity_is_clamped_and_warned() {
+        let (config, warning) = load_from("lyrics-opacity", "[desktop_lyrics]\nopacity = 150\n");
+        assert_eq!(config.desktop_lyrics.opacity, 100, "夹到上限");
+        let warning = warning.expect("应给出警告");
+        assert!(warning.contains("[desktop_lyrics] opacity"), "{warning}");
+
+        let (config, warning) = load_from("lyrics-opacity-ok", "[desktop_lyrics]\nopacity = 40\n");
+        assert_eq!(config.desktop_lyrics.opacity, 40);
+        assert!(warning.is_none(), "{warning:?}");
+    }
+
+    /// 只写一项：其余字段还是默认值。
+    #[test]
+    fn a_partial_desktop_lyrics_section_keeps_the_other_defaults() {
+        let (config, warning) =
+            load_from("lyrics-partial", "[desktop_lyrics]\nfont_size = 36\nhide_when_paused = true\n");
+        assert_eq!(config.desktop_lyrics.font_size, 36);
+        assert!(config.desktop_lyrics.hide_when_paused);
+        assert_eq!(config.desktop_lyrics.font, "Microsoft YaHei UI", "没写的还是默认");
+        assert_eq!(config.desktop_lyrics.opacity, 90);
+        assert!(warning.is_none(), "{warning:?}");
+    }
+
+    /// 模板里九个键都写出来（值跟默认值一致），否则「改配置」这件事没有说明书。
+    #[test]
+    fn the_generated_template_documents_desktop_lyrics() {
+        let dir = std::env::temp_dir().join(format!("canto-config-lyrics-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        let path = dir.join("config.toml");
+        write_default(&path).expect("写默认配置");
+        let text = std::fs::read_to_string(&path).expect("读回配置");
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(text.contains("[desktop_lyrics]"), "{text}");
+        let defaults = DesktopLyricsConfig::default();
+        for key in [
+            format!("enabled = {}", defaults.enabled),
+            format!("font = \"{}\"", defaults.font),
+            format!("font_size = {}", defaults.font_size),
+            format!("opacity = {}", defaults.opacity),
+            format!("show_translation = {}", defaults.show_translation),
+            format!("hide_when_paused = {}", defaults.hide_when_paused),
+        ] {
+            assert!(text.contains(&key), "模板里缺 {key}：{text}");
+        }
+        assert!(text.contains("color = \"#FFFFFF\""), "{text}");
     }
 
     #[test]
