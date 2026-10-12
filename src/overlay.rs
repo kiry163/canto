@@ -227,14 +227,15 @@ pub struct DesktopLyrics {
 /// 装出来的东西。
 pub struct Installed {
     pub overlay: DesktopLyrics,
-    /// 拖动结束时窗口线程发过来的新中心点（非 Windows、或关掉功能时是 `None`）。
+    /// 拖动结束时回传的新中心点（Linux / 关掉功能 / 建不起来时是 `None`）。
     pub positions: Option<Receiver<(i32, i32)>>,
     /// `Some` = 起不来（调用方报一句 + 日志），此时 `overlay` 是空句柄。
     pub error: Option<String>,
 }
 
 impl DesktopLyrics {
-    /// 空句柄：关掉功能、非 Windows、`App::new` 与测试都用它；`sync`/`toggle_lock` 是空操作。
+    /// 空句柄：关掉功能、Linux、建不起来、`App::new` 与测试都用它；`sync`/`toggle_lock` 是空操作
+    /// （`sync` 仍会每帧泵一次平台事件，只是没有窗口可泵）。
     pub fn none() -> Self {
         Self { state: State::default(), imp: imp::Imp::none() }
     }
@@ -999,6 +1000,12 @@ mod imp {
 
         /// 一帧 payload → 窗口。内容没变化时 `State::advance` 根本不会调到这里。
         fn push(&mut self, payload: &Payload) {
+            // 锁定态先落定，再管可见性：隐藏分支会提前返回，别让它把「点不着 / 点得着」漏过去
+            // （隐藏窗口本来收不到点击，但不变式写在这儿更清楚）。锁定 = 点不着，解锁 = 收鼠标
+            // ——于是 `setMovableByWindowBackground` 才能让系统把它拖走。传的就是 `locked` 本身；
+            // 这行写反过一次（`!locked`），症状是「锁定态点得着、解锁后拖不动」。
+            self.panel.setIgnoresMouseEvents(payload.locked);
+
             // 隐藏：`orderOut` 而不是销毁（位置与锁定态留着），下次 `orderFrontRegardless` 回来。
             if !payload.visible {
                 for field in [&self.current, &self.translation, &self.next] {
@@ -1060,10 +1067,6 @@ mod imp {
                 (self.screen_height - (frame.origin.y + frame.size.height / 2.0)).round() as i32,
             );
             self.panel.setAlphaValue(f64::from(self.config.opacity) / 100.0);
-            // 锁定 = 点不着（`ignoresMouseEvents`），解锁 = 收鼠标（于是 `setMovableByWindowBackground`
-            // 才能让系统把它拖走）。这里传的就是 `locked` 本身——写反过一次（`!locked`），
-            // 症状是「锁定时点得着、解锁后拖不动」，真机一眼能看出来。
-            self.panel.setIgnoresMouseEvents(payload.locked);
             self.panel.setFrame_display(
                 NSRect::new(
                     NSPoint::new(
