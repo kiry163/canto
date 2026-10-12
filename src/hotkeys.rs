@@ -84,7 +84,7 @@ fn actions_from(map: &HashMap<u32, Action>, events: impl IntoIterator<Item = (u3
         .collect()
 }
 
-/// 平台实现的回报：注册成功的 `(id, 绑定下标)` + 没注册成的绑定下标。
+/// 平台实现的回报：注册成功的 `(id, 绑定下标)` + 没注册成的绑定下标 + 「整件事没办成」的原因。
 ///
 /// 只认下标——平台实现不该关心配置里写了什么；组合原文与动作由 [`fold`] 在这一层取出来。
 /// （顺带保证 `Binding` 的两个字段在任何平台上都是被读的，不留下 dead_code。）
@@ -92,6 +92,8 @@ fn actions_from(map: &HashMap<u32, Action>, events: impl IntoIterator<Item = (u3
 struct Outcome {
     pairs: Vec<(u32, usize)>,
     failed: Vec<usize>,
+    /// 跟具体某条绑定无关的失败（线程 / 窗口起不来），与 `failed` 互斥。
+    fatal: Option<String>,
     unsupported: bool,
 }
 
@@ -99,11 +101,12 @@ struct Outcome {
 fn fold(bindings: &[Binding], outcome: &Outcome) -> (HashMap<u32, Action>, InstallReport) {
     // 下标都是平台实现从 `bindings` 上取的，按位取即可。
     let map = id_map(outcome.pairs.iter().map(|(id, index)| (*id, bindings[*index].action)));
-    let report = InstallReport {
-        registered: outcome.pairs.len(),
-        failures: outcome.failed.iter().map(|index| bindings[*index].keys.clone()).collect(),
-        unsupported: outcome.unsupported,
+    // 整件事没办成时只说那一句；否则逐条报组合原文（好让状态行能点名）。
+    let failures = match &outcome.fatal {
+        Some(reason) => vec![reason.clone()],
+        None => outcome.failed.iter().map(|index| bindings[*index].keys.clone()).collect(),
     };
+    let report = InstallReport { registered: outcome.pairs.len(), failures, unsupported: outcome.unsupported };
     (map, report)
 }
 
@@ -141,24 +144,127 @@ pub fn install(bindings: &[Binding]) -> (Hotkeys, InstallReport) {
     (Hotkeys { imp, map }, report)
 }
 
-/// Windows：真实现见 Task 4（专用线程跑消息循环，crate 自己不起线程）。
+/// Windows：crate 只建隐藏窗口、自己不起线程，而 `WM_HOTKEY` 是**投给建窗口那个线程**的，
+/// 所以这里自备一个专用线程：建窗口 → 逐条注册 → 回报 → 跑消息循环。
 #[cfg(target_os = "windows")]
 mod imp {
-    use super::{Binding, Outcome};
+    use std::sync::mpsc::{Sender, channel};
+    use std::thread::JoinHandle;
 
-    pub(super) struct Imp;
+    use global_hotkey::GlobalHotKeyManager;
+    use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, GetMessageW, MSG, PostThreadMessageW, TranslateMessage, WM_QUIT,
+    };
+
+    use super::{Binding, Outcome, validate};
+
+    /// 线程的回报：`Err` = 线程活着但管理器 / 窗口起不来。
+    struct Started {
+        thread_id: u32,
+        outcome: Outcome,
+    }
+
+    pub(super) struct Imp {
+        /// 消息循环线程的 id（`Drop` 里投 `WM_QUIT` 用）；0 = 没有线程。
+        thread_id: u32,
+        join: Option<JoinHandle<()>>,
+    }
 
     impl Imp {
         pub(super) fn none() -> Self {
-            Self
+            Self { thread_id: 0, join: None }
         }
 
         /// Windows 的消息由专用线程处理，主循环这边不用泵。
         pub(super) fn pump(&self) {}
     }
 
-    pub(super) fn install(_bindings: &[Binding]) -> (Imp, Outcome) {
-        (Imp, Outcome::default())
+    impl Drop for Imp {
+        fn drop(&mut self) {
+            let Some(join) = self.join.take() else {
+                return;
+            };
+            // 线程正卡在 `GetMessageW` 里，只能投消息把它叫醒。
+            unsafe { PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0) };
+            let _ = join.join();
+        }
+    }
+
+    pub(super) fn install(bindings: &[Binding]) -> (Imp, Outcome) {
+        let (tx, rx) = channel::<Result<Started, String>>();
+        let owned: Vec<Binding> = bindings
+            .iter()
+            .map(|binding| Binding { action: binding.action, keys: binding.keys.clone() })
+            .collect();
+        let spawned = std::thread::Builder::new()
+            .name("canto-hotkeys".to_string())
+            .spawn(move || run(owned, tx));
+        let join = match spawned {
+            Ok(join) => join,
+            Err(error) => {
+                tracing::warn!(%error, "全局热键线程没起来");
+                return (Imp::none(), Outcome { fatal: Some("无法启动热键线程".to_string()), ..Outcome::default() });
+            }
+        };
+        match rx.recv() {
+            // 拿到了回报：线程要么正在跑消息循环，要么已经因为失败退出了。
+            Ok(Ok(started)) => (Imp { thread_id: started.thread_id, join: Some(join) }, started.outcome),
+            Ok(Err(reason)) => {
+                let _ = join.join();
+                (Imp::none(), Outcome { fatal: Some(reason), ..Outcome::default() })
+            }
+            // 通道断了：线程在建窗口之前就没了。
+            Err(_) => {
+                let _ = join.join();
+                (Imp::none(), Outcome { fatal: Some("热键线程提前退出".to_string()), ..Outcome::default() })
+            }
+        }
+    }
+
+    /// 专用线程：建窗口（crate 在**调用线程**上建）→ 逐条注册 → 回报 → 跑消息循环。
+    fn run(bindings: Vec<Binding>, tx: Sender<Result<Started, String>>) {
+        let thread_id = unsafe { GetCurrentThreadId() };
+        let manager = match GlobalHotKeyManager::new() {
+            Ok(manager) => manager,
+            Err(error) => {
+                tracing::warn!(%error, "全局热键管理器建不起来");
+                let _ = tx.send(Err("无法初始化热键".to_string()));
+                return;
+            }
+        };
+        let mut pairs = Vec::new();
+        let mut failed = Vec::new();
+        for (index, binding) in bindings.iter().enumerate() {
+            let hotkey = match validate(&binding.keys) {
+                Ok(hotkey) => hotkey,
+                Err(why) => {
+                    tracing::warn!(combo = %binding.keys, %why, "全局热键不合法");
+                    failed.push(index);
+                    continue;
+                }
+            };
+            match manager.register(hotkey) {
+                Ok(()) => pairs.push((hotkey.id(), index)),
+                Err(error) => {
+                    tracing::warn!(combo = %binding.keys, %error, "全局热键注册失败");
+                    failed.push(index);
+                }
+            }
+        }
+        // 窗口一建出来这个线程就有消息队列了，所以 `Drop` 里投的 `WM_QUIT` 一定有人收。
+        let outcome = Outcome { pairs, failed, ..Outcome::default() };
+        let _ = tx.send(Ok(Started { thread_id, outcome }));
+
+        // `WM_HOTKEY` 是**投递**（不是发送）给这个线程的，得自己取出来派发。
+        let mut message = MSG::default();
+        while unsafe { GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) } > 0 {
+            unsafe {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        }
+        // 出循环 = 收到 `WM_QUIT`：`manager` 在这里 drop，隐藏窗口与所有注册一起归还。
     }
 }
 
@@ -296,7 +402,7 @@ mod tests {
             Binding { action: Action::Next, keys: "ctrl+shift+right".to_string() },
             Binding { action: Action::VolumeUp, keys: "ctrl+shift+up".to_string() },
         ];
-        let outcome = Outcome { pairs: vec![(11, 0), (12, 2)], failed: vec![1], unsupported: false };
+        let outcome = Outcome { pairs: vec![(11, 0), (12, 2)], failed: vec![1], fatal: None, unsupported: false };
 
         let (map, report) = fold(&bindings, &outcome);
 
@@ -306,6 +412,23 @@ mod tests {
         assert_eq!(report.registered, 2);
         assert_eq!(report.failures, ["ctrl+shift+right"], "失败要带组合原文");
         assert!(!report.unsupported);
+    }
+
+    /// 整件事没办成（窗口 / 线程起不来）时只说那一句，不要逐条报「5 条全失败」。
+    #[test]
+    fn a_fatal_install_failure_is_reported_once() {
+        let bindings = [
+            Binding { action: Action::PlayPause, keys: "ctrl+shift+space".to_string() },
+            Binding { action: Action::Next, keys: "ctrl+shift+right".to_string() },
+        ];
+        let outcome = Outcome { fatal: Some("无法初始化热键".to_string()), ..Outcome::default() };
+
+        let (map, report) = fold(&bindings, &outcome);
+
+        assert!(map.is_empty());
+        assert_eq!(report.registered, 0);
+        assert_eq!(report.failures, ["无法初始化热键"]);
+        assert_eq!(report.notice(), Some("热键注册失败:无法初始化热键".to_string()));
     }
 
     #[test]
