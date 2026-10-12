@@ -62,61 +62,86 @@ impl State {
 
     /// 算「理想 payload」，跟上次推出去的比：不同才返回（相同就什么都不做）。
     fn advance(&mut self, frame: Frame<'_>, config: &DesktopLyricsConfig) -> Option<Payload> {
-        // 取流中沿用上一次的样子，别闪。
+        // 取流中沿用上一次的样子，别闪——但锁定态变了要**立刻**推：按了解锁却半天摸不到
+        // 窗口，是最容易被当成「功能坏了」的一种。
         if matches!(frame.snapshot.phase, Phase::Buffering) {
-            return None;
+            let locked = self.locked;
+            let last = self.last.as_ref()?;
+            if last.locked == locked {
+                return None;
+            }
+            let mut payload = last.clone();
+            payload.locked = locked;
+            self.last = Some(payload.clone());
+            return Some(payload);
         }
 
-        let (mut current, mut next, mut translation) = lines(frame, config);
+        let (current, next, translation) = lines(frame, config);
         let has_something = !current.is_empty() || !next.is_empty() || translation.is_some();
 
         let playing = match frame.snapshot.phase {
             Phase::Playing => true,
             Phase::Paused => !config.hide_when_paused,
-            // `Idle` / `Failed`（`Buffering` 在上面已经返回）
+            // `Idle` / `Failed`（`Buffering` 在上面已经处理）
             _ => false,
         };
         let mut visible = playing && has_something;
-        if !visible {
-            // 隐藏时不带文案：免得下次显示时先闪一下旧句。
-            current.clear();
-            next.clear();
-            translation = None;
-        }
+        // 隐藏时不带文案：免得下次显示时先闪一下旧句。
+        let (current, next, translation) = if visible {
+            (current, next, translation)
+        } else {
+            ("", "", None)
+        };
 
-        // 解锁时强制可见：否则解锁了却找不到窗口，没法拖。
+        // 解锁时强制可见：否则解锁了却找不到窗口，没法拖；一点内容都没有就给句提示语。
+        let hint = !self.locked && current.is_empty() && next.is_empty() && translation.is_none();
         if !self.locked {
             visible = true;
-            if current.is_empty() && next.is_empty() && translation.is_none() {
-                current = UNLOCKED_HINT.to_string();
-            }
         }
 
-        let payload = Payload { visible, current, next, translation, locked: self.locked };
-        if self.last.as_ref() == Some(&payload) {
+        // 比的是**借来的**文本：没变化的那一帧一次分配都不做（每 150ms 都会走到这里）。
+        let unchanged = self.last.as_ref().is_some_and(|last| {
+            last.visible == visible
+                && last.locked == self.locked
+                && last.current == current
+                && last.next == next
+                && last.translation.as_deref() == translation
+        });
+        if unchanged {
             return None;
         }
+        let payload = Payload {
+            visible,
+            current: if hint { UNLOCKED_HINT.to_string() } else { current.to_string() },
+            next: next.to_string(),
+            translation: translation.map(str::to_string),
+            locked: self.locked,
+        };
         self.last = Some(payload.clone());
         Some(payload)
     }
 }
 
 /// 当前句、下一句（过界就是空串）、当前句的译文（配置关掉就是 `None`）。
-fn lines(frame: Frame<'_>, config: &DesktopLyricsConfig) -> (String, String, Option<String>) {
+///
+/// 借的是歌词本身、不造 `String`：调用方只在自己真的要变了的时候才克隆，
+/// 这样「内容没变的那一帧」连一次分配都没有。
+fn lines<'a>(frame: Frame<'a>, config: &DesktopLyricsConfig) -> (&'a str, &'a str, Option<&'a str>) {
     let Some(lyric) = frame.lyric else {
-        return (String::new(), String::new(), None);
+        return ("", "", None);
     };
     let index = lyric.line_at(frame.snapshot.position);
     let line = index.and_then(|index| lyric.lines.get(index));
-    let current = line.map(|line| line.text.clone()).unwrap_or_default();
+    let current = line.map(|line| line.text.as_str()).unwrap_or_default();
     let next = index
         .and_then(|index| lyric.lines.get(index + 1))
-        .map(|line| line.text.clone())
+        .map(|line| line.text.as_str())
         .unwrap_or_default();
-    let translation = config
-        .show_translation
-        .then(|| line.and_then(|line| line.translation.clone()))
-        .flatten();
+    let translation = if config.show_translation {
+        line.and_then(|line| line.translation.as_deref())
+    } else {
+        None
+    };
     (current, next, translation)
 }
 
@@ -252,9 +277,9 @@ mod imp {
     use windows_sys::Win32::Graphics::Gdi::{
         AC_SRC_ALPHA, AC_SRC_OVER, ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO, BITMAPINFOHEADER,
         BLENDFUNCTION, CLIP_DEFAULT_PRECIS, CreateCompatibleDC, CreateDIBSection, CreateFontW,
-        DEFAULT_CHARSET, DEFAULT_PITCH, DeleteDC, DeleteObject, FF_DONTCARE, FW_NORMAL,
-        GetTextExtentPoint32W, HDC, HFONT, HGDIOBJ, OUT_DEFAULT_PRECIS, SelectObject, SetBkColor,
-        SetBkMode, SetTextColor, TextOutW,
+        DEFAULT_CHARSET, DEFAULT_PITCH, DeleteDC, DeleteObject, FF_DONTCARE, FW_NORMAL, GdiFlush,
+        GetTextExtentPoint32W, HBITMAP, HDC, HFONT, HGDIOBJ, OUT_DEFAULT_PRECIS, SelectObject,
+        SetBkColor, SetBkMode, SetTextColor, TextOutW,
     };
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
@@ -595,7 +620,11 @@ mod imp {
             SWP_NOACTIVATE,
         );
 
-        let mut canvas = Canvas::new(width, height);
+        let Some(mut canvas) = Canvas::new(width, height) else {
+            // 建不出画布（GDI 对象用光了之类）：这一帧不画总比崩掉好。
+            tracing::warn!("建歌词画布失败（GDI 对象不够？）");
+            return;
+        };
         let mut y = padding;
         for (index, (font, text, color)) in rows.iter().enumerate() {
             let text_wide: Vec<u16> = text.encode_utf16().collect();
@@ -681,17 +710,26 @@ mod imp {
     ];
 
     /// 一块 32 位自上而下的 DIB（预乘 BGRA）+ 一块画蒙版用的同类 DIB。
+    ///
+    /// 两块位图**必须**留着句柄：DIB 的内存归位图句柄所有，`DeleteDC` 不会还它
+    /// （MSDN 的 `CreateDIBSection` 明说要用 `DeleteObject` 释放）。每帧泄漏两块的话，
+    /// 几千帧之后就会把进程的 GDI 配额用光，那时 `CreateDIBSection` 返回空指针。
     struct Canvas {
         width: i32,
         height: i32,
         dc: HDC,
+        /// `SelectObject` 进 DC 的那块原始占位位图：`Drop` 得先换回它才能删我们的。
+        dc_placeholder: HGDIOBJ,
+        bitmap: HBITMAP,
         bits: *mut u8,
         mask_dc: HDC,
+        mask_placeholder: HGDIOBJ,
+        mask: HBITMAP,
         mask_bits: *mut u8,
     }
 
     impl Canvas {
-        unsafe fn new(width: i32, height: i32) -> Self {
+        unsafe fn new(width: i32, height: i32) -> Option<Self> {
             let info = BITMAPINFO {
                 bmiHeader: BITMAPINFOHEADER {
                     biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
@@ -711,12 +749,31 @@ mod imp {
             let mask_dc = CreateCompatibleDC(std::ptr::null_mut());
             let bitmap = CreateDIBSection(dc, &info, 0, &mut bits, std::ptr::null_mut(), 0);
             let mask = CreateDIBSection(mask_dc, &info, 0, &mut mask_bits, std::ptr::null_mut(), 0);
-            SelectObject(dc, bitmap as HGDIOBJ);
-            SelectObject(mask_dc, mask as HGDIOBJ);
+            // 建不出来（GDI 配额用光之类）就整块放弃，绝不拿空指针往下写。
+            if bitmap.is_null() || mask.is_null() {
+                DeleteObject(bitmap as HGDIOBJ);
+                DeleteObject(mask as HGDIOBJ);
+                DeleteDC(dc);
+                DeleteDC(mask_dc);
+                return None;
+            }
+            let dc_placeholder = SelectObject(dc, bitmap as HGDIOBJ);
+            let mask_placeholder = SelectObject(mask_dc, mask as HGDIOBJ);
             let bytes = (width * height * 4) as usize;
             std::ptr::write_bytes(bits as *mut u8, 0, bytes);
             std::ptr::write_bytes(mask_bits as *mut u8, 0, bytes);
-            Self { width, height, dc, bits: bits as *mut u8, mask_dc, mask_bits: mask_bits as *mut u8 }
+            Some(Self {
+                width,
+                height,
+                dc,
+                dc_placeholder,
+                bitmap,
+                bits: bits as *mut u8,
+                mask_dc,
+                mask_placeholder,
+                mask,
+                mask_bits: mask_bits as *mut u8,
+            })
         }
 
         /// 把一行字以某个颜色画上去：先用「白字黑底」画进蒙版（GDI 只写 RGB），
@@ -730,6 +787,9 @@ mod imp {
             SetBkColor(self.mask_dc, 0);
             SetTextColor(self.mask_dc, 0x00FF_FFFF);
             TextOutW(self.mask_dc, x, y, text.as_ptr(), text.len() as i32);
+            // GDI 会批处理绘制调用；要读那块 DIB 的内存，得先让它落地（`CreateDIBSection`
+            // 的文档就是这么要求的）。不刷的话 `composite` 可能读到全零/上一帧的覆盖率。
+            GdiFlush();
             composite(self.mask_bits, self.bits, pixels, color);
         }
 
@@ -758,6 +818,11 @@ mod imp {
     impl Drop for Canvas {
         fn drop(&mut self) {
             unsafe {
+                // 顺序要紧：还选在 DC 里的位图 `DeleteObject` 会被拒（这就是每帧泄漏的根）。
+                SelectObject(self.dc, self.dc_placeholder);
+                SelectObject(self.mask_dc, self.mask_placeholder);
+                DeleteObject(self.bitmap as HGDIOBJ);
+                DeleteObject(self.mask as HGDIOBJ);
                 DeleteDC(self.dc);
                 DeleteDC(self.mask_dc);
             }
@@ -1018,5 +1083,33 @@ mod tests {
         std::fs::write(&path, "{ 不是 JSON").expect("写坏文件");
         assert_eq!(load_center(&path), None, "坏文件当没有");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 取流中（`Buffering`）锁定态变了要**立刻**推：否则按了解锁，窗口要等取流完才有反应
+    /// ——用户只会以为「功能坏了」。
+    #[test]
+    fn a_lock_flip_during_buffering_is_pushed_right_away() {
+        let lines = lyric(&[("第一句", None)]);
+        let config = DesktopLyricsConfig::default();
+        let mut state = State::default();
+
+        // 先推一帧正常的，让窗口里有东西。
+        let playing = snapshot_at(Phase::Playing, 5);
+        let frame = Frame { lyric: Some(&lines), snapshot: &playing };
+        assert!(state.advance(frame, &config).expect("该推").visible);
+
+        // 取流中：内容沿用上一次，不推。
+        let buffering = snapshot_at(Phase::Buffering, 5);
+        let frame = Frame { lyric: Some(&lines), snapshot: &buffering };
+        assert!(state.advance(frame, &config).is_none(), "取流中别闪");
+
+        // 但锁定态变了就得推，而且推出去的就是新锁定态。
+        state.toggle_lock();
+        let payload = state.advance(frame, &config).expect("解锁要立刻推，不然摸不到窗口");
+        assert!(!payload.locked, "推出去的该是新锁定态");
+        assert!(payload.visible, "解锁态强制可见");
+
+        // 再算一次：没有新变化，不该重复推。
+        assert!(state.advance(frame, &config).is_none(), "没变化别重复推");
     }
 }

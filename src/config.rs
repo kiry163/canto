@@ -225,16 +225,18 @@ fn take_color(field: &str, text: Option<String>, slot: &mut Rgb, warnings: &mut 
     }
 }
 
-/// `[desktop_lyrics]` 的原始形状：全 `Option`，三个颜色先当字符串收（人会写错）。
+/// `[desktop_lyrics]` 的原始形状：全 `Option`，三个颜色先当字符串收（人会写错），
+/// 两个数值用 `i64` 收——写成 `-5` 或 `900` 时得由我们**夹住**，不能让 serde 的
+/// `u8`/`u32` 范围检查失败：那会把整份配置文件一起丢掉（用户只是多写了个数）。
 #[derive(Debug, Default, Deserialize)]
 struct RawDesktopLyrics {
     enabled: Option<bool>,
     font: Option<String>,
-    font_size: Option<u32>,
+    font_size: Option<i64>,
     color: Option<String>,
     outline: Option<String>,
     next_color: Option<String>,
-    opacity: Option<u8>,
+    opacity: Option<i64>,
     show_translation: Option<bool>,
     hide_when_paused: Option<bool>,
 }
@@ -307,17 +309,21 @@ impl Raw {
             lyrics.font = font;
         }
         if let Some(size) = raw.font_size {
-            // 小到画不出来没意义；上限不管（谁想写 400 就让他写）。
-            lyrics.font_size = size.max(8);
+            // 小到画不出来没意义；上限不管（谁想写 400 就让他写），但**不能**让超大值
+            // 溢出成小数：`i64 → u32` 用 clamp 收口。
+            if size < 8 {
+                warnings.push(format!("[desktop_lyrics] font_size = {size} 太小，用 8"));
+            }
+            lyrics.font_size = size.clamp(8, u32::MAX as i64) as u32;
         }
         take_color("color", raw.color, &mut lyrics.color, warnings);
         take_color("outline", raw.outline, &mut lyrics.outline, warnings);
         take_color("next_color", raw.next_color, &mut lyrics.next_color, warnings);
         if let Some(opacity) = raw.opacity {
-            if opacity > 100 {
-                warnings.push(format!("[desktop_lyrics] opacity = {opacity} 超出 0-100，用 100"));
+            if !(0..=100).contains(&opacity) {
+                warnings.push(format!("[desktop_lyrics] opacity = {opacity} 超出 0-100，已夹住"));
             }
-            lyrics.opacity = opacity.min(100);
+            lyrics.opacity = opacity.clamp(0, 100) as u8;
         }
         if let Some(show) = raw.show_translation {
             lyrics.show_translation = show;
@@ -608,6 +614,39 @@ mod tests {
         let (config, warning) = load_from("lyrics-opacity-ok", "[desktop_lyrics]\nopacity = 40\n");
         assert_eq!(config.desktop_lyrics.opacity, 40);
         assert!(warning.is_none(), "{warning:?}");
+    }
+
+    /// `opacity` 写成 900（有人以为它是 0-255）或负数，不该把**整份配置**带走：
+    /// 夹回 0-100 + 一条点名警告，别的字段（尤其 `[hotkeys]`）一字不动。
+    #[test]
+    fn an_out_of_range_opacity_does_not_discard_the_whole_config() {
+        let (config, warning) = load_from(
+            "lyrics-opacity-huge",
+            "quality = \"320\"\n[hotkeys]\nnext = \"ctrl+alt+n\"\n[desktop_lyrics]\nopacity = 900\n",
+        );
+        assert_eq!(config.desktop_lyrics.opacity, 100, "夹到上限");
+        assert_eq!(config.hotkeys.next, "ctrl+alt+n", "别的字段不该被带走");
+        let warning = warning.expect("应给出警告");
+        assert!(warning.contains("[desktop_lyrics] opacity"), "{warning}");
+
+        let (config, warning) =
+            load_from("lyrics-opacity-negative", "[desktop_lyrics]\nopacity = -1\n");
+        assert_eq!(config.desktop_lyrics.opacity, 0, "下限是 0");
+        let warning = warning.expect("应给出警告");
+        assert!(warning.contains("[desktop_lyrics] opacity"), "{warning}");
+    }
+
+    /// 负的 `font_size` 同理：夹到下限，别把整份配置扔掉。
+    #[test]
+    fn an_out_of_range_font_size_does_not_discard_the_whole_config() {
+        let (config, warning) = load_from(
+            "lyrics-size-negative",
+            "[hotkeys]\nprev = \"ctrl+alt+p\"\n[desktop_lyrics]\nfont_size = -5\n",
+        );
+        assert_eq!(config.desktop_lyrics.font_size, 8, "下限是 8");
+        assert_eq!(config.hotkeys.prev, "ctrl+alt+p", "别的字段不该被带走");
+        let warning = warning.expect("应给出警告");
+        assert!(warning.contains("[desktop_lyrics] font_size"), "{warning}");
     }
 
     /// 只写一项：其余字段还是默认值。

@@ -80,8 +80,12 @@ payload」，跟**上一次推出去的**比较，不同才返回 `Some`。表�
 | 有歌词、但当前句是空文本（纯音乐段） | `visible = true`，`current = ""`（只显示下一句） |
 | `phase` 是 `Idle` / `Failed` | `visible = false` |
 | `phase` 是 `Paused` 且 `hide_when_paused` | `visible = false` |
-| `phase` 是 `Buffering` | 不推（沿用上一次的样子，取流时别闪一下） |
+| `phase` 是 `Buffering` | 内容不推（沿用上一次的样子，取流时别闪一下）；但**锁定态变了要推**——按了解锁却摸不到窗口，会被当成功能坏了 |
 | 解锁态（`locked == false`） | **强制 `visible = true`**，没歌词时 `current` 显示提示语（否则解锁了却找不到窗口，就没法拖） |
+
+> 表里「当前句是空文本」这一格**没法由真实数据造出来**：`Lyric::parse` 会把空文本的行丢掉
+> （见 `src/model.rs`），所以纯音乐段实际看到的是「上一句一直挂着」。状态机仍然把这一格当契约
+> 实现（`an_empty_line_shows_only_the_next_one`），换个歌词来源就用得上。
 
 ## 2. 窗口与渲染（Windows）
 
@@ -199,13 +203,15 @@ participant W as 覆盖层线程(Windows)
 Loop->>St: sync(Frame)
 St-->>Loop: Some(Payload) 只在变化时
 Loop->>W: payload 写进 Arc<Mutex> + PostMessageW(WM_APP)
-W->>W: 量宽 → SetWindowPos → 画 DIB → UpdateLayeredWindow
-W-->>Loop: 拖完 WM_EXITSIZEMOVE 中心点 → Sender
+W->>W: 量宽 → 按窗口实际矩形取中心点 → SetWindowPos → 画 DIB → UpdateLayeredWindow
+W-->>Loop: 中心点变了（拖动之后）→ Sender
 Loop->>Loop: 落盘 desktop-lyrics.json
 ```
 
-- `Drop for DesktopLyrics`：投 `WM_QUIT` → 线程销毁窗口 → `join`（与热键线程同一套收尾）。
-- 退出顺序：`App` 析构时覆盖层先于引擎消失，不会出现「窗口还在、歌词服务已死」。
+- `Drop for Imp`：`PostMessageW(WM_CLOSE)` → wndproc 里 `DestroyWindow` → `WM_DESTROY` 里
+  `PostQuitMessage` → 出消息循环后收尾 → `join`（与热键线程同一套）。
+- 退出顺序：`App` 里 `engine` 声明在 `overlay` 之前，所以是**引擎先析构**。这不影响什么
+  ——窗口线程压根不碰引擎（只读那把 `Mutex<Payload>`），谁先走都留不下「歌词服务已死」。
 - 窗口线程不读任何共享状态，除了那把 `Mutex<Payload>`（锁区间只有一次 clone）。
 
 ## 7. 退化与错误处理
@@ -213,7 +219,7 @@ Loop->>Loop: 落盘 desktop-lyrics.json
 | 情形 | 行为 |
 |---|---|
 | 建线程 / 建窗口失败 | 一条通知（`歌词窗口起不来`）+ 日志（原因），播放与界面照常 |
-| `enabled = false` | 不建线程、不建窗口；`sync()` 是个空操作 |
+| `enabled = false` | 不建线程、不建窗口；`App::tick` 连 `sync` 都不调（「关掉就零成本」） |
 | 非 Windows | 同上（配置段整体忽略，`cfg` 那半是空实现） |
 | 没有歌词 / 未播放 | `SW_HIDE`（不销毁，位置与锁定态留着） |
 | 状态文件坏了 / 没有 | 默认位置（主屏底部居中），不报错、不阻塞启动 |
