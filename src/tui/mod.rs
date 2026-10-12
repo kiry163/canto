@@ -79,14 +79,9 @@ pub fn run(
     );
     app.overlay = installed.overlay;
     app.lyrics_positions = installed.positions;
-    match installed.error {
-        Some(error) => {
-            tracing::warn!(%error, "桌面歌词起不来");
-            app.notify("歌词窗口起不来");
-        }
-        // 功能关着时 `install` 就直接返回空句柄（常态，不吵人）；真装上才记一条。
-        None if app.config.desktop_lyrics.enabled => tracing::info!("桌面歌词窗口已就绪"),
-        None => {}
+    if let Some(error) = installed.error {
+        tracing::warn!(%error, "桌面歌词起不来");
+        app.notify("歌词窗口起不来");
     }
     app.load_initial();
 

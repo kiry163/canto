@@ -1764,11 +1764,14 @@ impl App {
             self.dispatch_hotkey(action);
         }
         // 桌面歌词：只在变化时推；拖出来的位置顺手落盘。
-        let snapshot = self.engine.snapshot();
-        self.overlay.sync(
-            overlay::Frame { lyric: self.lyric.as_ref(), snapshot: &snapshot },
-            &self.config.desktop_lyrics,
-        );
+        // 关掉功能时整段不进（`sync` 会现造 payload，哪怕句柄是空的）——「关掉就零成本」。
+        if self.config.desktop_lyrics.enabled {
+            let snapshot = self.engine.snapshot();
+            self.overlay.sync(
+                overlay::Frame { lyric: self.lyric.as_ref(), snapshot: &snapshot },
+                &self.config.desktop_lyrics,
+            );
+        }
         if let Some(positions) = &self.lyrics_positions {
             let path = crate::paths::desktop_lyrics_path();
             while let Ok(center) = positions.try_recv() {

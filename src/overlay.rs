@@ -438,6 +438,9 @@ mod imp {
 
             // 字体按窗口 DPI 定一次（配置在进程里不再变）。
             let dpi = GetDpiForWindow(hwnd).max(96);
+            // 安装记录在这儿打，不放在 `tui::run`：只有真的建了窗口的平台才该说这句
+            // （非 Windows 那份是空实现，在那边说「就绪」是假话）。
+            tracing::info!(dpi, "桌面歌词窗口已就绪");
             let face = wide(&shared.config.font);
             let big_size = (shared.config.font_size * dpi / 96).max(8) as i32;
             let small_size = ((shared.config.font_size * 3 / 5) * dpi / 96).max(8) as i32;
