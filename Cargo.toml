@@ -31,6 +31,16 @@ url = "2.5.8"
 libc = "0.2.190"
 
 [target.'cfg(windows)'.dependencies]
-# `Win32_UI_WindowsAndMessaging` + `Win32_System_Threading` 是全局热键要的：
-# crate 只建隐藏窗口，`WM_HOTKEY` 得自己取出来派发（见 `hotkeys::imp`）。
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Time", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }
+# 全局热键要 `Win32_UI_WindowsAndMessaging` + `Win32_System_Threading`；
+# 桌面歌词的覆盖层再加上 GDI（DIB 与画字）、HiDpi（按窗口 DPI 缩放字号）、
+# LibraryLoader（`GetModuleHandleW` 拿 hinstance），而 `UpdateLayeredWindow`
+# 本身也挂在 `Win32_Graphics_Gdi` 这个 feature 下。
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_System_Time",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+] }
