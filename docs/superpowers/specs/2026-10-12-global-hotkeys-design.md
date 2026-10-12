@@ -47,9 +47,11 @@ OS 无法做到「只在后台生效」，所以不做这种开关。
   `keyboard-types`、`once_cell`、`thiserror`（都很小）。
 - **Windows**：它用 `windows-sys 0.59`，我们现有 `0.61.2` → 树里会出现**两个版本**。功能无碍，
   代价是多编译一份绑定（windows-sys 是生成的 FFI 声明）。
-- **macOS**：crate 自带 `objc2` + `objc2-app-kit`（只为媒体键那条路径链进来，我们不用媒体键）；
-  我们自己还要加一个 `core-foundation` 用来泵 run loop（§5）。
-- **Linux**：crate 的 `x11rb`/`xkeysym` 是 target-gated，不会编进我们的产物。
+- **macOS**：crate 自带 `objc2` + `objc2-app-kit`（只为媒体键那条路径链进来，我们不用媒体键）。
+  泵 run loop **不加依赖**：`CFRunLoopRunInMode` + `kCFRunLoopDefaultMode` 是系统框架里的稳定
+  符号，自己写十几行 FFI 声明即可（`#[link(name = "CoreFoundation", kind = "framework")]`）。
+- **Linux**：crate 会编 `x11rb` / `xkeysym`（都在 `cfg(any(linux, dragonfly, …))` 下），两个都是
+  **纯 Rust**，不需要系统库，所以 Linux 的 CI 照常绿（我们在这条路径上不注册，只出「暂不支持」）。
 
 ## 2. 模块与接口
 

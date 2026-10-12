@@ -67,6 +67,39 @@ README 只讲「怎么用」，这里讲「怎么做、为什么这么做、实�
 
 实测：80×24 的终端里画出的字符块**逐格反转回来与源 PNG 的模块网格完全一致**（37×37 全对）。
 
+## 全局快捷键（实测，2026-10-12）
+
+canto 常停在某个 pane 里、甚至被别的窗口盖住，所以「切歌 / 调音量」不该要求先切回终端。五个动作
+（播放暂停、上下一首、音量 ±5）注册成**系统级**热键，跟界面上的 `Space` / `n` / `b` / `+` / `-`
+走**同一条派发路径**（`App::apply`）——两套输入、一套语义。
+
+平台差异是这个功能的全部难点，因为 crate（`global-hotkey`）只负责「注册」：
+
+| | Windows | macOS |
+|---|---|---|
+| 事件怎么来 | `RegisterHotKey(hwnd, …)` 把 `WM_HOTKEY` **投递给建窗口那个线程** | `InstallEventHandler(GetApplicationEventTarget(), …)`，事件由**应用主 run loop** 派发 |
+| crate 做了什么 | 建一个隐藏窗口 + 自己的 WndProc；注册时带 `MOD_NOREPEAT`（所以按住不连发） | 注册 Carbon 热键 + 装事件处理器 |
+| 我们得做什么 | 自备专用线程：建窗口 → 逐条注册 → `GetMessageW` / `DispatchMessageW` 循环；`Drop` 时 `PostThreadMessageW(WM_QUIT)` 再 `join` | 主线程建 manager（`tui::run` 本来就在主线程），UI 循环每轮 `CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.0, true)` 泵一次——**不泵就没事件**，延迟上限就是 tick（150ms） |
+| 其它平台 | Linux / Wayland 不注册；启动时说一句「此平台暂不支持全局热键」，其余功能照常 | |
+
+几个刻意的地方：
+
+- **事件出来是 `keys::Action`**，不是另一套动作枚举：不会出现「界面能暂停、热键走另一条逻辑」的
+  漂移。音量步长也跟界面一致（±5，`player.rs` 里夹在 0–100）。
+- **只在主界面派发**（`App::dispatch_hotkey`）：登录屏没有播放可控，按了就当没按。热键也不走
+  `apply_login`——cookie、二维码跟播放控制不是一码事。
+- **必须有修饰键**：crate 允许裸键（`space`），但那等于让 canto 抢走全局空格。配置阶段就拒掉：
+  清成 `""` + 一条点名字段的警告。于是全程只有一条不变式：**非空 = 合法 = 会被注册**。
+- **逐条报失败**：一条组合被别的程序占了，不该拖累其余四条。状态行右侧说一句（一条时点名、多条
+  时报个数），原因（`HotKey already registered: …`）进 `canto.log`。
+- **`install` 在 `tui::run` 里、不在 `App::new` 里**：`test_app()` 会走 `App::new`，真注册系统热键
+  既污染开发机、又会抢走使用者的按键。
+- **不碰媒体键**：crate 在 macOS 上给媒体键走 CGEventTap，那要辅助功能授权；我们只注册普通组合键，
+  所以不弹授权框。
+- **macOS 那条「每轮泵 run loop」在本机（Windows 开发机）验不了**：它是这份实现里唯一靠文档 + 源码
+  推理的部分（开发机没有 macOS SDK，连 `cargo check --target` 都过不去）。真机验收清单在实施计划
+  里；若泵不出 Carbon 事件，退路是 macOS 不注册、启动时给一句提示，README 的已知限制同步写清。
+
 ## 已知限制（细节）
 
 - **频谱没有声卡也能验一半，另一半只能真跑**：测试用的哑引擎（`Engine::silent`）的 mixer
@@ -201,6 +234,7 @@ src/
   paths.rs     所有落盘路径（会话 / 配置 / 历史 / 日志 / 二维码 PNG）
   config.rs    config.toml：载入、默认生成、坏文件回退、`~` 展开
   history.rs   播放历史：落盘、上限截断、连续去重、相对时间文案
+  hotkeys.rs   全局快捷键：组合 → 系统级注册 → `keys::Action`（Windows/macOS/其它 三份 cfg 实现）
   session.rs   登录态：域名感知 cookie jar、完整性校验、落盘、失效判定
   model.rs     Song / Playlist / Quality / Lyric
   media.rs     HTTP 流 → Read + Seek（Range 重连、服务端不理 Range 时自己跳过、魔数嗅探）
@@ -228,13 +262,14 @@ src/
 
 ## 跨平台与发布
 
-三平台同源，平台差异只有三处，都收在 `cfg` 里：
+三平台同源，平台差异只有四处，都收在 `cfg` 里：
 
 | 事情 | Unix | Windows |
 |---|---|---|
 | 单例锁 | 标准库 `File::try_lock`（落到 `flock`） | 同一个调用（落到 `LockFileEx`） |
 | 本地时间（历史文案） | `libc::localtime_r` | `FileTimeToSystemTime` + `SystemTimeToTzSpecificLocalTime`（`windows-sys`） |
 | 音频后端 | CoreAudio / ALSA | WASAPI（cpal 自己挑，代码里没有分支） |
+| 全局快捷键 | macOS：主线程 + 每轮泵 CoreFoundation run loop（Linux：不注册） | 专用线程跑消息循环（`windows-sys`，见「全局快捷键」） |
 
 - 年内第几天（判断「昨天」）不用系统的 `tm_yday` / `wDayOfYear`：Windows 的 `SYSTEMTIME` 里根本没
   这个字段，统一从年月日自己算（闰年规则也一起测了）。
