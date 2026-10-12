@@ -69,9 +69,9 @@ README 只讲「怎么用」，这里讲「怎么做、为什么这么做、实�
 
 ## 全局快捷键（实测，2026-10-12）
 
-canto 常停在某个 pane 里、甚至被别的窗口盖住，所以「切歌 / 调音量」不该要求先切回终端。五个动作
-（播放暂停、上下一首、音量 ±5）注册成**系统级**热键，跟界面上的 `Space` / `n` / `b` / `+` / `-`
-走**同一条派发路径**（`App::apply`）——两套输入、一套语义。
+canto 常停在某个 pane 里、甚至被别的窗口盖住，所以「切歌 / 调音量」不该要求先切回终端。六个动作
+（播放暂停、上下一首、音量 ±5、切桌面歌词的锁定/解锁）注册成**系统级**热键，跟界面上的 `Space` /
+`n` / `b` / `+` / `-` 走**同一条派发路径**（`App::apply`）——两套输入、一套语义。
 
 平台差异是这个功能的全部难点，因为 crate（`global-hotkey`）只负责「注册」：
 
@@ -90,16 +90,42 @@ canto 常停在某个 pane 里、甚至被别的窗口盖住，所以「切歌 /
   `apply_login`——cookie、二维码跟播放控制不是一码事。
 - **必须有修饰键**：crate 允许裸键（`space`），但那等于让 canto 抢走全局空格。配置阶段就拒掉：
   清成 `""` + 一条点名字段的警告。于是全程只有一条不变式：**非空 = 合法 = 会被注册**。
-- **逐条报失败**：一条组合被别的程序占了，不该拖累其余四条。状态行右侧说一句（一条时点名、多条
+- **逐条报失败**：一条组合被别的程序占了，不该拖累其余五条。状态行右侧说一句（一条时点名、多条
   时报个数），原因（`HotKey already registered: …`）进 `canto.log`。
 - **`install` 在 `tui::run` 里、不在 `App::new` 里**：`test_app()` 会走 `App::new`，真注册系统热键
   既污染开发机、又会抢走使用者的按键。
-- **默认不碰媒体键**：五个动作的默认组合都是普通组合键，所以正常情况下不弹授权框。但配置里
+- **默认不碰媒体键**：六个动作的默认组合都是普通组合键，所以正常情况下不弹授权框。但配置里
   如果自己写媒体键名（`mediaplaypause` 之类），macOS 上 crate 会走 CGEventTap、可能弹一次
   辅助功能授权——所以模板里写明了别那么写（Windows 上媒体键就是普通注册，没这个问题）。
 - **macOS 那条「每轮泵 run loop」在本机（Windows 开发机）验不了**：它是这份实现里唯一靠文档 + 源码
   推理的部分（开发机没有 macOS SDK，连 `cargo check --target` 都过不去）。真机验收清单在实施计划
   里；若泵不出 Carbon 事件，退路是 macOS 不注册、启动时给一句提示，README 的已知限制同步写清。
+
+## 桌面歌词（Windows，实测 2026-10-12）
+
+播放时在桌面最上层浮一条「当前句 + 翻译 + 下一句」，不占终端、不抢焦点。它分成两半：**状态机**
+（`overlay.rs` 平台无关的那部分 + `App::tick` 每帧递一帧进去）决定「要不要重画、画什么」，
+**窗口线程**（`#[cfg(windows)] mod imp`）只管把 payload 画出来。分开的理由：状态机是纯逻辑，
+能单测（12 条）；窗口那一半在这台机器上只能靠探针 + 真机看。
+
+| | 做法 | 为什么 |
+|---|---|---|
+| 怎么浮在桌面之上 | 分层窗口（`WS_EX_LAYERED + WS_EX_TOPMOST + WS_EX_TOOLWINDOW + WS_EX_NOACTIVATE`）+ `UpdateLayeredWindow` 喂一块 32 位 DIB | 不要任务栏按钮、不抢焦点；分层窗口自带逐像素 alpha，字边缘能真的半透明 |
+| 为什么不用 `SetLayeredWindowAttributes` + key 色 | 灰度抗锯齿的字边缘是**半透明**像素，取色透明只能整像素透过或不透 | 边缘会混出一圈 key 色的锯齿；逐像素 alpha 才让「描边 + 抗锯齿」都干净 |
+| GDI 不写 alpha 怎么办 | 先用「白字黑底 + `ANTIALIASED_QUALITY`」把 GDI 的输出画进**第二块 DIB 当覆盖率蒙版**，再在 Rust 里按 over 合成到预乘 BGRA（`composite`） | 32 位 DIB 里 GDI 只写 RGB、alpha 保持我们清零的样子；直接画完 `UpdateLayeredWindow` 会得到一个**全透明窗口**（第一版探针就这么写废的） |
+| 为什么要描边 | 8 个方向各画一遍正文（描边色），再画正文（本身颜色） | 桌面什么背景都有，纯色字总有一段看不清 |
+| 鼠标怎么办 | 锁定 = `WS_EX_TRANSPARENT` + `WM_NCHITTEST` 回 `HTTRANSPARENT`；解锁 = 去掉前者、回 `HTCAPTION` | 锁定态「点不着但看得见」；解锁态让系统自己拖，`WM_EXITSIZEMOVE` 收尾 |
+| 位置存哪 | **中心点**存 `desktop-lyrics.json`（独立状态文件） | 窗口宽度随文字长度变，存左上角会一行长一行短地左右抖；`config.toml` 是手写的，程序不改写它（跟 `history.json` 一个口径） |
+| 锁定态 | **不持久化**，每次启动都是锁定的 | 省得下次开机「怎么点不到」；忘了锁回来才是真正的坑 |
+| 空闲成本 | `App::tick` 每 150ms 递一帧，内容没变就**一个字节都不推**（`State::advance` 比 payload） | 逐帧零绘制、零分配；只有换行 / 换播放态 / 切锁定才叫醒窗口线程 |
+| 尺寸与位置 | 每次重画按文本量尺寸 → 按中心点摆 → 按当前 DPI 缩放字号 | 一句话长一句话短也不会左右抖；换显示器（DPI 变）字号跟着变 |
+
+线程模型跟全局快捷键那边是同一套：专用线程建窗口 + `GetMessageW` 消息循环；`Drop` 时
+`PostMessageW(WM_CLOSE)` → `DestroyWindow` → `WM_DESTROY` → `PostQuitMessage` 再 `join`。
+注册类 / 建窗口 / 起线程任一失败都降级成空句柄：状态行说一句、原因写进 `canto.log`，播放与界面照常。
+
+真机验收跑在实施计划的清单里（「点不着」「拖完重启回到原位」「压在全屏 tuios 之上」「enabled = false
+不建窗口」「状态文件写成屏外会被夹回」都在其中）。
 
 ## 已知限制（细节）
 
@@ -241,6 +267,7 @@ src/
   media.rs     HTTP 流 → Read + Seek（Range 重连、服务端不理 Range 时自己跳过、魔数嗅探）
   player.rs    候选档位 → rodio 解码 → 默认音频设备（后台线程 + 状态快照）
   download.rs  下载歌曲与同名歌词（复用 media 的流）
+  overlay.rs   桌面歌词（Windows）：平台无关状态机 + 位置状态文件 + `cfg` 分开的窗口线程
   qr.rs        二维码 PNG → 模块网格 → 终端字符块（1 模块 1 字符格，可按 1/2/4 倍放大）；落盘与系统查看器兜底
   http.rs      HTTP 客户端（UA / 超时 / 挂会话 jar / 不跟随跳转的变体）
   qq/          接口层
@@ -271,6 +298,7 @@ src/
 | 本地时间（历史文案） | `libc::localtime_r` | `FileTimeToSystemTime` + `SystemTimeToTzSpecificLocalTime`（`windows-sys`） |
 | 音频后端 | CoreAudio / ALSA | WASAPI（cpal 自己挑，代码里没有分支） |
 | 全局快捷键 | macOS：主线程 + 每轮泵 CoreFoundation run loop（Linux：不注册） | 专用线程跑消息循环（`windows-sys`，见「全局快捷键」） |
+| 桌面歌词 | 非 Windows：不建窗口（`overlay.rs` 里那份实现是空操作，`[desktop_lyrics]` 整段不生效） | 分层窗口 + 专用线程（`UpdateLayeredWindow` + 32 位 DIB，见「桌面歌词」） |
 
 - 年内第几天（判断「昨天」）不用系统的 `tm_yday` / `wDayOfYear`：Windows 的 `SYSTEMTIME` 里根本没
   这个字段，统一从年月日自己算（闰年规则也一起测了）。

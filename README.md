@@ -21,7 +21,8 @@
 | 播放缓存（听过的歌留在 `~/.cache/canto`，重听 0 网络；列表里有「已缓存」标记） | ✅ |
 | 歌单写入：加进歌单 / 从歌单移除（「我喜欢」只读，见「已知限制」） | ✅ |
 | 配置文件 `config.toml`（音质下限 / 下载目录 / 历史上限 / 通知存活秒数 / 全局快捷键） | ✅ |
-| 全局快捷键：canto 在后台时也能播放 / 暂停、上下一首、音量 ±5（Windows / macOS，可配可禁） | ✅ |
+| 全局快捷键：canto 在后台时也能播放 / 暂停、上下一首、音量 ±5、切桌面歌词锁定（Windows / macOS，可配可禁） | ✅ |
+| 桌面歌词（Windows，默认开）：当前句 + 翻译 + 下一句浮在桌面之上，默认鼠标穿透、热键解锁后可拖 | ✅ |
 | 单例运行（同一份数据目录只允许一个实例） | ✅ |
 
 ## 平台
@@ -120,6 +121,9 @@ canto 在跑**：第二个实例直接退出并报出持有者的 pid（锁在 `
   队列里没版权的歌（实测常见）会自动跳过，连着 3 首都不可播就停下报错。**队列内容与各屏选中
   位置退出即丢**（不落盘）。
 
+全局热键（`[hotkeys]`）里还有第 6 条 `lock = "ctrl+shift+l"`：切桌面歌词窗口的锁定 / 解锁
+（桌面上那个窗口见「功能」，锁定态默认就是**点不着**的那一种）。
+
 ## 配置
 
 `~/.config/canto/config.toml`（首次运行自动生成）：
@@ -158,6 +162,21 @@ next = "ctrl+shift+right"
 prev = "ctrl+shift+left"
 volume_up = "ctrl+shift+up"
 volume_down = "ctrl+shift+down"
+lock = "ctrl+shift+l"
+
+# 桌面歌词（Windows）：播放时在桌面之上浮一条歌词，默认点不着；
+# 全局热键 lock 解锁后能拖动（位置记在 desktop-lyrics.json）。
+# enabled = false 就完全不起这个窗口；颜色写 #RRGGBB，opacity 是 0-100。
+[desktop_lyrics]
+enabled = true
+font = "Microsoft YaHei UI"
+font_size = 28
+color = "#FFFFFF"
+outline = "#000000"
+next_color = "#9E9E9E"
+opacity = 90
+show_translation = true
+hide_when_paused = false
 ```
 
 字段缺了就用默认值（老配置文件不用动就能继续用）；**整个文件写坏了也能启动**（用默认值，并在
@@ -167,12 +186,13 @@ volume_down = "ctrl+shift+down"
 
 ```
 ~/.config/canto/          # 数据目录（XDG 习惯，三平台同一套路径）
-  session.json    # cookie jar（= 账号凭据：别提交、别分享）
-  config.toml     # 音质 / 下载目录 / 歌词目录 / 缓存上限 / 历史上限
-  history.json    # 播放历史（最近 N 条）
-  canto.log       # 日志（--log 控制级别）
-  canto.lock      # 单例锁（内容只是持有者 pid）
-  login-qr.png    # 二维码落盘的一份（o 用它调查看器，也可以自己用相册扫）
+  session.json         # cookie jar（= 账号凭据：别提交、别分享）
+  config.toml          # 音质 / 下载目录 / 歌词目录 / 缓存上限 / 历史上限
+  history.json         # 播放历史（最近 N 条）
+  canto.log            # 日志（--log 控制级别）
+  canto.lock           # 单例锁（内容只是持有者 pid）
+  login-qr.png         # 二维码落盘的一份（o 用它调查看器，也可以自己用相册扫）
+  desktop-lyrics.json  # 桌面歌词窗口位置（可随时删，删了回默认位置）
 
 ~/.cache/canto/           # 播放缓存（可随时丢；跟数据目录分开，备份不用带它）
   <mid>.<档位>.<ext>   # 完整听过的歌，重听直接读它
@@ -207,6 +227,11 @@ volume_down = "ctrl+shift+down"
 - **同一首歌在同一列表里出现两次，两行都会标 `♪`**：标记按 mid 比对，比按标题字符串准，但重复
   出现的同一首无法区分。
 - 「会话已失效」的判定码还没等来一次真实的会话过期去核对。
+- **桌面歌词只有 Windows 有**：其它平台（含 macOS）不建窗口，`[desktop_lyrics]` 整段不生效，
+  界面与播放照常。
+- **桌面歌词只认主屏**：多显示器下不会跟着跑到别的那块屏；换过显示器 / 分辨率导致窗口落在屏外
+  时，下次启动会把它夹回主屏内（留一圈边距），免得「再也找不到」。
+- **桌面歌词压不过全屏独占应用**（游戏之类）：Windows 的既有边界，那个时候歌词会被它盖住。
 
 每一条的来龙去脉（含接口实测记录）在 `docs/design.md`。
 
