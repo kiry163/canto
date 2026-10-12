@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+use crate::hotkeys;
 use crate::model::Quality;
 use crate::paths;
 
@@ -27,6 +28,8 @@ pub struct Config {
     pub history_limit: usize,
     /// 状态行右侧通知的存活秒数；0 = 不自动消失（只被下一条顶掉）。
     pub notice_seconds: u64,
+    /// 系统级全局快捷键（`[hotkeys]` 段）；空串 = 那个动作不注册。
+    pub hotkeys: HotkeyConfig,
 }
 
 impl Default for Config {
@@ -39,6 +42,7 @@ impl Default for Config {
             cache_mb: DEFAULT_CACHE_MB,
             history_limit: 500,
             notice_seconds: 4,
+            hotkeys: HotkeyConfig::default(),
         }
     }
 }
@@ -60,6 +64,82 @@ pub fn default_lyrics_dir() -> PathBuf {
         .join("canto-lyrics")
 }
 
+/// `[hotkeys]` 段：canto 在后台（没聚焦）时也能控制播放。
+///
+/// 空串 = 这个动作不注册；缺字段用默认组合。写法不对的（键名不认 / 没带修饰键）会在
+/// `Raw::resolve` 里被清成空串并给一条警告，所以这里只留一条不变式：
+/// **非空 = 合法 = 会被注册**。
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct HotkeyConfig {
+    /// 播放 / 暂停。
+    pub play_pause: String,
+    /// 下一首。
+    pub next: String,
+    /// 上一首。
+    pub prev: String,
+    /// 音量加。
+    pub volume_up: String,
+    /// 音量减。
+    pub volume_down: String,
+}
+
+impl Default for HotkeyConfig {
+    fn default() -> Self {
+        let mut config = Self {
+            play_pause: String::new(),
+            next: String::new(),
+            prev: String::new(),
+            volume_up: String::new(),
+            volume_down: String::new(),
+        };
+        // 默认组合只在 `hotkeys::DEFAULTS` 里写一遍：配置模板也读它，改一处不会说岔。
+        for (field, keys, _) in hotkeys::DEFAULTS {
+            config.set(field, keys);
+        }
+        config
+    }
+}
+
+impl HotkeyConfig {
+    /// 按字段名取值。只有这一处（和下面的 `set`）需要「字段名 ↔ 成员」的对照——
+    /// 因为它得跟着 `hotkeys::DEFAULTS` 那张表走。
+    fn get(&self, field: &str) -> &str {
+        match field {
+            "play_pause" => &self.play_pause,
+            "next" => &self.next,
+            "prev" => &self.prev,
+            "volume_up" => &self.volume_up,
+            "volume_down" => &self.volume_down,
+            _ => "",
+        }
+    }
+
+    /// 按字段名赋值（`""` 表示禁用）。
+    fn set(&mut self, field: &str, keys: &str) {
+        match field {
+            "play_pause" => self.play_pause = keys.to_string(),
+            "next" => self.next = keys.to_string(),
+            "prev" => self.prev = keys.to_string(),
+            "volume_up" => self.volume_up = keys.to_string(),
+            "volume_down" => self.volume_down = keys.to_string(),
+            _ => {}
+        }
+    }
+
+    /// 要注册的绑定（按 `DEFAULTS` 的顺序）；空串（= 禁用）在这里跳过。
+    pub fn bindings(&self) -> Vec<hotkeys::Binding> {
+        hotkeys::DEFAULTS
+            .iter()
+            .filter(|(field, _, _)| !self.get(field).is_empty())
+            .map(|(field, _, action)| hotkeys::Binding {
+                action: *action,
+                keys: self.get(field).to_string(),
+            })
+            .collect()
+    }
+}
+
 /// 文件里能写的字段；全 `Option`——缺字段就用默认值，不要求写全。
 #[derive(Debug, Deserialize)]
 struct Raw {
@@ -70,6 +150,8 @@ struct Raw {
     cache_mb: Option<u64>,
     history_limit: Option<usize>,
     notice_seconds: Option<u64>,
+    /// 全局快捷键；缺这一整段就用默认组合。
+    hotkeys: Option<HotkeyConfig>,
 }
 
 impl Raw {
@@ -99,6 +181,21 @@ impl Raw {
         if let Some(seconds) = self.notice_seconds {
             config.notice_seconds = seconds;
         }
+        // 全局快捷键：写法不对（键名不认 / 没带修饰键）就清成空串 + 一条点名到字段的警告。
+        // 清掉是为了让后面只认一条不变式：非空 = 合法 = 会被注册。
+        let mut hotkeys = self.hotkeys.unwrap_or_default();
+        for (field, _, _) in hotkeys::DEFAULTS {
+            // 取值先 `to_string()`：紧接着要 `set` 它，不能再借着它。
+            let keys = hotkeys.get(field).to_string();
+            if keys.is_empty() {
+                continue;
+            }
+            if let Err(why) = hotkeys::validate(&keys) {
+                warnings.push(format!("[hotkeys] {field} 不可用:{why}"));
+                hotkeys.set(field, "");
+            }
+        }
+        config.hotkeys = hotkeys;
         config
     }
 }
@@ -196,6 +293,11 @@ fn write_default(path: &Path) -> Result<()> {
     // 路径按平台来：Windows 上是 `C:\Users\...`，必须写成字面串（见 `toml_literal`）。
     let download_dir = toml_literal(&default.download_dir.to_string_lossy());
     let lyrics_dir = toml_literal(&default.lyrics_dir.to_string_lossy());
+    // 全局快捷键：五条默认组合从 `DEFAULTS` 现取现写，不跟注释说岔。
+    let hotkey_lines: String = hotkeys::DEFAULTS
+        .iter()
+        .map(|(field, keys, _)| format!("{field} = \"{keys}\"\n"))
+        .collect();
     let text = format!(
         "# canto 配置。改完重启 canto 生效。\n\
          #\n\
@@ -212,7 +314,14 @@ fn write_default(path: &Path) -> Result<()> {
          # 播放历史最多保留多少条\n\
          history_limit = {}\n\
          # 状态行右侧那条通知存活多少秒（0 = 不自动消失，只被下一条顶掉）\n\
-         notice_seconds = {}\n",
+         notice_seconds = {}\n\
+         #\n\
+         # 全局快捷键：canto 在后台（没聚焦）时也能用这几个键控制播放。\n\
+         # 注意：注册期间这些组合**别的程序收不到**（系统级注册的固有代价）。\n\
+         # 写法：修饰键在前、最后一个是要按的键；修饰键可写 ctrl / alt / shift / win，\n\
+         # 键名如 space / up / down / left / f5 / a。空字符串 = 这个动作不注册。\n\
+         [hotkeys]\n\
+         {hotkey_lines}",
         default.quality.token(),
         download_dir,
         lyrics_dir,
@@ -227,6 +336,7 @@ fn write_default(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::keys;
     use unicode_width::UnicodeWidthStr;
 
     fn load_from(tag: &str, text: &str) -> (Config, Option<String>) {
@@ -237,6 +347,81 @@ mod tests {
         let result = load_file(&path);
         std::fs::remove_dir_all(&dir).ok();
         result
+    }
+
+    #[test]
+    fn the_missing_hotkey_section_gives_the_default_combos() {
+        let (config, warning) = load_from("hotkeys-missing", "quality = \"flac\"\n");
+        assert_eq!(config.hotkeys, HotkeyConfig::default());
+        assert_eq!(config.hotkeys.play_pause, "ctrl+shift+space");
+        assert_eq!(config.hotkeys.volume_down, "ctrl+shift+down");
+        assert_eq!(config.hotkeys.bindings().len(), 5);
+        assert!(warning.is_none(), "缺段不是错误：{warning:?}");
+    }
+
+    /// 写了 `[hotkeys]` 但只写一项：其余四项还得是默认值。
+    #[test]
+    fn a_partial_section_keeps_the_other_defaults() {
+        let (config, warning) = load_from("hotkeys-partial", "[hotkeys]\nnext = \"ctrl+alt+n\"\n");
+        assert_eq!(config.hotkeys.next, "ctrl+alt+n");
+        assert_eq!(config.hotkeys.prev, "ctrl+shift+left", "没写的字段用默认组合");
+        assert_eq!(config.hotkeys.bindings().len(), 5);
+        assert!(warning.is_none(), "{warning:?}");
+    }
+
+    #[test]
+    fn an_empty_string_disables_one_action() {
+        let (config, warning) = load_from("hotkeys-empty", "[hotkeys]\nplay_pause = \"\"\n");
+        assert_eq!(config.hotkeys.play_pause, "");
+        let bindings = config.hotkeys.bindings();
+        assert_eq!(bindings.len(), 4);
+        assert!(!bindings.iter().any(|binding| binding.action == keys::Action::PlayPause));
+        assert!(warning.is_none(), "明确禁用不该警告：{warning:?}");
+    }
+
+    /// 裸键会被系统级抢走：不注册、清成空串、给一条点名到字段的警告。
+    #[test]
+    fn a_bare_key_is_refused_and_cleared() {
+        let (config, warning) = load_from("hotkeys-bare", "[hotkeys]\nplay_pause = \"space\"\n");
+        assert_eq!(config.hotkeys.play_pause, "", "非法值要清掉，别留个不会注册的字符串");
+        assert_eq!(config.hotkeys.bindings().len(), 4, "其余四条照旧");
+        let warning = warning.expect("应给出警告");
+        assert!(warning.contains("[hotkeys] play_pause"), "{warning}");
+        assert!(warning.contains("space"), "{warning}");
+    }
+
+    #[test]
+    fn a_bad_key_name_is_refused_and_cleared() {
+        let (config, warning) = load_from("hotkeys-bad", "[hotkeys]\nvolume_up = \"ctrl+shift+nope\"\n");
+        assert_eq!(config.hotkeys.volume_up, "");
+        assert_eq!(config.hotkeys.next, "ctrl+shift+right", "坏字段不影响别的字段");
+        let warning = warning.expect("应给出警告");
+        assert!(warning.contains("[hotkeys] volume_up"), "{warning}");
+    }
+
+    #[test]
+    fn a_combo_may_be_written_in_any_case() {
+        let (config, warning) = load_from("hotkeys-case", "[hotkeys]\nplay_pause = \"Ctrl+Shift+Space\"\n");
+        assert_eq!(config.hotkeys.play_pause, "Ctrl+Shift+Space", "合法就原样留着");
+        assert!(warning.is_none(), "{warning:?}");
+        assert_eq!(config.hotkeys.bindings()[0].keys, "Ctrl+Shift+Space");
+    }
+
+    /// 模板里五组默认组合都要写出来（值跟 `DEFAULTS` 一致），并提醒会吞键。
+    #[test]
+    fn the_generated_template_documents_the_hotkeys() {
+        let dir = std::env::temp_dir().join(format!("canto-config-hotkeys-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        let path = dir.join("config.toml");
+        write_default(&path).expect("写默认配置");
+        let text = std::fs::read_to_string(&path).expect("读回配置");
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(text.contains("[hotkeys]"), "{text}");
+        for (field, keys, _) in crate::hotkeys::DEFAULTS {
+            assert!(text.contains(&format!("{field} = \"{keys}\"")), "模板里缺 {field}：{text}");
+        }
+        assert!(text.contains("别的程序收不到"), "得说清注册期间组合是被独占的：{text}");
     }
 
     #[test]
