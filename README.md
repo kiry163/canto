@@ -191,7 +191,7 @@ cargo clippy --all-targets
 
 CI（`.github/workflows/ci.yml`）在 `main` 和 PR 上跑 clippy + 三平台测试；测试用的是哑音频引擎
 （`Engine::silent`），CI 机器没有声卡也跑得动。发布走 `.github/workflows/release.yml`：打一个跟
-`Cargo.toml` 版本一致的 tag（例如 `v0.1.0`）就会编四份产物并挂到 GitHub Release 上。
+`Cargo.toml` 版本一致的 tag（例如 `v0.1.1`）就会编三份产物并挂到 GitHub Release 上。
 
 文档：
 - `docs/design.md`：实现与设计说明——播放与缓存、音质档位实测、界面与数据链路的取舍、代码结构
