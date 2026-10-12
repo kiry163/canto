@@ -79,7 +79,7 @@ pub(super) enum Msg {
         keyword: String,
         result: Result<Vec<Song>>,
     },
-    /// 歌单写入（收藏/加歌单/移除）的结果；`refresh` 是要重新拉取的歌单。
+    /// 歌单写入（加歌单 / 移除）的结果；`refresh` 是要重新拉取的歌单。
     Wrote {
         done: String,
         refresh: Option<(String, String)>,
@@ -507,7 +507,7 @@ pub(super) struct WriteRequest {
     /// 成功后要重新拉取的歌单（移除会改右栏）。
     refresh: Option<(String, String)>,
     song: Song,
-    /// 写入接口要的目录号（「我喜欢」= 201）。
+    /// 写入接口要的目录号（QQ 的 `dirid`，个人歌单来自列表接口）。
     dir_id: u64,
     /// 写入接口要的 `tid`。
     tid: u64,
@@ -790,24 +790,7 @@ impl App {
         });
     }
 
-    /// `f`：收藏右栏选中的歌。
-    fn favorite_selected(&mut self) {
-        let Some(song) = self.selected_song() else {
-            return;
-        };
-        let request = WriteRequest {
-            busy: format!("收藏《{}》…", song.title),
-            done: format!("已收藏：{} — {}", song.title, song.singers),
-            refresh: None,
-            song,
-            dir_id: qq::write::FAVORITES_DIR_ID,
-            tid: 0,
-            add: true,
-        };
-        self.write_song(request);
-    }
-
-    /// `a`：挑一个歌单把选中的歌加进去。
+    /// `p`：挑一个歌单把选中的歌加进去。
     fn open_picker(&mut self) {
         let Some(song) = self.selected_song() else {
             return;
@@ -1054,7 +1037,7 @@ impl App {
                 self.nav.playlists_loaded = true;
                 match result {
                     Ok(mut playlists) => {
-                        // 「我喜欢」在菜单里是单独一项（`f` 写它），不在「我的歌单」里重复出现。
+                        // 「我喜欢」在菜单里是单独一项，不在「我的歌单」里重复出现。
                         playlists.retain(|playlist| !playlist.is_favorites);
                         self.status = format!("共 {} 个歌单", playlists.len());
                         self.nav.playlists.set_items(playlists);
@@ -1278,7 +1261,6 @@ impl App {
                 self.nav.set_filter("");
             }
             keys::Action::Download => self.download_selected(),
-            keys::Action::Favorite => self.favorite_selected(),
             keys::Action::AddToPlaylist => self.open_picker(),
             keys::Action::RemoveFromPlaylist => self.remove_selected(),
             keys::Action::ToggleLyric => self.show_lyric = !self.show_lyric,

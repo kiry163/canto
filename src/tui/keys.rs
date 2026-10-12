@@ -52,7 +52,6 @@ pub enum Action {
     LoginRetry,
     AddToPlaylist,
     RemoveFromPlaylist,
-    Favorite,
     Download,
     ToggleLyric,
     /// `Y`：全屏视图（占内容区，播放条与状态行不动）。
@@ -197,7 +196,6 @@ fn common(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('u') => Some(Action::QueueOverlay),
         KeyCode::Char('D') => Some(Action::HistoryClear),
         KeyCode::Char('x') => Some(Action::RemoveFromPlaylist),
-        KeyCode::Char('f') => Some(Action::Favorite),
         KeyCode::Char('d') => Some(Action::Download),
         KeyCode::Char('y') => Some(Action::ToggleLyric),
         // 大写 `Y` = 全屏视图（`y` 是底部那一块歌词的开关，两者独立）。
@@ -261,7 +259,6 @@ mod tests {
         // 列表看不见，就不给「对选中那首动手」的键留门。
         for code in [
             KeyCode::Enter,
-            KeyCode::Char('f'),
             KeyCode::Char('d'),
             KeyCode::Char('p'),
             KeyCode::Char('x'),

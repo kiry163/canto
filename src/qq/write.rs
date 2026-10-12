@@ -1,18 +1,22 @@
-//! 歌单写入：收藏/取消收藏、往歌单加歌删歌。
+//! 歌单写入：往**个人歌单**加歌 / 删歌。
 //!
 //! 走 `musicu.fcg` 的 `music.musicasset.PlaylistDetailWrite`（`AddSonglist` /
 //! `DelSonglist`）。**不要**用老的 `fcg_music_add2songdir.fcg`：实测它对任何会话
 //! 都回 `403 no permit`（粘贴 cookie 与扫码会话都一样），而这条新链路一次就通。
 //!
-//! 参数里 `songId` 必须是**数字 id**（不是 mid）；「我喜欢」是 `dirId=201`
-//! （`tid` 给 0 就行）。实测服务端 code：`80092` 歌单不存在/无权，`40000` 方法不存在。
+//! 参数里 `songId` 必须是**数字 id**（不是 mid）。实测服务端 code：`80092` 歌单
+//! 不存在/无权、`40000` 方法不存在。
+//!
+//! 「我喜欢」（`dirId=201`）只读：界面里没有写它的入口——服务端对它的
+//! `DelSonglist` 恒回 `80105`，而 `AddSonglist` 就算回了 0 也看不到（写完之后
+//! 那屏从不重拉）。只剩读接口用 [`FAVORITES_DIR_ID`] 拼 `dirid`。
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use crate::model::Song;
 
-/// 「我喜欢」对应的目录号（QQ 把它当成一个特殊歌单）。
+/// 「我喜欢」对应的目录号（QQ 把它当成一个特殊歌单）。只有读接口用它拼 `dirid`。
 pub const FAVORITES_DIR_ID: u64 = 201;
 
 /// 往歌单加歌；返回写进去的条数。

@@ -57,7 +57,7 @@ fn help_lines(menu: Menu) -> Vec<Line<'static>> {
         Line::from("切屏  1 我的收藏 · 2 我的歌单 · 3 搜索 · 4 历史"),
         Line::from("全局  / 筛选当前列表 · Y 全屏：歌词 + 频谱 · ? 帮助 · q 退出"),
         Line::from("播放  Space 暂停 · n/b 切歌 · ←/→ 10 秒 · +/- 音量"),
-        Line::from("歌曲  Enter 播放 · f 收藏 · d 下载 · p 加进歌单 · x 从歌单移除"),
+        Line::from("歌曲  Enter 播放 · d 下载 · p 加进歌单 · x 从歌单移除"),
     ];
     lines.push(match menu {
         Menu::Favorites => Line::from("收藏  Enter 播放选中 · j/k 选曲目 · / 筛选"),

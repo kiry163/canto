@@ -188,7 +188,7 @@ impl App {
 pub fn hints(context: keys::Context) -> &'static str {
     match context {
         keys::Context::Content => {
-            "Enter 播放 · Space 暂停 · n/b 切歌 · / 筛选 · f 收藏 · p 加歌单 · ? 帮助"
+            "Enter 播放 · Space 暂停 · n/b 切歌 · / 筛选 · p 加歌单 · ? 帮助"
         }
         keys::Context::NowPlaying => {
             "Y/Esc 退出 · Space 暂停 · n/b 切歌 · ←/→ 10 秒 · +/- 音量 · ? 帮助"
