@@ -8,6 +8,7 @@ mod cache;
 mod config;
 mod download;
 mod history;
+mod hotkeys;
 mod http;
 mod instance;
 mod levels;
