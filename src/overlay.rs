@@ -302,8 +302,10 @@ mod imp {
         small: HFONT,
         /// `Some` = 样式已经按这个锁定态设过了。
         transparent: Option<bool>,
-        /// 窗口中心点：装的时候给初值，拖完由 `WM_EXITSIZEMOVE` 更新。
+        /// 窗口中心点：每次 `draw` 都按窗口实际矩形刷新（拖动是系统直接改窗口的）。
         center: (i32, i32),
+        /// 已经回传给主线程落盘过的中心点（免得每帧都写一遍文件）。
+        reported: (i32, i32),
     }
 
     impl Imp {
@@ -444,21 +446,14 @@ mod imp {
                 small: make_font(small_size, face.as_ptr()),
                 transparent: None,
                 center,
+                reported: center,
             };
 
             let mut message: MSG = std::mem::zeroed();
             while GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) > 0 {
                 match message.message {
                     // 画一帧（要在这一线程做，绘制状态是线程本地的）。
-                    WM_PAYLOAD => draw(hwnd, &shared, &mut painter),
-                    // 拖完了：把新的中心点记下来（下次画按它摆），并回传给主线程落盘。
-                    WM_EXITSIZEMOVE => {
-                        let mut rect: RECT = std::mem::zeroed();
-                        GetWindowRect(hwnd, &mut rect);
-                        let center = ((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2);
-                        painter.center = center;
-                        let _ = places.send(center);
-                    }
+                    WM_PAYLOAD => draw(hwnd, &shared, &mut painter, &places),
                     _ => {
                         TranslateMessage(&message);
                         DispatchMessageW(&message);
@@ -488,6 +483,13 @@ mod imp {
                     HTCAPTION as LRESULT
                 }
             }
+            // 拖动结束：`WM_EXITSIZEMOVE` 是**发送**消息，进不了 `GetMessageW` 的队列，
+            // 所以从这儿转投一条重画——`draw` 会把窗口实际矩形采纳成新中心点并回传落盘。
+            // 没有这一手，暂停状态下拖完就没人记得新位置（那时候不会有别的重画）。
+            WM_EXITSIZEMOVE => {
+                unsafe { PostMessageW(hwnd, WM_PAYLOAD, 0, 0) };
+                0
+            }
             WM_CLOSE => unsafe {
                 DestroyWindow(hwnd);
                 0
@@ -501,7 +503,7 @@ mod imp {
     }
 
     /// 画一帧：不可见就藏起来；可见就量尺寸、按中心点摆好、画 DIB、`UpdateLayeredWindow`。
-    unsafe fn draw(hwnd: HWND, shared: &Shared, painter: &mut Painter) {
+    unsafe fn draw(hwnd: HWND, shared: &Shared, painter: &mut Painter, places: &Sender<(i32, i32)>) {
         let payload = shared
             .payload
             .lock()
@@ -564,6 +566,20 @@ mod imp {
         DeleteDC(measure);
         let width = widths.iter().copied().max().unwrap_or(0) + padding * 2;
         let height: i32 = heights.iter().sum::<i32>() + padding * 2;
+
+        // 位置以**窗口自己**为准：解锁态的拖动是系统直接改窗口，缓存里的中心点可能是旧的。
+        // 每个 `draw` 都重新采纳一次，顺带得到两个好处：拖动途中换行不会把窗口拽回旧位置；
+        // 也不用指望 `WM_EXITSIZEMOVE`——那是**发送**消息，进不了 `GetMessageW` 的队列。
+        let mut rect: RECT = std::mem::zeroed();
+        GetWindowRect(hwnd, &mut rect);
+        let actual = ((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2);
+        if actual != painter.center {
+            painter.center = actual;
+            if painter.reported != actual {
+                painter.reported = actual;
+                let _ = places.send(actual);
+            }
+        }
 
         // 按中心点摆好（中心点由拖动更新）。
         SetWindowPos(
