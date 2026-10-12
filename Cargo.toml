@@ -30,6 +30,33 @@ url = "2.5.8"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.190"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# 桌面歌词的覆盖层：一个无边框浮层窗口 + 三个透明 label。三件都**已经在依赖图里**
+# （`global-hotkey` 拉的），这里只是把传递依赖写成直接依赖，不新增下载。
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSString",
+    "NSDictionary",
+    "NSArray",
+    "NSAttributedString",
+    "NSGeometry",
+    "NSValue",
+    "NSDate",
+    "NSRunLoop",
+] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication",
+    "NSWindow",
+    "NSPanel",
+    "NSView",
+    "NSTextField",
+    "NSScreen",
+    "NSColor",
+    "NSFont",
+    "NSAttributedString",
+    "NSEvent",
+] }
+
 [target.'cfg(windows)'.dependencies]
 # 全局热键要 `Win32_UI_WindowsAndMessaging` + `Win32_System_Threading`；
 # 桌面歌词的覆盖层再加上 GDI（DIB 与画字）、HiDpi（按窗口 DPI 缩放字号）、

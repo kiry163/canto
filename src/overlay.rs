@@ -158,7 +158,7 @@ fn clamp_center(center: (i32, i32), screen: (i32, i32)) -> (i32, i32) {
     )
 }
 
-/// 主屏尺寸（宽、高）。
+/// 主屏尺寸（宽、高，逻辑点）。
 #[cfg(target_os = "windows")]
 fn primary_screen() -> (i32, i32) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
@@ -166,9 +166,28 @@ fn primary_screen() -> (i32, i32) {
     unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
 }
 
-#[cfg(not(target_os = "windows"))]
+/// 主屏尺寸：`NSScreen.mainScreen`（带菜单栏那块屏）的 frame，单位是逻辑点。
+///
+/// 拿不到主屏（没有窗口服务器连接、比如 ssh 会话）就用一个确定的数顶着——那时也建不出
+/// 歌词窗口，这个值只影响「默认位置」与「夹回屏内」的计算。
+#[cfg(target_os = "macos")]
 fn primary_screen() -> (i32, i32) {
-    // 空实现那份用不到；给个确定的数，好让测试与编译都稳。
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSScreen;
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        return (1920, 1080);
+    };
+    NSScreen::mainScreen(mtm).map_or((1920, 1080), |screen| {
+        let size = screen.frame().size;
+        (size.width as i32, size.height as i32)
+    })
+}
+
+/// 其它平台（Linux / Wayland 等）：不建窗口，也就没有屏幕尺寸可问——给个确定的数，
+/// 好让默认位置与夹取的计算在测试与编译里都稳。
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn primary_screen() -> (i32, i32) {
     (1920, 1080)
 }
 
@@ -856,8 +875,372 @@ mod imp {
     }
 }
 
-/// 其它平台（含 macOS，等以后单独做）：不建窗口，什么都不做。这份之后不再改。
-#[cfg(not(target_os = "windows"))]
+/// macOS：无边框 `NSPanel` + 三个透明 `NSTextField`，主线程每帧手动泵 AppKit 事件。
+///
+/// 三件事值得记住：
+/// - 窗口必须在**主线程**建（AppKit 的硬要求）：`install` 第一句就是 `MainThreadMarker::new()`，
+///   拿不到就降级报错。`objc2` 的类型系统也替我们守着这条（`sharedApplication`、`alloc` 都要标记）。
+/// - 没有 `NSApplicationMain`，事件得自己拉：`sync` 每帧调 `pump`。CFRunLoop 泵不出 AppKit 的
+///   事件（实测），`NSApp.run()` 会阻塞到退出，塞不进「画帧 + 读键盘」。
+/// - 状态文件存的是**左上原点**的中心点（与 Windows / 旧数据同一口径），进出 AppKit 按主屏高换算。
+#[cfg(target_os = "macos")]
+mod imp {
+    use std::sync::mpsc::Receiver;
+
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2::{AllocAnyThread, MainThreadMarker, MainThreadOnly};
+    use objc2_app_kit::{
+        NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSFont,
+        NSFontAttributeName, NSForegroundColorAttributeName, NSEventMask, NSPanel, NSScreen,
+        NSStrokeColorAttributeName, NSStrokeWidthAttributeName, NSTextField, NSView,
+        NSWindowCollectionBehavior, NSWindowStyleMask,
+    };
+    use objc2_foundation::{
+        NSAttributedString, NSDate, NSDefaultRunLoopMode, NSDictionary, NSNumber, NSPoint, NSRect,
+        NSSize, NSString,
+    };
+
+    use crate::config::Rgb;
+
+    use super::{DesktopLyricsConfig, Payload};
+
+    /// 次要行（译文 / 下一句）与正文的字号比：与 Windows 的 `small_size` 同一比例。
+    const SMALL_RATIO: f64 = 3.0 / 5.0;
+    /// 文字四周的留白（Windows 是 8 逻辑像素 × DPI；macOS 直接用点）。
+    const PAD: f64 = 8.0;
+    /// 描边粗细：**负值 = 填充 + 描边一次画完**（Windows 是八方向各画一遍再合成）。
+    /// 观感常数，真机对着 Windows 调。
+    const OUTLINE_MAIN: f64 = -3.0;
+    const OUTLINE_SMALL: f64 = -2.0;
+    /// 浮层高度：桌面之上的浮动层（`CGWindowList` 里能看到 layer=3）。
+    const LEVEL: isize = 3;
+
+    pub(super) type Started = (Imp, Option<Receiver<(i32, i32)>>, Option<String>);
+
+    pub(super) struct Imp {
+        /// `None` = 没有窗口（关掉功能 / 建不出来 / `App::new` 与测试）。
+        inner: Option<Inner>,
+    }
+
+    struct Inner {
+        panel: Retained<NSPanel>,
+        /// 三行文本控件：当前句 / 译文 / 下一句。
+        current: Retained<NSTextField>,
+        translation: Retained<NSTextField>,
+        next: Retained<NSTextField>,
+        /// 配置在进程里是固定的，建窗口时拿一份（与 Windows 的 `Shared` 同一个理由）。
+        config: DesktopLyricsConfig,
+        /// 主屏高：左上原点 ↔ AppKit 左下原点换算用。
+        screen_height: f64,
+        /// 现在是 `orderOut` 状态吗（避免每帧重复调）。
+        hidden: bool,
+    }
+
+    impl Imp {
+        pub(super) fn none() -> Self {
+            Self { inner: None }
+        }
+
+        /// 把事件队列拉空并派发。每帧都跑，哪怕 payload 没变。
+        pub(super) fn pump(&mut self) {
+            let Some(inner) = &mut self.inner else {
+                return;
+            };
+            inner.pump();
+        }
+
+        pub(super) fn push(&mut self, payload: Payload) {
+            let Some(inner) = &mut self.inner else {
+                return;
+            };
+            inner.push(&payload);
+        }
+    }
+
+    impl Inner {
+        fn pump(&mut self) {
+            let Some(mtm) = MainThreadMarker::new() else {
+                return;
+            };
+            let app = NSApplication::sharedApplication(mtm);
+            loop {
+                // SAFETY: 主线程；`distantPast` = 队列空就立刻返回，不阻塞界面。
+                let event = unsafe {
+                    app.nextEventMatchingMask_untilDate_inMode_dequeue(
+                        NSEventMask::Any,
+                        Some(&NSDate::distantPast()),
+                        NSDefaultRunLoopMode,
+                        true,
+                    )
+                };
+                let Some(event) = event else { break };
+                app.sendEvent(&event);
+            }
+        }
+
+        /// 一帧 payload → 窗口。内容没变化时 `State::advance` 根本不会调到这里。
+        fn push(&mut self, payload: &Payload) {
+            // 隐藏：`orderOut` 而不是销毁（位置与锁定态留着），下次 `orderFrontRegardless` 回来。
+            if !payload.visible {
+                for field in [&self.current, &self.translation, &self.next] {
+                    field.setHidden(true);
+                }
+                if !self.hidden {
+                    self.panel.orderOut(None);
+                    self.hidden = true;
+                }
+                return;
+            }
+
+            let main_size = f64::from(self.config.font_size);
+            let small_size = (main_size * SMALL_RATIO).max(8.0);
+            let (color, next_color, outline) =
+                (self.config.color, self.config.next_color, self.config.outline);
+            set_line(
+                &self.current,
+                &payload.current,
+                main_size,
+                color,
+                outline,
+                &self.config,
+                OUTLINE_MAIN,
+            );
+            set_line(
+                &self.translation,
+                payload.translation.as_deref().unwrap_or(""),
+                small_size,
+                next_color,
+                outline,
+                &self.config,
+                OUTLINE_SMALL,
+            );
+            set_line(
+                &self.next,
+                &payload.next,
+                small_size,
+                next_color,
+                outline,
+                &self.config,
+                OUTLINE_SMALL,
+            );
+
+            // 量尺寸：宽度取最宽一行、高度是各行之和，再加内边距（与 Windows 同一算法）。
+            let rows: Vec<&Retained<NSTextField>> = [&self.current, &self.translation, &self.next]
+                .into_iter()
+                .filter(|field| !field.isHidden())
+                .collect();
+            let width = rows.iter().map(|field| field.frame().size.width).fold(0.0_f64, f64::max)
+                + PAD * 2.0;
+            let height = rows.iter().map(|field| field.frame().size.height).sum::<f64>() + PAD * 2.0;
+
+            // 位置以**窗口自己**为准：解锁态的拖动是系统直接改窗口，缓存里的中心点会是旧的。
+            // 每次重画都重新采纳一次——拖动途中换行不会把窗口拽回旧位置，也不用指望「拖动结束」事件。
+            let frame = self.panel.frame();
+            let center = (
+                (frame.origin.x + frame.size.width / 2.0).round() as i32,
+                (self.screen_height - (frame.origin.y + frame.size.height / 2.0)).round() as i32,
+            );
+            self.panel.setAlphaValue(f64::from(self.config.opacity) / 100.0);
+            self.panel.setIgnoresMouseEvents(!payload.locked);
+            self.panel.setFrame_display(
+                NSRect::new(
+                    NSPoint::new(
+                        f64::from(center.0) - width / 2.0,
+                        self.screen_height - f64::from(center.1) - height / 2.0,
+                    ),
+                    NSSize::new(width, height),
+                ),
+                true,
+            );
+
+            // 每行水平居中，从上往下摆（AppKit 是左下原点：y 从顶边往下减）。
+            let mut y = height - PAD;
+            for field in &rows {
+                let size = field.frame().size;
+                y -= size.height;
+                field.setFrame(NSRect::new(
+                    NSPoint::new(PAD + (width - PAD * 2.0 - size.width) / 2.0, y),
+                    size,
+                ));
+            }
+            // 从 `orderOut` 回来（第一次显示也走这里）；`orderFrontRegardless` 不激活自己。
+            self.panel.orderFrontRegardless();
+            self.hidden = false;
+        }
+    }
+
+    /// 还没有真 payload 时先进去的那一帧：窗口建出来先藏着。
+    fn hidden_payload() -> Payload {
+        Payload {
+            visible: false,
+            current: String::new(),
+            next: String::new(),
+            translation: None,
+            locked: true,
+        }
+    }
+
+    /// `Rgb`（0-255）→ `NSColor`。
+    fn ns_color(color: Rgb) -> Retained<NSColor> {
+        NSColor::colorWithSRGBRed_green_blue_alpha(
+            f64::from(color.r) / 255.0,
+            f64::from(color.g) / 255.0,
+            f64::from(color.b) / 255.0,
+            1.0,
+        )
+    }
+
+    /// 配置里的字体面认不出来（macOS 上默认那串就是 Windows 字体名）就回退系统字体。
+    fn font_for(name: &str, size: f64) -> Retained<NSFont> {
+        NSFont::fontWithName_size(&NSString::from_str(name), size)
+            .unwrap_or_else(|| NSFont::systemFontOfSize(size))
+    }
+
+    /// `Retained<T>` **不是** `repr(transparent)`：`&retained` 不是对象指针（直接当 `AnyObject`
+    /// 用会段错误，探针里踩过），必须 `&*retained` 再转。
+    unsafe fn any<T>(object: &T) -> &AnyObject {
+        unsafe { &*(object as *const T as *const AnyObject) }
+    }
+
+    /// 给一行设文本与样式。空文本 = 这行不画（`setHidden`），也就不参与量尺寸。
+    fn set_line(
+        field: &NSTextField,
+        text: &str,
+        size: f64,
+        color: Rgb,
+        outline: Rgb,
+        config: &DesktopLyricsConfig,
+        stroke_width: f64,
+    ) {
+        field.setHidden(text.is_empty());
+        if text.is_empty() {
+            return;
+        }
+        let font = font_for(&config.font, size);
+        let text_color = ns_color(color);
+        let outline_color = ns_color(outline);
+        let stroke = NSNumber::numberWithDouble(stroke_width);
+        // SAFETY: 属性名是 AppKit 导出的常量，值的类型与属性名要求的一致。
+        let attributes = NSDictionary::from_slices(
+            &[
+                unsafe { NSFontAttributeName },
+                unsafe { NSForegroundColorAttributeName },
+                unsafe { NSStrokeColorAttributeName },
+                unsafe { NSStrokeWidthAttributeName },
+            ],
+            &[
+                unsafe { any(&*font) },
+                unsafe { any(&*text_color) },
+                unsafe { any(&*outline_color) },
+                unsafe { any(&*stroke) },
+            ],
+        );
+        // SAFETY: 属性键都是 AppKit 的常量，字典是我们刚建的。
+        let attributed = unsafe {
+            NSAttributedString::initWithString_attributes(
+                NSAttributedString::alloc(),
+                &NSString::from_str(text),
+                Some(&attributes),
+            )
+        };
+        field.setAttributedStringValue(&attributed);
+        field.sizeToFit();
+    }
+
+    /// 建那个浮层窗口：无边框、透明、不抢焦点、不进 Dock、各 space 都在场。
+    fn make_panel(mtm: MainThreadMarker) -> Retained<NSPanel> {
+        // 先给个 1×1 的框；位置与尺寸随后由 `push` 按文本摆。
+        let panel = NSPanel::initWithContentRect_styleMask_backing_defer(
+            NSPanel::alloc(mtm),
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1.0, 1.0)),
+            NSWindowStyleMask::Borderless | NSWindowStyleMask::NonactivatingPanel,
+            NSBackingStoreType::Buffered,
+            false,
+        );
+        panel.setTitle(&NSString::from_str("canto lyrics"));
+        panel.setLevel(LEVEL);
+        panel.setCollectionBehavior(
+            NSWindowCollectionBehavior::CanJoinAllSpaces
+                | NSWindowCollectionBehavior::Stationary
+                | NSWindowCollectionBehavior::FullScreenAuxiliary,
+        );
+        panel.setOpaque(false);
+        panel.setBackgroundColor(Some(&NSColor::clearColor()));
+        panel.setHasShadow(false);
+        // 启动一律锁定：点不着（锁定态刻意不持久化）。
+        panel.setIgnoresMouseEvents(true);
+        // 解锁后拖动交给系统自己拖（见 Task 3）。
+        panel.setMovableByWindowBackground(true);
+        panel
+    }
+
+    /// 一行文本控件：透明、只读、不可选。
+    fn make_label(mtm: MainThreadMarker) -> Retained<NSTextField> {
+        let field = NSTextField::labelWithString(&NSString::from_str(""), mtm);
+        field.setBezeled(false);
+        field.setDrawsBackground(false);
+        field.setEditable(false);
+        field.setSelectable(false);
+        field.setHidden(true);
+        field
+    }
+
+    pub(super) fn install(config: &DesktopLyricsConfig, center: (i32, i32)) -> Started {
+        let Some(mtm) = MainThreadMarker::new() else {
+            tracing::warn!("桌面歌词要在主线程建窗口");
+            return (Imp::none(), None, Some("歌词窗口起不来".to_string()));
+        };
+        // 附属进程：不进 Dock、不抢别人的焦点（返回 `false` = 这次调用没生效）。
+        let app = NSApplication::sharedApplication(mtm);
+        if !app.setActivationPolicy(NSApplicationActivationPolicy::Accessory) {
+            tracing::warn!("设置 Accessory 激活策略失败");
+            return (Imp::none(), None, Some("歌词窗口起不来".to_string()));
+        }
+        let screen_height = NSScreen::mainScreen(mtm).map_or(0.0, |screen| screen.frame().size.height);
+
+        let panel = make_panel(mtm);
+        let (current, translation, next) = (make_label(mtm), make_label(mtm), make_label(mtm));
+        // 内容视图装三行 label。
+        let view = NSView::initWithFrame(
+            NSView::alloc(mtm),
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1.0, 1.0)),
+        );
+        view.addSubview(&current);
+        view.addSubview(&translation);
+        view.addSubview(&next);
+        panel.setContentView(Some(&view));
+
+        let mut inner = Inner {
+            panel,
+            current,
+            translation,
+            next,
+            config: config.clone(),
+            screen_height,
+            hidden: false,
+        };
+        // 先把窗口摆到记下来的中心点（`push` 之后会按窗口自己的矩形重算，这里只是给个起点）。
+        inner.panel.setFrame_display(
+            NSRect::new(
+                NSPoint::new(
+                    f64::from(center.0) - 50.0,
+                    screen_height - f64::from(center.1) - 20.0,
+                ),
+                NSSize::new(100.0, 40.0),
+            ),
+            false,
+        );
+        // 第一帧就是「隐藏」：窗口建出来是空的，等第一次真 payload。
+        inner.push(&hidden_payload());
+        // 安装记录在这儿打（只有真建了窗口的平台才该说这句）。
+        tracing::info!(font = %config.font, size = config.font_size, "桌面歌词窗口已就绪");
+        (Imp { inner: Some(inner) }, None, None)
+    }
+}
+
+/// 其它平台（Linux / Wayland 等，macOS 见上面那份）：不建窗口，什么都不做。这份之后不再改。
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 mod imp {
     use std::sync::mpsc::Receiver;
 
