@@ -489,11 +489,28 @@ impl Nav {
 
 /// 后台下载的进度（界面每帧读一次）。
 pub(super) struct Transfer {
-    label: String,
+    /// 正在下的那首歌的曲名（进度文案用；歌手不进通知位）。
+    title: String,
     received: Arc<AtomicU64>,
     total: Arc<AtomicU64>,
     /// 完成后写上结果文案。
     outcome: Option<String>,
+}
+
+/// 下载（含从缓存复制）成功后给状态行的一句话。
+///
+/// **不带路径**，也不带体积 / 档位 / 歌词落点：通知位只有 32 列，那些细节进日志
+/// （列表里能看到档位与体积，文件在磁盘上）。抽成纯函数是为了能直接钉住这条约定。
+fn saved_notice(title: &str, saved: &download::Saved) -> String {
+    if saved.existed {
+        return format!("已存在：{title}");
+    }
+    let what = if saved.from_cache {
+        "已从缓存复制"
+    } else {
+        "已下载"
+    };
+    format!("{what}：{title}")
 }
 
 /// 状态行右侧的**一条**通知。
@@ -501,6 +518,9 @@ pub(super) struct Transfer {
 /// 只有一把槽：新消息直接顶掉旧的，`config.notice_seconds` 秒后自己消失（0 = 不消失）。
 /// `soft` 标记的是**在飞操作的进度**——它每 tick 重写自己，但不许抢占刚发生的一次性消息
 /// （否则下载进度一刷新，刚才那句「已插队…」就没人看得见了）。
+///
+/// 文案约定（见 `docs/design.md`）：一句话说清做了什么、**不带路径**、**不带错误链**，
+/// 也不重复列表与标题里已有的东西（歌手、档位、体积、条数）。
 #[derive(Debug)]
 pub(super) struct Notice {
     pub(super) text: String,
@@ -763,7 +783,7 @@ impl App {
         let received = Arc::new(AtomicU64::new(0));
         let total = Arc::new(AtomicU64::new(0));
         let transfer = Arc::new(Mutex::new(Transfer {
-            label: format!("{} — {}", song.title, song.singers),
+            title: song.title.clone(),
             received: received.clone(),
             total: total.clone(),
             outcome: None,
@@ -792,26 +812,35 @@ impl App {
                         lyric.as_ref(),
                         &mut on_progress,
                     ) {
-                        Ok(saved) if saved.existed => {
-                            format!("已存在：{}", saved.path.display())
-                        }
-                        Ok(saved) => format!(
-                            "已{}：{}（{:.1} MB，{}{}）",
-                            if saved.from_cache { "从缓存复制" } else { "下载" },
-                            saved.path.display(),
-                            saved.bytes as f64 / 1_048_576.0,
-                            saved.quality.label(),
-                            // 歌词落在别的目录里，说清楚落在哪，省得去翻。
-                            if saved.lyrics.is_empty() {
-                                String::new()
-                            } else {
-                                format!("，歌词在 {}", lyrics_dir.display())
+                        Ok(saved) => {
+                            // 细节（落到哪、多大、歌词在哪）进日志，状态行只说做了什么。
+                            tracing::info!(
+                                "{}《{}》→ {}（{:.1} MB，{}）",
+                                if saved.from_cache { "从缓存复制" } else { "下载" },
+                                song.title,
+                                saved.path.display(),
+                                saved.bytes as f64 / 1_048_576.0,
+                                saved.quality.label(),
+                            );
+                            if !saved.lyrics.is_empty() {
+                                tracing::info!(
+                                    "歌词 {} 个在 {}",
+                                    saved.lyrics.len(),
+                                    lyrics_dir.display()
+                                );
                             }
-                        ),
-                        Err(error) => format!("下载失败：{error:#}"),
+                            saved_notice(&song.title, &saved)
+                        }
+                        Err(error) => {
+                            tracing::warn!("下载《{}》失败：{error:#}", song.title);
+                            format!("下载失败：{}", song.title)
+                        }
                     }
                 }
-                Err(error) => format!("下载失败：{error:#}"),
+                Err(error) => {
+                    tracing::warn!("下载《{}》失败：{error:#}", song.title);
+                    format!("下载失败：{}", song.title)
+                }
             };
             if let Ok(mut transfer) = transfer.lock() {
                 transfer.outcome = Some(outcome);
@@ -881,10 +910,7 @@ impl App {
         };
         let request = WriteRequest {
             busy: format!("加进《{}》…", playlist.name),
-            done: format!(
-                "已把《{} — {}》加进《{}》",
-                song.title, song.singers, playlist.name
-            ),
+            done: format!("已把《{}》加进《{}》", song.title, playlist.name),
             refresh: None,
             song,
             dir_id: playlist.dir_id,
@@ -913,8 +939,8 @@ impl App {
             return;
         };
         let request = WriteRequest {
-            busy: format!("从《{name}》移除《{}》…", song.title),
-            done: format!("已从《{name}》移除：{} — {}", song.title, song.singers),
+            busy: format!("从《{name}》移除…"),
+            done: format!("已从《{name}》移除：{}", song.title),
             refresh: Some((id, name)),
             song,
             dir_id: playlist.dir_id,
@@ -1015,10 +1041,10 @@ impl App {
         }
         if front {
             self.queue.insert_next(song.clone());
-            self.notify(format!("已插队：{} — {}", song.title, song.singers));
+            self.notify(format!("已插队：{}", song.title));
         } else {
             self.queue.push_back(song.clone());
-            self.notify(format!("已加进队列：{} — {}", song.title, song.singers));
+            self.notify(format!("已加进队列：{}", song.title));
         }
     }
 
@@ -1181,11 +1207,12 @@ impl App {
                     Err(error) => {
                         // 队列里夹着没版权的歌（实测常见）：跳过去接着放，
                         // 但连跳太多就停下报错，免得把整个歌单刷一遍。
-                        let reason = format!("{error:#}");
+                        // 状态行只放一句原因，完整链条进日志。
+                        tracing::info!("跳过不可播的《{}》：{error:#}", song.title);
+                        let reason = error.to_string();
                         if self.skipped < MAX_AUTO_SKIPS {
                             self.skipped += 1;
                             self.notify(format!("{reason}（已跳到下一首）"));
-                            tracing::info!("跳过不可播的《{}》：{reason}", song.title);
                             let step = self.queue.advance();
                             self.step(step);
                         } else {
@@ -1734,7 +1761,7 @@ impl App {
             let snapshot = self.engine.snapshot();
             if !snapshot.completed() {
                 self.notify(format!(
-                    "《{}》流被中断（只播了 {:.0} 秒）",
+                    "流被中断：{}（{:.0} 秒）",
                     snapshot.title.unwrap_or_default(),
                     snapshot.position.as_secs_f64()
                 ));
@@ -1766,8 +1793,8 @@ impl App {
                 .checked_mul(100)
                 .and_then(|scaled| scaled.checked_div(total))
             {
-                Some(percent) => format!("下载《{}》… {percent}%", state.label),
-                None => format!("下载《{}》…", state.label),
+                Some(percent) => format!("下载《{}》… {percent}%", state.title),
+                None => format!("下载《{}》…", state.title),
             },
         );
     }
@@ -2408,6 +2435,44 @@ mod tests {
     /// 状态行右侧现在那句话（没有通知就是空串）。
     fn notice(app: &App) -> String {
         app.notice_text().unwrap_or_default().to_string()
+    }
+
+    /// 下载（含从缓存复制）的提示只报「做了什么 + 哪首」，**不带路径**：落到哪个文件、
+    /// 多大、什么档位、歌词在哪，都进日志——通知位只有 32 列。
+    #[test]
+    fn a_download_notice_has_no_path_and_stays_short() {
+        let saved = |from_cache: bool, existed: bool| crate::download::Saved {
+            path: std::path::PathBuf::from(r"C:\Users\me\Music\canto\非酋.flac"),
+            quality: crate::model::Quality::Flac,
+            bytes: 26_000_000,
+            lyrics: vec![std::path::PathBuf::from(
+                r"C:\Users\me\Music\canto-lyrics\非酋.lrc",
+            )],
+            existed,
+            from_cache,
+        };
+
+        assert_eq!(saved_notice("非酋", &saved(false, false)), "已下载：非酋");
+        assert_eq!(
+            saved_notice("非酋", &saved(true, false)),
+            "已从缓存复制：非酋"
+        );
+        assert_eq!(saved_notice("非酋", &saved(true, true)), "已存在：非酋");
+
+        for text in [
+            saved_notice("非酋", &saved(false, false)),
+            saved_notice("非酋", &saved(true, false)),
+            saved_notice("非酋", &saved(true, true)),
+        ] {
+            assert!(
+                !text.contains('\\') && !text.contains('/'),
+                "通知里不该出现路径：{text}"
+            );
+            assert!(
+                unicode_width::UnicodeWidthStr::width(text.as_str()) <= 32,
+                "通知要能塞进 32 列：{text}"
+            );
+        }
     }
 
     /// 默认 4 秒后自己消失——状态行不会一直挂着上一件事。
