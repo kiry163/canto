@@ -1,7 +1,12 @@
 # canto 桌面歌词（Windows 覆盖层）设计
 
 日期：2026-10-12
-状态：待使用者复核
+状态：已实现（Windows）
+
+> **后续**：macOS 那份已在 `2026-10-13-desktop-lyrics-macos-design.md` 里实现并上线。所以下文里
+> 「非 Windows = 空实现」的表述与 `positions` / `none()` 那两段注释都已过期——现在的边界是
+> `not(any(windows, macos))`，`positions` 在 macOS 上也真的会送来中心点。这份 spec 的历史决策
+> 记录保持原样。
 
 ## 背景与目标
 
@@ -154,7 +159,7 @@ hide_when_paused = false
 | 状态机 | `overlay.rs` 顶部（平台无关） | `Frame` → `Payload`、变化检测、锁定态 | `model::Lyric`、`player::Snapshot`、`config` |
 | 位置状态 | 同文件 | 读/写 `desktop-lyrics.json`、默认中心点、夹进主屏 | `paths`、`serde_json` |
 | Windows 实现 | 同文件 `#[cfg(target_os = "windows")] mod imp` | 线程 + 窗口 + 消息循环 + DIB 绘制；`Arc<Mutex<Payload>>` 收更新、`PostMessageW` 唤醒 | `windows-sys`（新增 `Win32_Graphics_Gdi`、`Win32_UI_HiDpi`） |
-| 其它平台 | `#[cfg(not(windows))] mod imp` | 空实现（`none()` + 两个空方法） | — |
+| 其它平台 | `#[cfg(not(any(windows, macos)))] mod imp` | 空实现（`none()` + 两个空方法）——**macOS 之后单独做了**，见 `2026-10-13-desktop-lyrics-macos-design.md` | — |
 
 ```rust
 pub struct DesktopLyrics {
@@ -220,7 +225,7 @@ Loop->>Loop: 落盘 desktop-lyrics.json
 |---|---|
 | 建线程 / 建窗口失败 | 一条通知（`歌词窗口起不来`）+ 日志（原因），播放与界面照常 |
 | `enabled = false` | 不建线程、不建窗口；`App::tick` 连 `sync` 都不调（「关掉就零成本」） |
-| 非 Windows | 同上（配置段整体忽略，`cfg` 那半是空实现） |
+| Linux 等其它平台 | 同上（配置段整体忽略，`cfg` 那半是空实现）。macOS 在 `2026-10-13-desktop-lyrics-macos-design.md` 里实现了，行为与 Windows 对齐 |
 | 没有歌词 / 未播放 | `SW_HIDE`（不销毁，位置与锁定态留着） |
 | 状态文件坏了 / 没有 | 默认位置（主屏底部居中），不报错、不阻塞启动 |
 | 主屏 DPI 变了 | 每次重画按当前 DPI 缩放字号，位置照旧按中心点算 |

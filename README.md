@@ -22,12 +22,12 @@
 | 歌单写入：加进歌单 / 从歌单移除（「我喜欢」只读，见「已知限制」） | ✅ |
 | 配置文件 `config.toml`（音质下限 / 目录 / 缓存与历史上限 / 通知存活秒数 / 全局快捷键 / 桌面歌词） | ✅ |
 | 全局快捷键：canto 在后台时也能播放 / 暂停、上下一首、音量 ±5、切桌面歌词锁定（Windows / macOS，可配可禁） | ✅ |
-| 桌面歌词（Windows，默认开）：当前句 + 翻译 + 下一句浮在桌面之上，默认鼠标穿透、热键解锁后可拖 | ✅ |
+| 桌面歌词（Windows / macOS，默认开）：当前句 + 翻译 + 下一句浮在桌面之上，默认鼠标穿透、热键解锁后可拖 | ✅ |
 | 单例运行（同一份数据目录只允许一个实例） | ✅ |
 
 ## 平台
 
-macOS / Linux / Windows 三平台都能跑（**全局快捷键只在 Windows / macOS 生效**，见「已知限制」）。
+macOS / Linux / Windows 三平台都能跑（**全局快捷键与桌面歌词只在 Windows / macOS 生效**，见「已知限制」）。
 Release 页面上的产物都由 CI 编（`release.yml`），本地不用
 再交叉编译：
 
@@ -164,9 +164,11 @@ volume_up = "ctrl+shift+up"
 volume_down = "ctrl+shift+down"
 lock = "ctrl+shift+l"
 
-# 桌面歌词（Windows）：播放时在桌面之上浮一条歌词，默认点不着；
+# 桌面歌词（Windows / macOS）：播放时在桌面之上浮一条歌词，默认点不着；
 # 全局热键 lock 解锁后能拖动（位置记在 desktop-lyrics.json）。
 # enabled = false 就完全不起这个窗口；颜色写 #RRGGBB，opacity 是 0-100。
+# font 是字体面：默认那串是 Windows 的中文字体，macOS 上认不出来会自动回退系统字体
+# （想指定就写 macOS 上有的名字，如 "PingFang SC"）。
 [desktop_lyrics]
 enabled = true
 font = "Microsoft YaHei UI"
@@ -227,8 +229,10 @@ hide_when_paused = false
 - **同一首歌在同一列表里出现两次，两行都会标 `♪`**：标记按 mid 比对，比按标题字符串准，但重复
   出现的同一首无法区分。
 - 「会话已失效」的判定码还没等来一次真实的会话过期去核对。
-- **桌面歌词只有 Windows 有**：其它平台（含 macOS）不建窗口，`[desktop_lyrics]` 整段不生效，
+- **桌面歌词只有 Windows / macOS 有**：Linux（含 Wayland）不建窗口，`[desktop_lyrics]` 整段不生效，
   界面与播放照常。
+- **macOS 的解锁态在「有歌词」时没有额外视觉标记**：Windows 解锁时会描一圈白线，macOS 只有没内容
+  时才显示「拖动我（再按一次 ctrl+shift+l 锁定）」那句话。觉得不够显眼就说一声，补一圈边框不难。
 - **桌面歌词只认主屏**：多显示器下不会跟着跑到别的那块屏；换过显示器 / 分辨率导致窗口落在屏外
   时，下次启动会把它夹回主屏内（留一圈边距），免得「再也找不到」。
 - **桌面歌词压不过全屏独占应用**（游戏之类）：Windows 的既有边界，那个时候歌词会被它盖住。

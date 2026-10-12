@@ -105,12 +105,13 @@ canto 常停在某个 pane 里、甚至被别的窗口盖住，所以「切歌 /
   event target——这正是 `RunApplicationEventLoop` 内部做的事。实测 150ms / 500ms 的泵节奏下，单次按
   与连按都不丢事件。**早期那版只泵 CFRunLoop**，于是「注册成功、日志有、按下去没反应」。
 
-## 桌面歌词（Windows，实测 2026-10-12）
+## 桌面歌词（Windows / macOS，实测 2026-10-12 / 2026-10-13）
 
 播放时在桌面最上层浮一条「当前句 + 翻译 + 下一句」，不占终端、不抢焦点。它分成两半：**状态机**
-（`overlay.rs` 平台无关的那部分 + `App::tick` 每帧递一帧进去）决定「要不要重画、画什么」，
-**窗口线程**（`#[cfg(windows)] mod imp`）只管把 payload 画出来。分开的理由：状态机是纯逻辑，
-能单测（12 条）；窗口那一半在这台机器上只能靠探针 + 真机看。
+（`overlay.rs` 平台无关的那部分，`App::tick` 每帧递一帧进去、`sync` 顺带每帧泵一次平台事件）
+决定「要不要重画、画什么」，**平台实现**（`#[cfg] mod imp`：Windows 是专用线程 + 分层窗口，
+macOS 是主线程 `NSPanel` + 每帧手动泵 AppKit）只管把 payload 画出来。分开的理由：状态机是纯逻辑，
+能单测（12 条）；窗口那一半只能靠探针 + 真机看。
 
 | | 做法 | 为什么 |
 |---|---|---|
@@ -128,8 +129,29 @@ canto 常停在某个 pane 里、甚至被别的窗口盖住，所以「切歌 /
 `PostMessageW(WM_CLOSE)` → `DestroyWindow` → `WM_DESTROY` → `PostQuitMessage` 再 `join`。
 注册类 / 建窗口 / 起线程任一失败都降级成空句柄：状态行说一句、原因写进 `canto.log`，播放与界面照常。
 
-真机验收跑在实施计划的清单里（「点不着」「拖完重启回到原位」「压在全屏 tuios 之上」「enabled = false
-不建窗口」「状态文件写成屏外会被夹回」都在其中）。
+### macOS：无边框 `NSPanel` + 主线程每帧泵（实测 2026-10-13）
+
+没有第二个进程、没有窗口线程：窗口在主线程建，事件由 TUI 循环每帧拉。几件值得记住：
+
+| | 做法 | 为什么 |
+|---|---|---|
+| 事件怎么来 | `App::tick` 里 `sync` → `Imp::pump`：`nextEventMatchingMask:untilDate:[NSDate distantPast] inMode:NSDefaultRunLoopMode dequeue:true` + `sendEvent:` | 没有 `NSApplicationMain`。CFRunLoop 泵不出 AppKit 的事件（同全局快捷键那节的实测），`NSApp.run()` 会阻塞到退出 |
+| 窗口 | 无边框 `NSPanel`（`Borderless \| NonactivatingPanel`）+ `level = Floating`(3) + `canJoinAllSpaces + stationary + fullScreenAuxiliary` | 不抢焦点、不进 Dock、各 space 都在场；`CGWindowList` 里实测 layer=3 |
+| 透明与鼠标 | `opaque=false` + `clearColor` + `hasShadow=false`；**锁定 = `ignoresMouseEvents=true`**，解锁 = `false` + `isMovableByWindowBackground` | 锁定态「点不着」；解锁后让系统自己拖窗口（探针验过合成拖动跟手、且不激活自己） |
+| 文字 | 三个透明 `NSTextField` + `NSAttributedString`，描边用**负 `strokeWidth`** | 负值 = 填充 + 描边一次画完（Windows 那边是八方向各画一遍再合成）；中文 shaping 交给系统 |
+| 尺寸与位置 | 每次 `push` 按文本实测尺寸重摆；中心点仍存**左上原点**，进 AppKit 按主屏高换算 | 与 Windows 同一套算法、同一个 `desktop-lyrics.json` |
+| 拖动回传 | 每帧读一次窗口矩形，跟上次报过的比，变了才回传 | 与 Windows「逐 draw 采纳窗口自身矩形」同一口径，不指望「拖动结束」事件 |
+| 字体 | 配置里的字体面认不出来（模板里那串是 Windows 字体）就回退系统字体 | 实测 `Microsoft YaHei UI` → `.AppleSystemUIFont` |
+| 主屏尺寸 | `NSScreen.mainScreen` 的 frame（逻辑点） | 原来非 Windows 分支是给空实现占位的硬编码 1920×1080，拿它算默认位置会偏（实测 (960,918) vs 真实 (896,952)） |
+| 失败降级 | 拿不到主线程标记 / 激活策略失败 / 建窗口失败 → 一句话 + 日志，句柄是空的 | 与 Windows 同口径：播放与界面照常 |
+
+两个只有真机才会暴露的坑，写实现时别重踩：`Retained<T>` **不是** `repr(transparent)`（把
+`&retained` 当对象指针塞进 `NSDictionary` 会段错误，必须 `&*retained`）；`setIgnoresMouseEvents`
+的极性写反过一次，症状是「锁定态点得着、解锁后拖不动」。
+
+真机验收跑在实施计划的清单里（Windows：「点不着」「拖完重启回到原位」「压在全屏 tuios 之上」
+「enabled = false 不建窗口」「状态文件写成屏外会被夹回」；macOS：另加「窗口中心 = 主屏底部居中」
+「暂停按 `hide_when_paused` 藏/回」「`enabled = false` 时日志里连『就绪』都没有」）。
 
 ## 已知限制（细节）
 
@@ -271,7 +293,7 @@ src/
   media.rs     HTTP 流 → Read + Seek（Range 重连、服务端不理 Range 时自己跳过、魔数嗅探）
   player.rs    候选档位 → rodio 解码 → 默认音频设备（后台线程 + 状态快照）
   download.rs  下载歌曲与同名歌词（复用 media 的流）
-  overlay.rs   桌面歌词（Windows）：平台无关状态机 + 位置状态文件 + `cfg` 分开的窗口线程
+  overlay.rs   桌面歌词：平台无关状态机 + 位置状态文件 + `cfg` 分开的窗口实现（Windows 专用线程 / macOS 主线程 `NSPanel`）
   qr.rs        二维码 PNG → 模块网格 → 终端字符块（1 模块 1 字符格，可按 1/2/4 倍放大）；落盘与系统查看器兜底
   http.rs      HTTP 客户端（UA / 超时 / 挂会话 jar / 不跟随跳转的变体）
   qq/          接口层
@@ -294,7 +316,7 @@ src/
 
 ## 跨平台与发布
 
-三平台同源，平台差异只有四处，都收在 `cfg` 里：
+三平台同源，平台差异只有五处，都收在 `cfg` 里：
 
 | 事情 | Unix | Windows |
 |---|---|---|
@@ -302,7 +324,7 @@ src/
 | 本地时间（历史文案） | `libc::localtime_r` | `FileTimeToSystemTime` + `SystemTimeToTzSpecificLocalTime`（`windows-sys`） |
 | 音频后端 | CoreAudio / ALSA | WASAPI（cpal 自己挑，代码里没有分支） |
 | 全局快捷键 | macOS：主线程 + 每轮拉 Carbon 热键事件再派发（Linux：不注册） | 专用线程跑消息循环（`windows-sys`，见「全局快捷键」） |
-| 桌面歌词 | 非 Windows：不建窗口（`overlay.rs` 里那份实现是空操作，`[desktop_lyrics]` 整段不生效） | 分层窗口 + 专用线程（`UpdateLayeredWindow` + 32 位 DIB，见「桌面歌词」） |
+| 桌面歌词 | macOS：无边框 `NSPanel` + 主线程每帧泵 AppKit；Linux：不建窗口（空实现，`[desktop_lyrics]` 整段不生效）。取词 / 状态机 / 位置状态两边共用 | 分层窗口 + 专用线程（`UpdateLayeredWindow` + 32 位 DIB，见「桌面歌词」） |
 
 - 年内第几天（判断「昨天」）不用系统的 `tm_yday` / `wDayOfYear`：Windows 的 `SYSTEMTIME` 里根本没
   这个字段，统一从年月日自己算（闰年规则也一起测了）。

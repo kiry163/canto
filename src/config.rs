@@ -460,9 +460,11 @@ fn write_default(path: &Path) -> Result<()> {
          [hotkeys]\n\
          {hotkey_lines}\
          #\n\
-         # 桌面歌词（Windows）：播放时在桌面之上浮一条歌词，默认点不着；\n\
+         # 桌面歌词（Windows / macOS）：播放时在桌面之上浮一条歌词，默认点不着；\n\
          # 全局热键 lock 解锁后能拖动（位置记在 desktop-lyrics.json）。\n\
          # enabled = false 就完全不起这个窗口；颜色写 #RRGGBB，opacity 是 0-100。\n\
+         # font 是字体面：默认那串是 Windows 的中文字体，macOS 上认不出来会自动回退系统字体\n\
+         # （想指定就写 macOS 上有的名字，如 \"PingFang SC\"）。\n\
          [desktop_lyrics]\n\
          enabled = true\n\
          font = \"Microsoft YaHei UI\"\n\
