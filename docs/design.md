@@ -77,9 +77,9 @@ canto 常停在某个 pane 里、甚至被别的窗口盖住，所以「切歌 /
 
 | | Windows | macOS |
 |---|---|---|
-| 事件怎么来 | `RegisterHotKey(hwnd, …)` 把 `WM_HOTKEY` **投递给建窗口那个线程** | `InstallEventHandler(GetApplicationEventTarget(), …)`，事件由**应用主 run loop** 派发 |
+| 事件怎么来 | `RegisterHotKey(hwnd, …)` 把 `WM_HOTKEY` **投递给建窗口那个线程** | `RegisterEventHotKey` 把热键事件送进 **Carbon 的事件队列**（`InstallEventHandler(GetApplicationEventTarget(), …)` 收）——**不走 CFRunLoop 的 source** |
 | crate 做了什么 | 建一个隐藏窗口 + 自己的 WndProc；注册时带 `MOD_NOREPEAT`（所以按住不连发） | 注册 Carbon 热键 + 装事件处理器 |
-| 我们得做什么 | 自备专用线程：建窗口 → 逐条注册 → `GetMessageW` / `DispatchMessageW` 循环；`Drop` 时 `PostThreadMessageW(WM_QUIT)` 再 `join` | 主线程建 manager（`tui::run` 本来就在主线程），UI 循环每轮 `CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.0, true)` 泵一次——**不泵就没事件**，延迟上限就是 tick（150ms） |
+| 我们得做什么 | 自备专用线程：建窗口 → 逐条注册 → `GetMessageW` / `DispatchMessageW` 循环；`Drop` 时 `PostThreadMessageW(WM_QUIT)` 再 `join` | 主线程建 manager（`tui::run` 本来就在主线程），UI 循环每轮把队列里那两类热键事件**拉空并派发**（`ReceiveNextEvent` + `SendEventToEventTarget`）——**不拉就没事件**，延迟上限就是 tick（150ms） |
 | 其它平台 | Linux / Wayland 不注册；启动时说一句「此平台暂不支持全局热键」，其余功能照常 | |
 
 几个刻意的地方：
@@ -97,9 +97,13 @@ canto 常停在某个 pane 里、甚至被别的窗口盖住，所以「切歌 /
 - **默认不碰媒体键**：六个动作的默认组合都是普通组合键，所以正常情况下不弹授权框。但配置里
   如果自己写媒体键名（`mediaplaypause` 之类），macOS 上 crate 会走 CGEventTap、可能弹一次
   辅助功能授权——所以模板里写明了别那么写（Windows 上媒体键就是普通注册，没这个问题）。
-- **macOS 那条「每轮泵 run loop」在本机（Windows 开发机）验不了**：它是这份实现里唯一靠文档 + 源码
-  推理的部分（开发机没有 macOS SDK，连 `cargo check --target` 都过不去）。真机验收清单在实施计划
-  里；若泵不出 Carbon 事件，退路是 macOS 不注册、启动时给一句提示，README 的已知限制同步写清。
+- **macOS：热键事件得自己从队列里拉**（2026-10-12 在 macOS 15.5 / x86_64 上实测）：Carbon 的热键事件
+  **不进 CFRunLoop 的 source**——同一个循环里一圈圈泵 `CFRunLoopRunInMode(kCFRunLoopDefaultMode, …)`
+  收不到热键，`CGEventTap` 的回调却照收（所以不是「没在泵」）；`RunApplicationEventLoop()` 收得到，
+  但它要阻塞到退出，塞不进「画帧 + 读键盘」。于是每轮 `ReceiveNextEvent` 只按 `kEventClassKeyboard`
+  的按下 / 松开两类取值（队列里别人的事件原样留着）、`SendEventToEventTarget` 派发到 application
+  event target——这正是 `RunApplicationEventLoop` 内部做的事。实测 150ms / 500ms 的泵节奏下，单次按
+  与连按都不丢事件。**早期那版只泵 CFRunLoop**，于是「注册成功、日志有、按下去没反应」。
 
 ## 桌面歌词（Windows，实测 2026-10-12）
 
@@ -297,7 +301,7 @@ src/
 | 单例锁 | 标准库 `File::try_lock`（落到 `flock`） | 同一个调用（落到 `LockFileEx`） |
 | 本地时间（历史文案） | `libc::localtime_r` | `FileTimeToSystemTime` + `SystemTimeToTzSpecificLocalTime`（`windows-sys`） |
 | 音频后端 | CoreAudio / ALSA | WASAPI（cpal 自己挑，代码里没有分支） |
-| 全局快捷键 | macOS：主线程 + 每轮泵 CoreFoundation run loop（Linux：不注册） | 专用线程跑消息循环（`windows-sys`，见「全局快捷键」） |
+| 全局快捷键 | macOS：主线程 + 每轮拉 Carbon 热键事件再派发（Linux：不注册） | 专用线程跑消息循环（`windows-sys`，见「全局快捷键」） |
 | 桌面歌词 | 非 Windows：不建窗口（`overlay.rs` 里那份实现是空操作，`[desktop_lyrics]` 整段不生效） | 分层窗口 + 专用线程（`UpdateLayeredWindow` + 32 位 DIB，见「桌面歌词」） |
 
 - 年内第几天（判断「昨天」）不用系统的 `tm_yday` / `wDayOfYear`：Windows 的 `SYSTEMTIME` 里根本没
