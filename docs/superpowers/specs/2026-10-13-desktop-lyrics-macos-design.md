@@ -47,11 +47,17 @@ Windows 那份现在是唯一实现：非 Windows 走空实现，`[desktop_lyric
 `overlay.rs` 平台无关那半（`State`/`Frame`/`Payload`/`Center`/`primary_screen`/`clamp_center`/
 `DesktopLyrics::{none, install, sync, toggle_lock}`/`Installed.positions`）**一行不改**。
 
+例外只有一处，实施时才发现：`primary_screen()` 的**非 Windows 分支**当年是给空实现占位的
+硬编码 `(1920, 1080)`，macOS 要问 `NSScreen.mainScreen` 的真尺寸（否则「默认底部居中」与
+「夹回屏内」都按错的屏算——实测默认中心点因此落在 (960, 918) 而不是真实主屏的 (896, 952)）。
+所以这个函数从两个 `cfg` 分支变成三个。
+
 | 位置 | 改动 |
 |---|---|
 | `DesktopLyrics::sync` | 加一句 `self.imp.pump();`（在 `advance` 之前，每帧都跑，与 payload 是否变化无关） |
 | `#[cfg(target_os = "macos")] mod imp` | 新实现：`Imp`、`Imp::none`、`install`、`push`、`pump` |
-| 其它平台 `mod imp` | 加一个空的 `pump`（Linux 与非 Windows 保持一致；`none()` 的句柄也要能被 `sync` 调） |
+| 其它平台 `mod imp` | `cfg` 收紧成 `not(any(windows, macos))`，加一个空的 `pump`（Linux 那份仍是最终形态） |
+| `primary_screen()` | 非 Windows 分支原来是硬编码 `(1920, 1080)` 的占位；macOS 分支改成问 `NSScreen.mainScreen` |
 
 不变式（用类型强约束）：
 
@@ -160,6 +166,12 @@ Windows 那份现在是唯一实现：非 Windows 走空实现，`[desktop_lyric
 > 探针是 `/tmp/lyricsprobe`（一次性，不进仓库）：同一个二进制分 `show`/`shot`/`windows`/`click`/
 > `drag`/`screens` 几个子命令，用 `objc2` + `objc2-app-kit`（这两个 macOS 上**已经在依赖图里**，
 > 是 `global-hotkey` 拖进来的，直接依赖不新增下载）。
+>
+> 实施时量到的实情：把 AppKit 那几族 feature 打开后，`Cargo.lock` 会多出 8 个 objc2 家族的
+> **纯 Rust 绑定 crate**（`objc2-cloud-kit` / `objc2-core-data` / `objc2-core-graphics` /
+> `objc2-core-image` / `objc2-core-text` / `objc2-core-video` / `objc2-io-surface` /
+> `objc2-quartz-core`，都是 `objc2-app-kit` 可选依赖被我启用的 feature 拉进来的）。本机缓存里
+> 都有（`--offline --locked` 能编），CI 上按常规从 crates.io 取；没有 C 代码要编。
 
 | 验的 | 结果 |
 |---|---|

@@ -108,7 +108,7 @@ git commit -m "refactor(overlay): Imp::pump —— 每帧泵一次平台事件"
 
 **Files:**
 - Modify: `Cargo.toml`（新增 macOS 直接依赖段）
-- Modify: `src/overlay.rs`（新增 `#[cfg(target_os = "macos")] mod imp`，位置放在 Windows 那份与「其它平台」那份之间；**同时把「其它平台」那份的 `cfg` 从 `not(target_os = "windows")` 收紧成 `not(any(target_os = "windows", target_os = "macos"))`**，否则 macOS 上两份实现会同时存在、编译不过）
+- Modify: `src/overlay.rs`（新增 `#[cfg(target_os = "macos")] mod imp`，位置放在 Windows 那份与「其它平台」那份之间；**同时把「其它平台」那份的 `cfg` 从 `not(target_os = "windows")` 收紧成 `not(any(target_os = "windows", target_os = "macos"))`**，否则 macOS 上两份实现会同时存在、编译不过；**还有 `primary_screen()`**——它的非 Windows 分支是给空实现占位的硬编码 `(1920, 1080)`，macOS 必须问 `NSScreen.mainScreen` 的真尺寸，否则「默认位置」与「夹回屏内」都按错的屏算）
 
 **Interfaces:**
 - Consumes: `Payload`（`visible`/`current`/`next`/`translation`/`locked`）、`DesktopLyricsConfig`、`crate::config::Rgb`
@@ -512,8 +512,20 @@ mod imp {
 
 - [ ] **Step 3: 编译与门禁**
 
-Run: `cargo build --locked && cargo test --locked && cargo clippy --all-targets --locked -- -D warnings`
-Expected: 全过。注意 `Cargo.lock` **不应该**变化（三件都已在图里）——`git diff --stat Cargo.lock` 要是空的；若变了，说明版本没对齐（`objc2 0.6.x` / `objc2-*-0.3.x`，照 `Cargo.lock` 里现有的写）。
+第一次**不要**带 `--locked`（新增直接依赖会写 `Cargo.lock`，`--locked` 会直接拒绝）：
+
+```sh
+cargo build --offline          # 写出新的 Cargo.lock
+cargo test --offline
+cargo clippy --all-targets --offline -- -D warnings
+```
+
+Expected: 全过。`Cargo.lock` 的变化是**预期内的**：canto 的依赖表多三条，外加 8 个 objc2 家族的
+绑定 crate 条目（`objc2-app-kit` 被我启用的那几个 feature 拉进来的：cloud-kit / core-data /
+core-graphics / core-image / core-text / core-video / io-surface / quartz-core）。**版本号一个都
+不该变**——`git diff Cargo.lock | grep '^[+-]version'` 要是空的；变了说明版本没对齐
+（照 lock 里已有的 `objc2 0.6.x` / `objc2-*-0.3.x` 写）。
+把锁写出来之后，`cargo build --locked` 与 CI 的 `--locked` 都该过。
 
 - [ ] **Step 4: 真机验收（能看见、能更新、能隐藏）**
 
@@ -530,6 +542,7 @@ tuios wait-for window-output -s canto-dev -w canto-lyrics-mac --pattern '我的�
 |---|---|---|
 | 1 | 界面里选中一首有歌词的歌回车播放（等 2–3 秒） | 桌面底部居中浮出三行：当前句（大、白、带黑描边）、译文、下一句（小、灰） |
 | 2 | `screencapture -x /tmp/lyrics-mac.png` 然后看图 | 中文没变成方框、描边干净、三行水平居中、位置在屏幕下方居中；整层略透明（`opacity = 90`） |
+| 2b | 量窗口 bounds（探针 `windows <pid>`） | `layer=3`、`alpha≈0.90`，中心点 = **主屏底部居中**（本机 1792×1120 → (896, 952)）。若中心点是 (960, 918)，说明 `primary_screen()` 还在用那个硬编码占位值 |
 | 3 | 在 TUI 里按 `Space` 暂停 | `hide_when_paused` 默认 `false` → 窗口留着（这一步确认默认行为）；把配置改成 `true` 重启后再暂停 → 窗口消失，继续播放又回来 |
 | 4 | 看 `~/.config/canto/canto.log` | 有 `桌面歌词窗口已就绪`（带 font/size），没有 `建歌词窗口失败` |
 | 5 | 在 TUI 里按 `q` 退出 | 窗口立刻消失（进程退出）；`pgrep -f target/debug/canto` 为空 |
