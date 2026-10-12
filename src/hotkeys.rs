@@ -30,13 +30,22 @@ pub const DEFAULTS: [(&str, &str, Action); 5] = [
 ];
 
 /// 组合能不能用：crate 认键名（顺带给出解析好的 `HotKey`），另外**必须有修饰键**。
+///
+/// `win` 会被归一成 crate 认的 `super`（Windows 键在 macOS 上就是 cmd）。
 pub fn validate(keys: &str) -> Result<HotKey, String> {
-    let hotkey: HotKey = keys.parse().map_err(|error| format!("{error}"))?;
     // crate 允许裸键（`space`），但那等于让 canto 抢走全局的空格键——不用热键的人会被坑到。
     if !keys.contains('+') {
         return Err("必须带修饰键(如 ctrl+shift+space)".to_string());
     }
-    Ok(hotkey)
+    // `win` 是使用者自然会写的名字（配置模板里就是这么写的），但 crate 的修饰键白名单里只有
+    // `option/alt`、`control/ctrl`、`command/cmd/super`、`shift`——先归一，再交给它解析。
+    // 不归一的话，照模板写 `win+shift+space` 会被判非法、那个动作静默失效。
+    let normalized: String = keys
+        .split('+')
+        .map(|token| if token.trim().eq_ignore_ascii_case("win") { "super" } else { token })
+        .collect::<Vec<_>>()
+        .join("+");
+    normalized.parse().map_err(|error| format!("{error}"))
 }
 
 /// 装成什么样：成功几条、哪几条没成、这个平台认不认。细节在日志里，这里只留能报给使用者的话。
@@ -389,6 +398,17 @@ mod tests {
     fn case_and_aliases_parse_the_same() {
         assert!(validate("Ctrl+Shift+Space").is_ok());
         assert!(validate("control+shift+space").is_ok());
+    }
+
+    /// `win` 是使用者自然会写的名字（模板与 README 都这么教），但 crate 的修饰键白名单里
+    /// 只有 `option/alt`、`control/ctrl`、`command/cmd/super`、`shift`——不归一的话，
+    /// 照文档写 `win+shift+space` 会被判非法、那个动作静默失效。
+    #[test]
+    fn win_is_an_alias_for_super() {
+        assert!(validate("win+shift+space").is_ok(), "`win` 该能用");
+        assert!(validate("WIN+space").is_ok(), "大小写无关");
+        assert!(validate("super+space").is_ok(), "crate 的原生写法当然也能用");
+        assert!(validate("ctrl+win").is_err(), "只有修饰键、没有主键仍要拒");
     }
 
     #[test]

@@ -112,7 +112,7 @@ volume_down = "ctrl+shift+down"
 | 组合解析不了（键名不认） | 该条不注册 + 一次性警告（`hotkeys::validate` 在配置阶段就报） |
 | 没有修饰键（裸键，如 `"space"`） | 拒绝 + 一次性警告（会系统级抢键） |
 | 两个动作写了同一组合 | 后者注册失败（Windows 报 `ERROR_HOTKEY_ALREADY_REGISTERED`）→ 通知 + 日志 |
-| 解析实现 | crate 的 `FromStr`（别名：`ctrl`/`control`、`alt`/`option`、`win`/`super`/`cmd`、`up`/`arrowup`…），统一经 `hotkeys::validate` |
+| 解析实现 | crate 的 `FromStr`（别名：`ctrl`/`control`、`alt`/`option`、`command`/`cmd`/`super`、`shift`、`up`/`arrowup`…）；**`win` 由 `hotkeys::validate` 先归一成 `super`**（crate 自己并不认 `win`），统一经它解析 |
 
 警告走 `config.rs` 已有的「一次性警告」机制（状态行通知槽一行 + 细节进日志）。配置模板
 （`write_default`）要写上这段并带注释；README 的「功能」表、「配置」段、「已知限制」同步。

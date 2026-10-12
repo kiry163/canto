@@ -318,8 +318,9 @@ fn write_default(path: &Path) -> Result<()> {
          #\n\
          # 全局快捷键：canto 在后台（没聚焦）时也能用这几个键控制播放。\n\
          # 注意：注册期间这些组合**别的程序收不到**（系统级注册的固有代价）。\n\
-         # 写法：修饰键在前、最后一个是要按的键；修饰键可写 ctrl / alt / shift / win，\n\
-         # 键名如 space / up / down / left / f5 / a。空字符串 = 这个动作不注册。\n\
+         # 写法：修饰键在前、最后一个是要按的键；修饰键可写 ctrl / alt / shift / win\n\
+         # （win = super = cmd），键名如 space / up / down / left / f5 / a；\n\
+         # 别用媒体键名（macOS 上那要走系统授权）。空字符串 = 这个动作不注册。\n\
          [hotkeys]\n\
          {hotkey_lines}",
         default.quality.token(),

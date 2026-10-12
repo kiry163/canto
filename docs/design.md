@@ -94,8 +94,9 @@ canto 常停在某个 pane 里、甚至被别的窗口盖住，所以「切歌 /
   时报个数），原因（`HotKey already registered: …`）进 `canto.log`。
 - **`install` 在 `tui::run` 里、不在 `App::new` 里**：`test_app()` 会走 `App::new`，真注册系统热键
   既污染开发机、又会抢走使用者的按键。
-- **不碰媒体键**：crate 在 macOS 上给媒体键走 CGEventTap，那要辅助功能授权；我们只注册普通组合键，
-  所以不弹授权框。
+- **默认不碰媒体键**：五个动作的默认组合都是普通组合键，所以正常情况下不弹授权框。但配置里
+  如果自己写媒体键名（`mediaplaypause` 之类），macOS 上 crate 会走 CGEventTap、可能弹一次
+  辅助功能授权——所以模板里写明了别那么写（Windows 上媒体键就是普通注册，没这个问题）。
 - **macOS 那条「每轮泵 run loop」在本机（Windows 开发机）验不了**：它是这份实现里唯一靠文档 + 源码
   推理的部分（开发机没有 macOS SDK，连 `cargo check --target` 都过不去）。真机验收清单在实施计划
   里；若泵不出 Carbon 事件，退路是 macOS 不注册、启动时给一句提示，README 的已知限制同步写清。
