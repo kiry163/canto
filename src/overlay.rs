@@ -220,7 +220,10 @@ impl DesktopLyrics {
         self.state.toggle_lock();
     }
 
-    /// 现在是解锁的吗（接线与测试用）。
+    /// 现在是解锁的吗。
+    ///
+    /// 只给测试看：界面上没有别的消费者（提示框由覆盖层自己画），生产代码只负责把它翻过去。
+    #[cfg(test)]
     pub fn locked(&self) -> bool {
         self.state.locked
     }

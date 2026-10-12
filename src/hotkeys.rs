@@ -21,12 +21,13 @@ pub struct Binding {
 }
 
 /// 默认组合：字段名跟 `config::HotkeyConfig` 一一对应，也是配置模板与警告文案的真源。
-pub const DEFAULTS: [(&str, &str, Action); 5] = [
+pub const DEFAULTS: [(&str, &str, Action); 6] = [
     ("play_pause", "ctrl+shift+space", Action::PlayPause),
     ("next", "ctrl+shift+right", Action::Next),
     ("prev", "ctrl+shift+left", Action::Prev),
     ("volume_up", "ctrl+shift+up", Action::VolumeUp),
     ("volume_down", "ctrl+shift+down", Action::VolumeDown),
+    ("lock", "ctrl+shift+l", Action::LyricsLock),
 ];
 
 /// 组合能不能用：crate 认键名（顺带给出解析好的 `HotKey`），另外**必须有修饰键**。
@@ -412,16 +413,33 @@ mod tests {
     }
 
     #[test]
-    fn the_defaults_are_the_five_combos_the_spec_fixed() {
+    fn the_defaults_are_the_six_combos_the_spec_fixed() {
         let fields: Vec<&str> = DEFAULTS.iter().map(|(field, _, _)| *field).collect();
-        assert_eq!(fields, ["play_pause", "next", "prev", "volume_up", "volume_down"]);
+        assert_eq!(fields, ["play_pause", "next", "prev", "volume_up", "volume_down", "lock"]);
         let combos: Vec<&str> = DEFAULTS.iter().map(|(_, keys, _)| *keys).collect();
         assert_eq!(
             combos,
-            ["ctrl+shift+space", "ctrl+shift+right", "ctrl+shift+left", "ctrl+shift+up", "ctrl+shift+down"]
+            [
+                "ctrl+shift+space",
+                "ctrl+shift+right",
+                "ctrl+shift+left",
+                "ctrl+shift+up",
+                "ctrl+shift+down",
+                "ctrl+shift+l"
+            ]
         );
         let actions: Vec<Action> = DEFAULTS.iter().map(|(_, _, action)| *action).collect();
-        assert_eq!(actions, [Action::PlayPause, Action::Next, Action::Prev, Action::VolumeUp, Action::VolumeDown]);
+        assert_eq!(
+            actions,
+            [
+                Action::PlayPause,
+                Action::Next,
+                Action::Prev,
+                Action::VolumeUp,
+                Action::VolumeDown,
+                Action::LyricsLock
+            ]
+        );
         // 每个默认组合本身必须合法，否则开箱就报错。
         for (field, keys, _) in DEFAULTS {
             assert!(validate(keys).is_ok(), "默认组合 {field} = {keys:?} 不合法");
@@ -489,7 +507,7 @@ mod tests {
         assert!(!report.unsupported);
     }
 
-    /// 整件事没办成（窗口 / 线程起不来）时只说那一句，不要逐条报「5 条全失败」。
+    /// 整件事没办成（窗口 / 线程起不来）时只说那一句，不要逐条报「全都失败」。
     #[test]
     fn a_fatal_install_failure_is_reported_once() {
         let bindings = [

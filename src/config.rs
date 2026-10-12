@@ -85,6 +85,8 @@ pub struct HotkeyConfig {
     pub volume_up: String,
     /// 音量减。
     pub volume_down: String,
+    /// 桌面歌词的锁定/解锁。
+    pub lock: String,
 }
 
 impl Default for HotkeyConfig {
@@ -95,6 +97,7 @@ impl Default for HotkeyConfig {
             prev: String::new(),
             volume_up: String::new(),
             volume_down: String::new(),
+            lock: String::new(),
         };
         // 默认组合只在 `hotkeys::DEFAULTS` 里写一遍：配置模板也读它，改一处不会说岔。
         for (field, keys, _) in hotkeys::DEFAULTS {
@@ -114,6 +117,7 @@ impl HotkeyConfig {
             "prev" => &self.prev,
             "volume_up" => &self.volume_up,
             "volume_down" => &self.volume_down,
+            "lock" => &self.lock,
             _ => "",
         }
     }
@@ -126,6 +130,7 @@ impl HotkeyConfig {
             "prev" => self.prev = keys.to_string(),
             "volume_up" => self.volume_up = keys.to_string(),
             "volume_down" => self.volume_down = keys.to_string(),
+            "lock" => self.lock = keys.to_string(),
             _ => {}
         }
     }
@@ -418,7 +423,7 @@ fn write_default(path: &Path) -> Result<()> {
     // 路径按平台来：Windows 上是 `C:\Users\...`，必须写成字面串（见 `toml_literal`）。
     let download_dir = toml_literal(&default.download_dir.to_string_lossy());
     let lyrics_dir = toml_literal(&default.lyrics_dir.to_string_lossy());
-    // 全局快捷键：五条默认组合从 `DEFAULTS` 现取现写，不跟注释说岔。
+    // 全局快捷键：默认组合从 `DEFAULTS` 现取现写，不跟注释说岔。
     let hotkey_lines: String = hotkeys::DEFAULTS
         .iter()
         .map(|(field, keys, _)| format!("{field} = \"{keys}\"\n"))
@@ -495,17 +500,17 @@ mod tests {
         assert_eq!(config.hotkeys, HotkeyConfig::default());
         assert_eq!(config.hotkeys.play_pause, "ctrl+shift+space");
         assert_eq!(config.hotkeys.volume_down, "ctrl+shift+down");
-        assert_eq!(config.hotkeys.bindings().len(), 5);
+        assert_eq!(config.hotkeys.bindings().len(), 6);
         assert!(warning.is_none(), "缺段不是错误：{warning:?}");
     }
 
-    /// 写了 `[hotkeys]` 但只写一项：其余四项还得是默认值。
+    /// 写了 `[hotkeys]` 但只写一项：其余五项还得是默认值。
     #[test]
     fn a_partial_section_keeps_the_other_defaults() {
         let (config, warning) = load_from("hotkeys-partial", "[hotkeys]\nnext = \"ctrl+alt+n\"\n");
         assert_eq!(config.hotkeys.next, "ctrl+alt+n");
         assert_eq!(config.hotkeys.prev, "ctrl+shift+left", "没写的字段用默认组合");
-        assert_eq!(config.hotkeys.bindings().len(), 5);
+        assert_eq!(config.hotkeys.bindings().len(), 6);
         assert!(warning.is_none(), "{warning:?}");
     }
 
@@ -514,7 +519,7 @@ mod tests {
         let (config, warning) = load_from("hotkeys-empty", "[hotkeys]\nplay_pause = \"\"\n");
         assert_eq!(config.hotkeys.play_pause, "");
         let bindings = config.hotkeys.bindings();
-        assert_eq!(bindings.len(), 4);
+        assert_eq!(bindings.len(), 5);
         assert!(!bindings.iter().any(|binding| binding.action == keys::Action::PlayPause));
         assert!(warning.is_none(), "明确禁用不该警告：{warning:?}");
     }
@@ -524,7 +529,7 @@ mod tests {
     fn a_bare_key_is_refused_and_cleared() {
         let (config, warning) = load_from("hotkeys-bare", "[hotkeys]\nplay_pause = \"space\"\n");
         assert_eq!(config.hotkeys.play_pause, "", "非法值要清掉，别留个不会注册的字符串");
-        assert_eq!(config.hotkeys.bindings().len(), 4, "其余四条照旧");
+        assert_eq!(config.hotkeys.bindings().len(), 5, "其余五条照旧");
         let warning = warning.expect("应给出警告");
         assert!(warning.contains("[hotkeys] play_pause"), "{warning}");
         assert!(warning.contains("space"), "{warning}");
@@ -547,7 +552,7 @@ mod tests {
         assert_eq!(config.hotkeys.bindings()[0].keys, "Ctrl+Shift+Space");
     }
 
-    /// 模板里五组默认组合都要写出来（值跟 `DEFAULTS` 一致），并提醒会吞键。
+    /// 模板里六组默认组合都要写出来（值跟 `DEFAULTS` 一致），并提醒会吞键。
     #[test]
     fn the_generated_template_documents_the_hotkeys() {
         let dir = std::env::temp_dir().join(format!("canto-config-hotkeys-{}", std::process::id()));

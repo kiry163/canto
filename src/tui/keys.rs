@@ -66,6 +66,8 @@ pub enum Action {
     InputSubmit,
     InputCancel,
     InputBackspace,
+    /// 全局热键 `lock`：切桌面歌词的锁定/解锁（界面上没有对应按键）。
+    LyricsLock,
 }
 
 /// 按键时的上下文：模态与输入态在这里体现，`resolve` 不再自己猜。

@@ -3,7 +3,7 @@
 //! 这里只有「状态 + 网络消息 + 按键派发」，不画一帧（绘制在 [`super::draw`]）。
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -15,6 +15,7 @@ use crate::config::Config;
 use crate::session;
 use crate::history::{self, History};
 use crate::hotkeys;
+use crate::overlay;
 use crate::download;
 use crate::model::{Lyric, Playlist, Song};
 use crate::player::{Engine, Track};
@@ -555,6 +556,11 @@ pub(super) struct App {
     /// 全局快捷键。这里从 `Hotkeys::none()` 起步，真注册只发生在 `tui::run`——
     /// 放在 `App::new` 里的话，`test_app()` 会跟着注册真的系统热键。
     pub(super) hotkeys: hotkeys::Hotkeys,
+    /// 桌面歌词的覆盖层。同样从 `DesktopLyrics::none()` 起步，真装卸只发生在 `tui::run`
+    /// ——放在 `App::new` 里的话，`test_app()` 会跟着真弹一个窗口出来。
+    pub(super) overlay: overlay::DesktopLyrics,
+    /// 拖动歌词窗口后，窗口线程回传的新中心点（非 Windows 或关掉功能时是 `None`）。
+    pub(super) lyrics_positions: Option<Receiver<(i32, i32)>>,
     /// 当前屏幕。
     pub(super) screen: Screen,
     /// 播放历史（内存里这份是权威，落盘在每次追加后同步）。
@@ -629,6 +635,8 @@ impl App {
             tx,
             config,
             hotkeys: hotkeys::Hotkeys::none(),
+            overlay: overlay::DesktopLyrics::none(),
+            lyrics_positions: None,
             // 默认主界面；启动时由 `tui::run` 按会话状态决定，测试里也就不用管登录。
             screen: Screen::Main,
             history: History::default(),
@@ -1367,6 +1375,7 @@ impl App {
             keys::Action::RemoveFromPlaylist => self.remove_selected(),
             keys::Action::ToggleLyric => self.show_lyric = !self.show_lyric,
             keys::Action::ToggleNowPlaying => self.now_playing_full = !self.now_playing_full,
+            keys::Action::LyricsLock => self.overlay.toggle_lock(),
             keys::Action::PlayPause => self.engine.toggle_pause(),
             keys::Action::Next => self.play_relative(true),
             keys::Action::Prev => self.play_relative(false),
@@ -1753,6 +1762,20 @@ impl App {
         // 全局热键：canto 在后台时也要能控制播放（只有主界面收，见 `dispatch_hotkey`）。
         for action in self.hotkeys.drain() {
             self.dispatch_hotkey(action);
+        }
+        // 桌面歌词：只在变化时推；拖出来的位置顺手落盘。
+        let snapshot = self.engine.snapshot();
+        self.overlay.sync(
+            overlay::Frame { lyric: self.lyric.as_ref(), snapshot: &snapshot },
+            &self.config.desktop_lyrics,
+        );
+        if let Some(positions) = &self.lyrics_positions {
+            let path = crate::paths::desktop_lyrics_path();
+            while let Ok(center) = positions.try_recv() {
+                if let Err(error) = overlay::save_center(&path, center) {
+                    tracing::warn!("写歌词窗口位置失败：{error:#}");
+                }
+            }
         }
         // 频谱：只在全屏视图开着且正在播时取，别的屏不付这份算力。
         let now = std::time::Instant::now();
@@ -2204,6 +2227,18 @@ mod tests {
         app.screen = Screen::Main;
         app.dispatch_hotkey(keys::Action::Help);
         assert!(app.help_open, "主界面要跟按 `?` 一样生效");
+    }
+
+    /// `lock` 是第 6 条全局热键，落到桌面歌词的锁定态上（这条同时钉住「动作接对了」）。
+    #[test]
+    fn lyrics_lock_flips_the_overlay_lock() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        let before = app.overlay.locked();
+        app.apply(keys::Action::LyricsLock);
+        assert_ne!(app.overlay.locked(), before, "锁定态该翻一下");
+        app.screen = Screen::Login(LoginState::default());
+        app.dispatch_hotkey(keys::Action::LyricsLock);
+        assert_eq!(app.overlay.locked(), !before, "登录屏也要按同一条规则被挡住");
     }
 
     #[test]

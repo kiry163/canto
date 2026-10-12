@@ -31,6 +31,7 @@ use crossterm::event::{self, Event, KeyEventKind};
 use self::state::{App, Msg};
 use crate::config::Config;
 use crate::hotkeys;
+use crate::overlay;
 use crate::player::Engine;
 
 /// 界面刷新间隔，同时也是按键与后台消息的最长等待。
@@ -69,6 +70,23 @@ pub fn run(
     // 两条的细节都在日志里。
     if let Some(text) = report.notice() {
         app.notify(text);
+    }
+    // 桌面歌词（Windows）：装一个覆盖层窗口。关掉功能 / 非 Windows / 起不来都得到空句柄，
+    // 界面照跑——起不来的原因在日志里。
+    let installed = overlay::DesktopLyrics::install(
+        &app.config.desktop_lyrics,
+        overlay::load_center(&crate::paths::desktop_lyrics_path()),
+    );
+    app.overlay = installed.overlay;
+    app.lyrics_positions = installed.positions;
+    match installed.error {
+        Some(error) => {
+            tracing::warn!(%error, "桌面歌词起不来");
+            app.notify("歌词窗口起不来");
+        }
+        // 功能关着时 `install` 就直接返回空句柄（常态，不吵人）；真装上才记一条。
+        None if app.config.desktop_lyrics.enabled => tracing::info!("桌面歌词窗口已就绪"),
+        None => {}
     }
     app.load_initial();
 
