@@ -20,6 +20,8 @@ tokio = { version = "1.53.2", features = ["rt-multi-thread", "time"] }
 toml = "1.1.8"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+# 状态行通知按**显示宽度**截断：中文/书名号是双宽，按字符数裁会把显示宽度算错。
+unicode-width = "0.2.2"
 url = "2.5.8"
 
 # 平台各要一点系统接口：Unix 的 `flock`/`localtime_r`，Windows 的

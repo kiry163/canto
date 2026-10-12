@@ -67,25 +67,52 @@ impl App {
         }
     }
 
-    /// 内容区标题：面包屑，外加「筛选」徽标（知道自己在看子集、剩下几条）。
+    /// 内容区标题：面包屑 + 「这一屏有多少条」，外加「筛选」徽标。
+    ///
+    /// 计数挂在这里而不是状态行：它是**这个视图的属性**，不像通知那样说完就走；
+    /// 位置也是现成的（这块标题本来就挂筛选徽标）。筛过之后只报命中/总数。
     fn content_title(&self) -> String {
-        // 历史那屏的条数是现算的派生信息，不进导航状态——以前它存在标题里，
-        // 记录一条播放历史就会把**别的屏**的标题改写成「历史（N 条）」。
-        let title = if self.nav.menu == Menu::History {
-            if self.history.is_empty() {
-                "历史".to_string()
-            } else {
-                format!("历史（{} 条）", self.history.len())
-            }
-        } else {
-            self.nav.title_chain().join(" › ")
-        };
+        let (title, count, unit) = self.title_and_count();
         let keyword = self.nav.filter_text();
         if keyword.is_empty() {
-            return format!(" {title} ");
+            return format!(" {title} {count} {unit} ");
         }
         let (hits, total) = self.nav.filter_counts();
         format!(" {title} 筛选「{keyword}」{hits}/{total} ")
+    }
+
+    /// 面包屑（带层级）与这一屏的条数。
+    ///
+    /// 历史那屏的条数是现算的派生信息，不进导航状态——以前它存在标题里，
+    /// 记录一条播放历史就会把**别的屏**的标题改写成「历史（N 条）」。
+    fn title_and_count(&self) -> (String, usize, &'static str) {
+        match (self.nav.menu, self.nav.shown.is_some()) {
+            (Menu::Playlists, true) => (
+                self.nav.title_chain().join(" › "),
+                self.nav.tracks.items().len(),
+                "首",
+            ),
+            (Menu::Playlists, false) => (
+                self.nav.menu.title().to_string(),
+                self.nav.playlists.items().len(),
+                "个",
+            ),
+            (Menu::Favorites, _) => (
+                self.nav.menu.title().to_string(),
+                self.nav.favorites.items().len(),
+                "首",
+            ),
+            (Menu::Search, _) => (
+                self.nav.menu.title().to_string(),
+                self.nav.search_results.items().len(),
+                "首",
+            ),
+            (Menu::History, _) => (
+                self.nav.menu.title().to_string(),
+                self.history.len(),
+                "条",
+            ),
+        }
     }
 
     /// `/` 打开的筛选输入行。

@@ -25,6 +25,8 @@ pub struct Config {
     /// 播放缓存上限（MiB）；0 = 关掉缓存。
     pub cache_mb: u64,
     pub history_limit: usize,
+    /// 状态行右侧通知的存活秒数；0 = 不自动消失（只被下一条顶掉）。
+    pub notice_seconds: u64,
 }
 
 impl Default for Config {
@@ -36,6 +38,7 @@ impl Default for Config {
             lyrics_dir: default_lyrics_dir(),
             cache_mb: DEFAULT_CACHE_MB,
             history_limit: 500,
+            notice_seconds: 4,
         }
     }
 }
@@ -66,6 +69,7 @@ struct Raw {
     /// 缓存上限（MiB）；0 = 关掉缓存。
     cache_mb: Option<u64>,
     history_limit: Option<usize>,
+    notice_seconds: Option<u64>,
 }
 
 impl Raw {
@@ -92,8 +96,36 @@ impl Raw {
         if let Some(limit) = self.history_limit {
             config.history_limit = limit.max(1);
         }
+        if let Some(seconds) = self.notice_seconds {
+            config.notice_seconds = seconds;
+        }
         config
     }
+}
+
+/// 把一段文本写成 TOML 字符串。
+///
+/// 优先用**字面串**（单引号）：Windows 路径里的 `\` 在基本串里是转义起始符，
+/// `C:\Users` 的 `\U` 是非法转义，会让**整个配置文件**判成坏文件（实测：Windows 上
+/// 每次启动都弹一次「解析失败」）。文本里真有单引号时才退回基本串，把反斜杠与引号转义掉。
+fn toml_literal(text: &str) -> String {
+    if !text.contains('\'') {
+        return format!("'{text}'");
+    }
+    let mut escaped = String::with_capacity(text.len() + 2);
+    escaped.push('"');
+    for character in text.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            other => escaped.push(other),
+        }
+    }
+    escaped.push('"');
+    escaped
 }
 
 /// `~/Music/canto` → `$HOME/Music/canto`。手写配置时一定会写 `~`，
@@ -108,7 +140,8 @@ pub fn expand_home(text: &str) -> PathBuf {
 }
 
 /// 载入配置。文件不存在则**生成一份默认配置**（让使用者知道有这个文件可改）。
-/// 返回的 `Option<String>` 是给状态行的一次性警告。
+/// 返回的 `Option<String>` 是给状态行的一次性警告——**短句**：通知位只有 32 列，
+/// 细节（路径、解析器原文）走日志。
 pub fn load() -> (Config, Option<String>) {
     let path = paths::config_path();
     if !path.exists() {
@@ -122,20 +155,16 @@ fn load_file(path: &Path) -> (Config, Option<String>) {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) => {
-            return (
-                Config::default(),
-                Some(format!("读 {} 失败：{error}", path.display())),
-            );
+            tracing::warn!("读 {} 失败：{error}", path.display());
+            return (Config::default(), Some("配置读不到，改用默认值".to_string()));
         }
     };
     let mut warnings = Vec::new();
     let raw = match toml::from_str::<Raw>(&text) {
         Ok(raw) => raw,
         Err(error) => {
-            return (
-                Config::default(),
-                Some(format!("{} 解析失败，用默认配置：{error}", path.display())),
-            );
+            tracing::warn!("{} 解析失败：{error}", path.display());
+            return (Config::default(), Some("配置坏了，改用默认值".to_string()));
         }
     };
     let config = raw.resolve(&mut warnings);
@@ -164,6 +193,9 @@ fn write_default(path: &Path) -> Result<()> {
             )
         })
         .collect();
+    // 路径按平台来：Windows 上是 `C:\Users\...`，必须写成字面串（见 `toml_literal`）。
+    let download_dir = toml_literal(&default.download_dir.to_string_lossy());
+    let lyrics_dir = toml_literal(&default.lyrics_dir.to_string_lossy());
     let text = format!(
         "# canto 配置。改完重启 canto 生效。\n\
          #\n\
@@ -172,19 +204,22 @@ fn write_default(path: &Path) -> Result<()> {
          quality = \"{}\"\n\
          #\n\
          # 下载目录（`d` 键落盘的歌曲），支持 `~`\n\
-         download_dir = \"{}\"\n\
+         download_dir = {}\n\
          # 歌词目录（下载时另存的 .lrc，跟歌曲分开放），支持 `~`\n\
-         lyrics_dir = \"{}\"\n\
+         lyrics_dir = {}\n\
          # 播放缓存上限（MB，0 = 关掉）；缓存在 {}，按「最久没听的先删」维护\n\
          cache_mb = {}\n\
          # 播放历史最多保留多少条\n\
-         history_limit = {}\n",
+         history_limit = {}\n\
+         # 状态行右侧那条通知存活多少秒（0 = 不自动消失，只被下一条顶掉）\n\
+         notice_seconds = {}\n",
         default.quality.token(),
-        default.download_dir.display(),
-        default.lyrics_dir.display(),
+        download_dir,
+        lyrics_dir,
         paths::cache_dir().display(),
         default.cache_mb,
         default.history_limit,
+        default.notice_seconds,
     );
     std::fs::write(path, text).with_context(|| format!("写 {} 失败", path.display()))
 }
@@ -192,6 +227,7 @@ fn write_default(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use unicode_width::UnicodeWidthStr;
 
     fn load_from(tag: &str, text: &str) -> (Config, Option<String>) {
         let dir = std::env::temp_dir().join(format!("canto-config-{}-{tag}", std::process::id()));
@@ -213,7 +249,21 @@ mod tests {
         assert_eq!(config.lyrics_dir, default_lyrics_dir());
         assert_eq!(config.cache_mb, DEFAULT_CACHE_MB);
         assert_eq!(config.history_limit, 500);
+        assert_eq!(config.notice_seconds, 4);
         assert!(warning.is_none(), "缺字段不是错误：{warning:?}");
+    }
+
+    /// 状态行通知的存活时间：默认 4 秒，`0` = 不自动消失。
+    #[test]
+    fn notice_seconds_defaults_to_four_and_zero_means_never() {
+        assert_eq!(Config::default().notice_seconds, 4, "默认 4 秒");
+
+        let (config, warning) = load_from("notice-zero", "notice_seconds = 0\n");
+        assert_eq!(config.notice_seconds, 0, "0 要原样保留（= 不过期）");
+        assert!(warning.is_none(), "0 是合法取值，不该警告：{warning:?}");
+
+        let (config, _) = load_from("notice-30", "notice_seconds = 30\n");
+        assert_eq!(config.notice_seconds, 30);
     }
 
     #[test]
@@ -266,6 +316,10 @@ mod tests {
         );
         assert!(text.contains("lyrics_dir"), "歌词目录要出现在模板里：{text}");
         assert!(text.contains("cache_mb"), "缓存上限要出现在模板里：{text}");
+        assert!(
+            text.contains("notice_seconds"),
+            "通知存活秒数要出现在模板里：{text}"
+        );
         // 模板本身必须是能解析回去的合法配置。
         let (config, warning) = load_file(&path);
         assert_eq!(config, Config::default(), "{warning:?}");
@@ -276,7 +330,44 @@ mod tests {
     fn broken_toml_falls_back_to_defaults_with_a_warning() {
         let (config, warning) = load_from("broken", "quality = \n");
         assert_eq!(config, Config::default());
-        assert!(warning.expect("应给出警告").contains("解析失败"));
+        assert!(warning.expect("应给出警告").contains("默认值"));
+    }
+
+    /// 模板里的路径要写成 TOML **字面串**：`C:\Users\...` 里那个 `\U` 是非法转义，
+    /// 用基本串（双引号）写会让整个配置文件被判成坏文件——Windows 上实测每次启动都弹警告。
+    #[test]
+    fn windows_paths_survive_the_template_round_trip() {
+        let text = format!(
+            "download_dir = {}\nlyrics_dir = {}\n",
+            toml_literal(r"C:\Users\me\Music\canto"),
+            toml_literal(r"C:\Users\me\Music\canto-lyrics"),
+        );
+        let (config, warning) = load_from("win-path", &text);
+        assert!(warning.is_none(), "路径不该让配置解析失败：{warning:?}");
+        assert_eq!(
+            config.download_dir,
+            PathBuf::from(r"C:\Users\me\Music\canto")
+        );
+        assert_eq!(
+            config.lyrics_dir,
+            PathBuf::from(r"C:\Users\me\Music\canto-lyrics")
+        );
+    }
+
+    /// 给状态行的那句警告必须短——通知位固定 32 列（见 `tui/draw/status.rs`），
+    /// 长版本（带路径与解析器原文）会被截成没用的半句话；详情进日志。
+    #[test]
+    fn a_config_warning_fits_the_status_bar() {
+        let (_, warning) = load_from("broken-short", "quality = \n");
+        let warning = warning.expect("应给出警告");
+        assert!(
+            !warning.contains("config.toml") && !warning.contains("quality"),
+            "警告里不该带路径或解析器原文：{warning}"
+        );
+        assert!(
+            UnicodeWidthStr::width(warning.as_str()) <= 32,
+            "警告要能塞进 32 列：{warning}"
+        );
     }
 
     #[test]

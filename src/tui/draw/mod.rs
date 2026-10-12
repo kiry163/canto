@@ -306,7 +306,7 @@ mod tests {
         let (mut app, _runtime) = test_app();
         app.nav.switch_menu(Menu::Playlists);
         app.nav.push_tracks("1", "嗯", vec![test_song("a")]);
-        app.status = "已加载《嗯》".to_string();
+        app.notify("已加载《嗯》");
         let text = frame_flat(&mut app, 160, 40);
         assert!(text.contains("我的歌单›嗯"), "面包屑要带层级：{text}");
         // 菜单栏没了：整帧里不该再出现菜单那几行。
@@ -576,16 +576,19 @@ mod tests {
         }
         app.switch_menu(Menu::History);
         let history = frame_flat(&mut app, 120, 30);
-        assert!(history.contains("历史（2条）"), "历史标题带条数：{history}");
+        assert!(history.contains("历史2条"), "历史标题带条数：{history}");
 
         app.switch_menu(Menu::Favorites);
         app.nav.favorites.set_items(vec![test_song("a")]);
         let favorites = frame_flat(&mut app, 120, 30);
         assert!(favorites.contains("我的收藏"), "{favorites}");
-        assert!(!favorites.contains("历史（"), "切走之后不该还挂着历史标题：{favorites}");
+        assert!(
+            !favorites.contains("历史2条"),
+            "切走之后不该还挂着历史标题：{favorites}"
+        );
     }
 
-    /// 回归：在别的屏播放（= 记一条播放历史）之后，那一屏的标题不能被改写成「历史（N 条）」。
+    /// 回归：在别的屏播放（= 记一条播放历史）之后，那一屏的标题不能被改写成「历史 N 条」。
     ///
     /// 以前标题是存在 `breadcrumb` 里的，`refresh_history_view` 一跑就把它覆盖成历史屏的标题。
     #[test]
@@ -599,7 +602,7 @@ mod tests {
         app.record_history(&test_song("b"));
         let text = frame_flat(&mut app, 120, 30);
         assert!(text.contains("我的收藏"), "标题还是当前屏：{text}");
-        assert!(!text.contains("历史（"), "不该出现历史标题：{text}");
+        assert!(!text.contains("历史1条"), "不该出现历史标题：{text}");
     }
 
     /// 队列浮层只盖内容区：播放条还在下面，标题也不写「来自某歌单」。
@@ -701,5 +704,76 @@ mod tests {
         let text = frame_flat(&mut app, 40, 10);
         assert!(text.contains("终端太小"), "小窗口只给一句提示：{text}");
         assert!(!text.contains("♪"), "不再画播放条");
+    }
+
+    /// 状态行右侧是**固定 32 列**的通知位：长了就按显示宽度截断（中文双宽），
+    /// 而且是省略号收尾——不然长错误链会把左边的键位提示挤掉、还看不清被裁到哪。
+    #[test]
+    fn the_notice_slot_is_fixed_width_and_truncates_with_an_ellipsis() {
+        let (mut app, _runtime) = test_app();
+        app.notify("下载失败：网络断了");
+        let short = frame_flat(&mut app, 120, 30);
+        assert!(short.contains("下载失败：网络断了"), "短信该整条画出来：{short}");
+
+        let long = "这是一条特别长的通知".repeat(4);
+        app.notify(long.clone());
+        let text = frame_flat(&mut app, 120, 30);
+        assert!(!text.contains(&long), "超长通知不该整条画出来：{text}");
+        assert!(text.contains('…'), "该以省略号收尾：{text}");
+        // 32 列里留 1 列给省略号 → 15 个汉字（每字 2 列）。
+        assert!(
+            text.contains("这是一条特别长的通知这是一条特…"),
+            "该截到 15 个字再加省略号：{text}"
+        );
+        // 固定宽度的意义：不动左边那半行键位提示。
+        assert!(text.contains("Enter播放·Space暂停"), "键位提示不该被挤掉：{text}");
+    }
+
+    /// 各屏「有多少条」挂在内容块标题上——右区只放通知，不再报计数。
+    #[test]
+    fn the_title_reports_how_many_rows_each_screen_holds() {
+        let (mut app, _runtime) = test_app();
+
+        app.switch_menu(Menu::Favorites);
+        app.nav.favorites.set_items(vec![test_song("a"), test_song("b")]);
+        let favorites = frame_flat(&mut app, 120, 30);
+        assert!(favorites.contains("我的收藏2首"), "{favorites}");
+
+        app.switch_menu(Menu::Playlists);
+        app.nav.playlists.set_items(vec![
+            crate::tui::test_support::test_playlist("1", "嗯"),
+            crate::tui::test_support::test_playlist("2", "循环"),
+        ]);
+        let playlists = frame_flat(&mut app, 120, 30);
+        assert!(playlists.contains("我的歌单2个"), "{playlists}");
+
+        app.nav.push_tracks("1", "嗯", vec![test_song("a")]);
+        let tracks = frame_flat(&mut app, 120, 30);
+        assert!(tracks.contains("我的歌单›嗯1首"), "{tracks}");
+
+        app.switch_menu(Menu::Search);
+        app.nav.search_results.set_items(vec![test_song("a")]);
+        let search = frame_flat(&mut app, 120, 30);
+        assert!(search.contains("搜索1首"), "{search}");
+
+        app.switch_menu(Menu::History);
+        let history = frame_flat(&mut app, 120, 30);
+        assert!(history.contains("历史0条"), "{history}");
+    }
+
+    /// 筛过之后标题只报「命中/总数」——别变成「2 首 筛选「非酋」1/2」那种重复。
+    #[test]
+    fn a_filtered_title_reports_hits_instead_of_the_total() {
+        let (mut app, _runtime) = test_app();
+        app.switch_menu(Menu::Favorites);
+        app.nav.favorites.set_items(vec![
+            crate::tui::test_support::titled_song("a", "晴天", "周杰伦"),
+            crate::tui::test_support::titled_song("b", "非酋", "薛明媛"),
+        ]);
+        app.nav.set_filter("非酋");
+
+        let text = frame_flat(&mut app, 120, 30);
+        assert!(text.contains("筛选「非酋」1/2"), "{text}");
+        assert!(!text.contains("2首"), "筛过之后不该再挂一个总数：{text}");
     }
 }

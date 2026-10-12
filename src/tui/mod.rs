@@ -55,7 +55,7 @@ pub fn run(
         app.start_login();
     }
     if let Some(warning) = warning {
-        app.status = warning;
+        app.notify(warning);
     }
     app.load_initial();
 

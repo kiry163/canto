@@ -5,6 +5,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::event::KeyEvent;
@@ -75,10 +76,7 @@ pub(super) enum Msg {
         result: Result<Vec<Candidate>>,
     },
     /// 搜索结果。
-    Search {
-        keyword: String,
-        result: Result<Vec<Song>>,
-    },
+    Search(Result<Vec<Song>>),
     /// 歌单写入（加歌单 / 移除）的结果；`refresh` 是要重新拉取的歌单。
     Wrote {
         done: String,
@@ -498,6 +496,18 @@ pub(super) struct Transfer {
     outcome: Option<String>,
 }
 
+/// 状态行右侧的**一条**通知。
+///
+/// 只有一把槽：新消息直接顶掉旧的，`config.notice_seconds` 秒后自己消失（0 = 不消失）。
+/// `soft` 标记的是**在飞操作的进度**——它每 tick 重写自己，但不许抢占刚发生的一次性消息
+/// （否则下载进度一刷新，刚才那句「已插队…」就没人看得见了）。
+#[derive(Debug)]
+pub(super) struct Notice {
+    pub(super) text: String,
+    born: Instant,
+    soft: bool,
+}
+
 /// 一次歌单写入的意图（界面线程 → 后台任务）。
 pub(super) struct WriteRequest {
     /// 进行中时状态栏的文案。
@@ -576,10 +586,8 @@ pub(super) struct App {
     /// 正在跑的下载。
     pub(super) transfer: Option<Arc<Mutex<Transfer>>>,
 
-    /// 正在后台做的事（状态栏）。
-    pub(super) loading: Option<String>,
-    /// 一次性提示（错误、结果）。
-    pub(super) status: String,
+    /// 状态行右侧的通知（进度与一次性消息共用这一把槽）。
+    pub(super) notice: Option<Notice>,
     pub(super) quit: bool,
 }
 
@@ -621,16 +629,72 @@ impl App {
             queue_state: ListState::default(),
             picker: None,
             transfer: None,
-            loading: None,
-            status: "正在加载歌单…".to_string(),
+            notice: None,
             quit: false,
         }
+    }
+
+    // -- 状态行那条通知 ------------------------------------------------------
+
+    /// 一次性消息（动作结果、错误、警告）：抢占槽位并重新计时。
+    pub(super) fn notify(&mut self, text: impl Into<String>) {
+        self.notice = Some(Notice {
+            text: text.into(),
+            born: Instant::now(),
+            soft: false,
+        });
+    }
+
+    /// 在飞操作的进度 / 加载文案：槽空着、已过期，或者槽里本来就是它自己时才写。
+    /// 刚发生的一次性消息不会被它冲掉（下载中按 `a` 也要看得见「已插队…」）。
+    pub(super) fn notify_progress(&mut self, text: impl Into<String>) {
+        let now = Instant::now();
+        let replaceable = match &self.notice {
+            None => true,
+            Some(notice) => notice.soft || self.expired(notice, now),
+        };
+        if replaceable {
+            self.notice = Some(Notice {
+                text: text.into(),
+                born: now,
+                soft: true,
+            });
+        }
+    }
+
+    /// 在飞操作收工：只撤掉进度那条，不碰一次性消息。
+    pub(super) fn clear_progress(&mut self) {
+        if self.notice.as_ref().is_some_and(|notice| notice.soft) {
+            self.notice = None;
+        }
+    }
+
+    /// 到点了就把通知撤掉。每帧调一次，所以精度就是一个 tick。
+    pub(super) fn expire(&mut self, now: Instant) {
+        if self
+            .notice
+            .as_ref()
+            .is_some_and(|notice| self.expired(notice, now))
+        {
+            self.notice = None;
+        }
+    }
+
+    /// `notice_seconds = 0` = 不自动过期（只被下一条顶掉）。
+    fn expired(&self, notice: &Notice, now: Instant) -> bool {
+        let ttl = Duration::from_secs(self.config.notice_seconds);
+        !ttl.is_zero() && now.saturating_duration_since(notice.born) >= ttl
+    }
+
+    /// 状态行右侧要画的那句话（没有就是空）。
+    pub(super) fn notice_text(&self) -> Option<&str> {
+        self.notice.as_ref().map(|notice| notice.text.as_str())
     }
 
     // -- 数据加载（都在后台线程，结果走通道回来） ----------------------------
 
     pub(super) fn reload_playlists(&mut self) {
-        self.loading = Some("加载歌单…".to_string());
+        self.notify_progress("加载歌单…");
         let tx = self.tx.clone();
         self.handle.spawn(async move {
             let _ = tx.send(Msg::Playlists(qq::user_playlists().await));
@@ -639,7 +703,7 @@ impl App {
 
     /// 拉「我喜欢」。它是菜单第一项，启动即拉。
     pub(super) fn reload_favorites(&mut self) {
-        self.loading = Some("加载「我喜欢」…".to_string());
+        self.notify_progress("加载「我喜欢」…");
         let tx = self.tx.clone();
         self.handle.spawn(async move {
             let result = qq::favorites().await.map(|(_, songs)| songs);
@@ -667,7 +731,7 @@ impl App {
     }
 
     fn load_tracks(&mut self, id: String, name: String) {
-        self.loading = Some(format!("加载《{name}》…"));
+        self.notify_progress(format!("加载《{name}》…"));
         let tx = self.tx.clone();
         let task_id = id.clone();
         self.handle.spawn(async move {
@@ -686,7 +750,7 @@ impl App {
     /// 下载选中的那首（含歌词），进度走状态栏。
     fn download_selected(&mut self) {
         if self.transfer.is_some() {
-            self.status = "已经有一个下载在跑".to_string();
+            self.notify("已经有一个下载在跑");
             return;
         }
         let Some(song) = self.selected_song() else {
@@ -705,7 +769,7 @@ impl App {
             outcome: None,
         }));
         self.transfer = Some(transfer.clone());
-        self.loading = Some(format!("下载《{}》…", song.title));
+        self.notify_progress(format!("下载《{}》…", song.title));
         // 下载是阻塞 I/O（`reqwest::blocking`），放独立线程；取候选/歌词走运行时。
         let handle = self.handle.clone();
         std::thread::spawn(move || {
@@ -773,7 +837,7 @@ impl App {
             tid,
             add,
         } = request;
-        self.loading = Some(busy);
+        self.notify_progress(busy);
         let tx = self.tx.clone();
         self.handle.spawn(async move {
             let songs = std::slice::from_ref(&song);
@@ -796,7 +860,7 @@ impl App {
             return;
         };
         if self.nav.playlists.is_empty() {
-            self.status = "歌单还没加载出来".to_string();
+            self.notify("歌单还没加载出来");
             return;
         }
         let mut state = ListState::default();
@@ -845,7 +909,7 @@ impl App {
             .iter()
             .find(|playlist| playlist.id == id)
         else {
-            self.status = "当前不是个人歌单，没法移除".to_string();
+            self.notify("当前不是个人歌单，没法移除");
             return;
         };
         let request = WriteRequest {
@@ -862,11 +926,11 @@ impl App {
 
     /// 起一个后台搜索。
     fn search(&mut self, keyword: String) {
-        self.loading = Some(format!("搜索「{keyword}」…"));
+        self.notify_progress(format!("搜索「{keyword}」…"));
         let tx = self.tx.clone();
         self.handle.spawn(async move {
             let result = qq::search::songs(&keyword, 40).await;
-            let _ = tx.send(Msg::Search { keyword, result });
+            let _ = tx.send(Msg::Search(result));
         });
     }
 
@@ -877,7 +941,7 @@ impl App {
         };
         self.request += 1;
         let request = self.request;
-        self.loading = Some(format!("取流《{}》…", song.title));
+        self.notify_progress(format!("取流《{}》…", song.title));
         // 换歌先把旧歌词撤掉，免得新旧串行显示。
         self.lyric = None;
         self.lyric_loading = true;
@@ -951,10 +1015,10 @@ impl App {
         }
         if front {
             self.queue.insert_next(song.clone());
-            self.status = format!("已插队：{} — {}", song.title, song.singers);
+            self.notify(format!("已插队：{} — {}", song.title, song.singers));
         } else {
             self.queue.push_back(song.clone());
-            self.status = format!("已加进队列：{} — {}", song.title, song.singers);
+            self.notify(format!("已加进队列：{} — {}", song.title, song.singers));
         }
     }
 
@@ -963,11 +1027,11 @@ impl App {
         match step {
             queue::Step::Play(index) => self.start(index),
             queue::Step::Stop => {
-                self.status = if self.queue.is_empty() {
-                    "队列已空".to_string()
+                self.notify(if self.queue.is_empty() {
+                    "队列已空"
                 } else {
-                    "队列播完".to_string()
-                };
+                    "队列播完"
+                });
             }
         }
     }
@@ -1019,11 +1083,11 @@ impl App {
                 }
             }
             Msg::Favorites(result) => {
-                self.loading = None;
+                self.clear_progress();
                 self.nav.favorites_loaded = true;
                 match result {
                     Ok(songs) => {
-                        self.status = format!("我喜欢：{} 首", songs.len());
+                        // 条数由内容块标题报（`我的收藏 489 首`），这里不再重复一遍。
                         self.nav.favorites.set_items(songs);
                     }
                     Err(error) => {
@@ -1033,13 +1097,12 @@ impl App {
                 }
             }
             Msg::Playlists(result) => {
-                self.loading = None;
+                self.clear_progress();
                 self.nav.playlists_loaded = true;
                 match result {
                     Ok(mut playlists) => {
                         // 「我喜欢」在菜单里是单独一项，不在「我的歌单」里重复出现。
                         playlists.retain(|playlist| !playlist.is_favorites);
-                        self.status = format!("共 {} 个歌单", playlists.len());
                         self.nav.playlists.set_items(playlists);
                     }
                     Err(error) => {
@@ -1052,22 +1115,18 @@ impl App {
                 playlist_id,
                 result,
             } => {
-                self.loading = None;
+                self.clear_progress();
                 match result {
                     Ok((playlist, songs)) => {
-                        self.status = format!("《{}》{} 首", playlist.name, songs.len());
                         self.nav.push_tracks(&playlist_id, &playlist.name, songs);
                     }
                     Err(error) => self.note_error(&error),
                 }
             }
-            Msg::Search { keyword, result } => {
-                self.loading = None;
+            Msg::Search(result) => {
+                self.clear_progress();
                 match result {
-                    Ok(songs) => {
-                        self.status = format!("搜索「{keyword}」：{} 首", songs.len());
-                        self.nav.search_results.set_items(songs);
-                    }
+                    Ok(songs) => self.nav.search_results.set_items(songs),
                     Err(error) => {
                         self.nav.search_results.error = Some(format!("{error:#}"));
                         self.note_error(&error);
@@ -1079,17 +1138,17 @@ impl App {
                 refresh,
                 result,
             } => {
-                self.loading = None;
-                self.status = match result {
+                self.clear_progress();
+                match result {
                     Ok(()) => {
                         // 移除后右栏就过期了，重新拉一遍。
                         if let Some((id, name)) = refresh {
                             self.load_tracks(id, name);
                         }
-                        done
+                        self.notify(done);
                     }
-                    Err(error) => format!("{error:#}"),
-                };
+                    Err(error) => self.note_error(&error),
+                }
             }
             Msg::Lyric {
                 request,
@@ -1106,7 +1165,7 @@ impl App {
                     tracing::debug!("丢弃过期的取流结果（{}）", song.title);
                     return;
                 }
-                self.loading = None;
+                self.clear_progress();
                 match result {
                     Ok(candidates) => {
                         tracing::info!("取到 {} 个候选档位：{}", candidates.len(), song.title);
@@ -1125,13 +1184,14 @@ impl App {
                         let reason = format!("{error:#}");
                         if self.skipped < MAX_AUTO_SKIPS {
                             self.skipped += 1;
-                            self.status = format!("{reason}（已跳到下一首）");
+                            self.notify(format!("{reason}（已跳到下一首）"));
                             tracing::info!("跳过不可播的《{}》：{reason}", song.title);
                             let step = self.queue.advance();
                             self.step(step);
                         } else {
-                            self.status =
-                                format!("{reason}（连续 {MAX_AUTO_SKIPS} 首不可播，已停下）");
+                            self.notify(format!(
+                                "{reason}（连续 {MAX_AUTO_SKIPS} 首不可播，已停下）"
+                            ));
                         }
                     }
                 }
@@ -1205,7 +1265,7 @@ impl App {
                     match self.history.clear(&self.history_path) {
                         Ok(()) => {
                             self.refresh_history_view();
-                            self.status = "已清空播放历史".to_string();
+                            self.notify("已清空播放历史");
                         }
                         Err(error) => self.note_error(&error),
                     }
@@ -1215,7 +1275,7 @@ impl App {
             keys::Action::QueueClear => {
                 self.queue.clear();
                 self.queue_state.select(None);
-                self.status = "队列已清空（当前这首不受影响）".to_string();
+                self.notify("队列已清空（当前这首不受影响）");
             }
             keys::Action::Menu(index) => {
                 if let Some(menu) = Menu::ALL.get(index).copied() {
@@ -1272,7 +1332,7 @@ impl App {
             keys::Action::InsertQueue => self.push_to_queue(true),
             keys::Action::CycleMode => {
                 let mode = self.queue.cycle_mode();
-                self.status = format!("播放模式：{}", mode.label());
+                self.notify(format!("播放模式：{}", mode.label()));
             }
             keys::Action::SeekBack => self.engine.seek_by(-10),
             keys::Action::SeekForward => self.engine.seek_by(10),
@@ -1387,7 +1447,7 @@ impl App {
     fn finish_login(&mut self, identity: String) {
         tracing::info!("登录成功：{identity}");
         self.screen = Screen::Main;
-        self.status = format!("已登录：{identity}");
+        self.notify(format!("已登录：{identity}"));
         self.switch_menu(Menu::Favorites);
     }
 
@@ -1399,7 +1459,9 @@ impl App {
             self.sign_out("会话已过期，请重新登录");
             return;
         }
-        self.status = format!("{error:#}");
+        // 状态行只有 32 列：这里报**一句**原因，完整链条进日志（`--log` 看）。
+        tracing::warn!("{error:#}");
+        self.notify(error.to_string());
     }
 
     /// 会话失效或被手动登出：清掉本地会话、回登录屏。
@@ -1421,7 +1483,7 @@ impl App {
             return;
         }
         if self.queue.is_empty() {
-            self.status = "队列是空的".to_string();
+            self.notify("队列是空的");
             return;
         }
         self.queue_state.select(Some(self.queue.index()));
@@ -1453,7 +1515,7 @@ impl App {
         if self.queue.is_empty() {
             self.queue_state.select(None);
             self.queue_open = false;
-            self.status = "队列已空".to_string();
+            self.notify("队列已空");
             return;
         }
         let next = index.min(self.queue.len() - 1);
@@ -1540,7 +1602,7 @@ impl App {
     /// `n` / `b`：按当前模式在队列里前进 / 后退。
     fn play_relative(&mut self, forward: bool) {
         if self.queue.is_empty() {
-            self.status = "队列是空的".to_string();
+            self.notify("队列是空的");
             return;
         }
         self.skipped = 0;
@@ -1552,11 +1614,11 @@ impl App {
         match step {
             queue::Step::Play(index) => self.start(index),
             queue::Step::Stop => {
-                self.status = if forward {
-                    "已经是最后一首".to_string()
+                self.notify(if forward {
+                    "已经是最后一首"
                 } else {
-                    "已经是第一首".to_string()
-                };
+                    "已经是第一首"
+                });
             }
         }
     }
@@ -1648,6 +1710,8 @@ impl App {
     pub(super) fn tick(&mut self) {
         // 频谱：只在全屏视图开着且正在播时取，别的屏不付这份算力。
         let now = std::time::Instant::now();
+        // 通知到点自己消失（`notice_seconds = 0` 表示不消失）。
+        self.expire(now);
         let elapsed = now.saturating_duration_since(self.last_tick);
         self.last_tick = now;
         if self.spectrum_wanted() {
@@ -1663,17 +1727,17 @@ impl App {
         }
         self.poll_transfer();
         if !self.engine.is_alive() {
-            self.status = "音频线程已退出，重启 canto".to_string();
+            self.notify("音频线程已退出，重启 canto");
             return;
         }
         if self.engine.take_finished() {
             let snapshot = self.engine.snapshot();
             if !snapshot.completed() {
-                self.status = format!(
+                self.notify(format!(
                     "《{}》流被中断（只播了 {:.0} 秒）",
                     snapshot.title.unwrap_or_default(),
                     snapshot.position.as_secs_f64()
-                );
+                ));
             }
             let step = self.queue.advance();
             self.step(step);
@@ -1689,15 +1753,15 @@ impl App {
             let outcome = outcome.clone();
             drop(state);
             self.transfer = None;
-            self.loading = None;
-            self.status = outcome;
+            self.clear_progress();
+            self.notify(outcome);
             return;
         }
         let (received, total) = (
             state.received.load(Ordering::Relaxed),
             state.total.load(Ordering::Relaxed),
         );
-        self.loading = Some(
+        self.notify_progress(
             match received
                 .checked_mul(100)
                 .and_then(|scaled| scaled.checked_div(total))
@@ -2145,7 +2209,11 @@ mod tests {
         app.push_to_queue(true);
         assert_eq!(app.queue.items()[1].mid, "c", "A 插到当前项后面");
         assert_eq!(app.queue.index(), 0, "插队不动当前项");
-        assert!(app.status.contains("已插队"), "状态行要说明做了什么：{}", app.status);
+        assert!(
+            notice(&app).contains("已插队"),
+            "状态行要说明做了什么：{}",
+            notice(&app)
+        );
     }
 
     /// 删队列里「不是当前项」的那首：队列短一格，播放不动（也不去取流）。
@@ -2170,7 +2238,7 @@ mod tests {
         app.queue = queue::Queue::new(vec![test_song("a"), test_song("b")], 0, "嗯");
         app.apply(keys::Action::QueueClear);
         assert!(app.queue.is_empty());
-        assert!(app.status.contains("已清空"), "{}", app.status);
+        assert!(notice(&app).contains("已清空"), "{}", notice(&app));
     }
 
     #[test]
@@ -2190,7 +2258,7 @@ mod tests {
         let (mut app, _runtime) = crate::tui::test_support::test_app();
         app.apply(keys::Action::QueueOverlay);
         assert!(!app.queue_open);
-        assert_eq!(app.status, "队列是空的");
+        assert_eq!(notice(&app), "队列是空的");
     }
 
     #[test]
@@ -2199,7 +2267,7 @@ mod tests {
         for expected in ["列表循环", "单曲", "随机", "顺序"] {
             app.apply(keys::Action::CycleMode);
             assert_eq!(app.queue.mode().label(), expected);
-            assert!(app.status.contains(expected), "{}", app.status);
+            assert!(notice(&app).contains(expected), "{}", notice(&app));
         }
     }
 
@@ -2245,7 +2313,7 @@ mod tests {
         app.apply(keys::Action::HistoryClear);
         assert!(app.history.is_empty());
         assert!(app.nav.history_view.items().is_empty());
-        assert_eq!(app.status, "已清空播放历史");
+        assert_eq!(notice(&app), "已清空播放历史");
         assert!(!app.history_path.exists(), "磁盘上的也清了");
     }
 
@@ -2328,5 +2396,78 @@ mod tests {
         };
         assert_eq!(state.selected(), Some(1), "j 该挪选择框的高亮");
         assert_eq!(app.nav.favorites.state.selected(), Some(0), "底下那份列表不许动");
+    }
+
+    // -- 状态行右侧的通知 ---------------------------------------------------
+
+    /// `now + N 秒`：过期判断吃显式时刻，测试就不用 sleep。
+    fn after(seconds: u64) -> std::time::Instant {
+        std::time::Instant::now() + std::time::Duration::from_secs(seconds)
+    }
+
+    /// 状态行右侧现在那句话（没有通知就是空串）。
+    fn notice(app: &App) -> String {
+        app.notice_text().unwrap_or_default().to_string()
+    }
+
+    /// 默认 4 秒后自己消失——状态行不会一直挂着上一件事。
+    #[test]
+    fn a_notice_goes_away_after_the_configured_seconds() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.notify("已插队：晴天");
+
+        app.expire(after(3));
+        assert_eq!(app.notice_text(), Some("已插队：晴天"), "3 秒还该在");
+
+        app.expire(after(5));
+        assert_eq!(app.notice_text(), None, "超过 4 秒该消失");
+    }
+
+    /// `notice_seconds = 0`：不自动消失，只被下一条顶掉。
+    #[test]
+    fn zero_seconds_keeps_a_notice_until_it_is_replaced() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.config.notice_seconds = 0;
+
+        app.notify("播放模式：单曲");
+        app.expire(after(3600));
+        assert_eq!(app.notice_text(), Some("播放模式：单曲"));
+
+        app.notify("队列已清空");
+        assert_eq!(app.notice_text(), Some("队列已清空"), "新的一条顶掉旧的");
+    }
+
+    /// 在飞的操作（下载 / 加载）是软写：不抢刚发生的那条消息，等它过期再接着报。
+    #[test]
+    fn progress_writes_never_steal_a_fresh_notice() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.notify("已插队：晴天");
+
+        app.notify_progress("下载 40%…");
+        assert_eq!(app.notice_text(), Some("已插队：晴天"), "进度不许抢那条消息");
+
+        app.expire(after(5));
+        app.notify_progress("下载 45%…");
+        assert_eq!(app.notice_text(), Some("下载 45%…"), "消息过期后进度接着报");
+    }
+
+    /// 进度自己刷新自己；收工时只清进度，不误清一次性消息。
+    #[test]
+    fn progress_refreshes_itself_and_clears_only_itself() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.notify_progress("下载 10%…");
+        app.notify_progress("下载 20%…");
+        assert_eq!(app.notice_text(), Some("下载 20%…"), "进度要刷新");
+
+        app.clear_progress();
+        assert_eq!(app.notice_text(), None, "收工后进度该撤掉");
+
+        app.notify("已插队：晴天");
+        app.clear_progress();
+        assert_eq!(
+            app.notice_text(),
+            Some("已插队：晴天"),
+            "一次性消息不该被收工清掉"
+        );
     }
 }
