@@ -885,7 +885,7 @@ mod imp {
 /// - 状态文件存的是**左上原点**的中心点（与 Windows / 旧数据同一口径），进出 AppKit 按主屏高换算。
 #[cfg(target_os = "macos")]
 mod imp {
-    use std::sync::mpsc::Receiver;
+    use std::sync::mpsc::{Receiver, Sender, channel};
 
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
@@ -931,6 +931,10 @@ mod imp {
         next: Retained<NSTextField>,
         /// 配置在进程里是固定的，建窗口时拿一份（与 Windows 的 `Shared` 同一个理由）。
         config: DesktopLyricsConfig,
+        /// 拖动结束后的新中心点回传给主线程（落盘在 `tui/state.rs`）。
+        positions: Sender<(i32, i32)>,
+        /// 上次报出去的中心点（左上原点）：变了才回传（与 Windows 逐 draw 采纳窗口自身矩形同一口径）。
+        reported: (i32, i32),
         /// 主屏高：左上原点 ↔ AppKit 左下原点换算用。
         screen_height: f64,
         /// 现在是 `orderOut` 状态吗（避免每帧重复调）。
@@ -976,6 +980,20 @@ mod imp {
                 };
                 let Some(event) = event else { break };
                 app.sendEvent(&event);
+            }
+
+            // 拖动：解锁态窗口被系统拖走，位置以**窗口自己**为准。每帧读一次真实矩形，
+            // 跟上次报过的比——变了才回传（不指望「拖动结束」事件：Windows 那边踩过
+            // `WM_EXITSIZEMOVE` 进不了消息队列的坑，改成逐 draw 采纳窗口自身的矩形）。
+            let frame = self.panel.frame();
+            let center = (
+                (frame.origin.x + frame.size.width / 2.0).round() as i32,
+                (self.screen_height - (frame.origin.y + frame.size.height / 2.0)).round() as i32,
+            );
+            if center != self.reported {
+                self.reported = center;
+                // 通道那头没了（主线程收摊）就算了，不影响界面。
+                let _ = self.positions.send(center);
             }
         }
 
@@ -1042,7 +1060,10 @@ mod imp {
                 (self.screen_height - (frame.origin.y + frame.size.height / 2.0)).round() as i32,
             );
             self.panel.setAlphaValue(f64::from(self.config.opacity) / 100.0);
-            self.panel.setIgnoresMouseEvents(!payload.locked);
+            // 锁定 = 点不着（`ignoresMouseEvents`），解锁 = 收鼠标（于是 `setMovableByWindowBackground`
+            // 才能让系统把它拖走）。这里传的就是 `locked` 本身——写反过一次（`!locked`），
+            // 症状是「锁定时点得着、解锁后拖不动」，真机一眼能看出来。
+            self.panel.setIgnoresMouseEvents(payload.locked);
             self.panel.setFrame_display(
                 NSRect::new(
                     NSPoint::new(
@@ -1198,6 +1219,7 @@ mod imp {
             return (Imp::none(), None, Some("歌词窗口起不来".to_string()));
         }
         let screen_height = NSScreen::mainScreen(mtm).map_or(0.0, |screen| screen.frame().size.height);
+        let (positions, places) = channel::<(i32, i32)>();
 
         let panel = make_panel(mtm);
         let (current, translation, next) = (make_label(mtm), make_label(mtm), make_label(mtm));
@@ -1217,6 +1239,8 @@ mod imp {
             translation,
             next,
             config: config.clone(),
+            positions,
+            reported: center,
             screen_height,
             hidden: false,
         };
@@ -1235,7 +1259,7 @@ mod imp {
         inner.push(&hidden_payload());
         // 安装记录在这儿打（只有真建了窗口的平台才该说这句）。
         tracing::info!(font = %config.font, size = config.font_size, "桌面歌词窗口已就绪");
-        (Imp { inner: Some(inner) }, None, None)
+        (Imp { inner: Some(inner) }, Some(places), None)
     }
 }
 
