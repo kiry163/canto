@@ -1085,6 +1085,22 @@ impl App {
         let Some(song) = self.queue.items().get(index).cloned() else {
             return;
         };
+        // 本地文件：不取流、不取歌词（歌词在本地三处找），直接起播——**一个请求都不发**。
+        if let Some(path) = song.path() {
+            self.clear_progress();
+            self.skipped = 0;
+            self.queue.jump(index);
+            let lyric = crate::library::local_lyric(path, &self.config.lyrics_dir);
+            crate::cache::put_lyric(&song.mid, lyric.as_ref());
+            self.lyric = lyric;
+            self.lyric_loading = false;
+            self.engine.play(Track {
+                song: song.clone(),
+                source: crate::player::TrackSource::Local(path.to_path_buf()),
+            });
+            self.record_history(&song);
+            return;
+        }
         self.request += 1;
         let request = self.request;
         self.notify_progress(format!("取流《{}》…", song.title));
@@ -1339,7 +1355,7 @@ impl App {
                         self.queue.jump(index);
                         self.engine.play(Track {
                             song: song.clone(),
-                            candidates,
+                            source: crate::player::TrackSource::Cdn(candidates),
                         });
                         self.record_history(&song);
                     }
@@ -1740,6 +1756,7 @@ impl App {
                 singers: song.singers.clone(),
                 at: history::now_secs(),
                 origin: self.queue.origin().to_string(),
+                local_path: song.path().map(std::path::Path::to_path_buf),
             },
             self.config.history_limit,
         );
@@ -1778,7 +1795,11 @@ impl App {
                 album_name: String::new(),
                 duration_secs: 0,
                 sizes: crate::model::FileSizes::default(),
-                source: crate::model::Source::Qq,
+                // 本地条目带得回自己的路径（重播不再经过 vkey）；QQ 老条目照旧。
+                source: match &entry.local_path {
+                    Some(path) => crate::model::Source::Local(path.clone()),
+                    None => crate::model::Source::Qq,
+                },
             })
             .collect();
         let labels: Vec<String> = self
@@ -2438,6 +2459,35 @@ mod tests {
         assert_eq!(nav.favorites.state.selected(), Some(0));
         nav.move_selection(1);
         assert_eq!(nav.favorites.state.selected(), Some(1));
+    }
+
+    /// 本地曲目进历史时带上路径；从历史还原时还是本地曲目（重播不再去要 vkey）。
+    #[test]
+    fn local_history_entries_keep_their_path() {
+        let (mut app, _runtime) = test_app();
+        let song = crate::tui::test_support::local_song("C:/Music/canto/一首.wav");
+        app.record_history(&song);
+        let entry = app.history.entries().first().expect("记了一条");
+        assert_eq!(
+            entry.local_path.as_deref(),
+            Some(std::path::Path::new("C:/Music/canto/一首.wav")),
+            "本地条目要记下路径"
+        );
+
+        app.refresh_history_view();
+        let restored = app.nav.history_view.items().first().expect("还原出一首").clone();
+        assert!(restored.is_local(), "还原后还是本地曲目：{:?}", restored.source);
+        assert_eq!(restored.path(), Some(std::path::Path::new("C:/Music/canto/一首.wav")));
+    }
+
+    /// 老 `history.json`（没有 `local_path` 这一项）照旧读得动。
+    #[test]
+    fn an_old_history_file_still_loads() {
+        let old = r#"[{"mid":"000DhFOL1o15dn","title":"曲终人散","singers":"张宇","at":1,"origin":"我的收藏"}]"#;
+        let entries: Vec<crate::history::Entry> =
+            serde_json::from_str(old).expect("老文件要读得动");
+        assert_eq!(entries[0].local_path, None);
+        assert_eq!(entries[0].title, "曲终人散");
     }
 
     /// 本地曲库屏：数据来自曲库，切过去**一个请求都不发**；`r` 只在这一屏重扫。

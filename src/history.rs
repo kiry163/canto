@@ -19,6 +19,11 @@ pub struct Entry {
     pub at: u64,
     /// 当时队列的来源名（歌单名 / `搜索：晴天` / `历史`）。
     pub origin: String,
+    /// 本地曲目记下自己的路径（重播不再经过 vkey）；QQ 歌没有这一项。
+    ///
+    /// `serde(default)`：这个字段是后加的，老 `history.json` 没有它，读回来是 `None`。
+    #[serde(default)]
+    pub local_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -213,6 +218,7 @@ mod tests {
             singers: "歌手".to_string(),
             at,
             origin: "嗯".to_string(),
+            local_path: None,
         }
     }
 

@@ -74,9 +74,6 @@ impl Quality {
 /// QQ 那边走接口（`mid` 是接口主键）；本地那边就是一个文件路径，`mid` 用
 /// [`local_mid`] 合成。加这一维是为了让队列、历史、`♪` 标记那些「按 mid 比对」的
 /// 地方**不用**为本地歌开第二条路。
-// Task 3–6 把 `library.rs` / 播放 / 歌词 / 渲染全接上之后摘掉这几个 `allow(dead_code)`
-// （现在是「接口先落地、消费者还没来」的中间态）。
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Source {
     /// 接口来的（默认）。
@@ -89,7 +86,6 @@ pub enum Source {
 /// 本地曲目的键：`local:<路径>`。
 ///
 /// 前缀是刻意的：QQ 的 mid 是 14 位 base62，永远撞不上它。
-#[allow(dead_code)]
 pub fn local_mid(path: &Path) -> String {
     format!("local:{}", path.to_string_lossy())
 }
@@ -123,7 +119,6 @@ pub struct Song {
     pub source: Source,
 }
 
-#[allow(dead_code)]
 impl Song {
     /// 本地文件来的？播放、歌词、体积列都按它分岔。
     pub fn is_local(&self) -> bool {

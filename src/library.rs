@@ -15,7 +15,7 @@ use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::prelude::Accessor;
 use serde::{Deserialize, Serialize};
 
-use crate::model::{local_mid, FileSizes, Song, Source};
+use crate::model::{local_mid, FileSizes, Lyric, Song, Source};
 
 /// 认得的扩展名。**等于现有解码器能解的那套**（mp3 / flac / m4a-AAC / ogg-Vorbis / wav），
 /// 见 spec §8：白名单外的一律不进曲库。
@@ -225,6 +225,43 @@ pub fn entry_to_song(entry: &Entry) -> Song {
     }
 }
 
+/// 本地曲目的歌词：**只在本地找**，一个请求都不发。
+///
+/// 三处按顺序试：① 音频**同目录同名** `.lrc` → ② `lyrics_dir` 里的同名 `.lrc`
+/// （canto 自己下载的歌词就放那儿）→ ③ 音频里的**内嵌歌词**（`lofty`）。
+pub fn local_lyric(path: &Path, lyrics_dir: &Path) -> Option<Lyric> {
+    if let Some(lyric) = read_lrc(&path.with_extension("lrc")) {
+        return Some(lyric);
+    }
+    if let Some(stem) = path.file_stem() {
+        let named = lyrics_dir.join(format!("{}.lrc", stem.to_string_lossy()));
+        if let Some(lyric) = read_lrc(&named) {
+            return Some(lyric);
+        }
+    }
+    embedded_lyric(path)
+}
+
+/// 读一份 `.lrc`；空文件（「这首没有歌词」的记号）不算命中。
+fn read_lrc(path: &Path) -> Option<Lyric> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let lyric = Lyric::parse(&text, None);
+    (!lyric.lines.is_empty()).then_some(lyric)
+}
+
+/// 内嵌歌词（ID3 的 USLT / FLAC 的 LYRICS / MP4 的 ©lyr）。
+fn embedded_lyric(path: &Path) -> Option<Lyric> {
+    let tagged = lofty::read_from_path(path).ok()?;
+    let tag = tagged
+        .primary_tag()
+        .or_else(|| tagged.first_tag())?;
+    let text = tag
+        .get_string(lofty::tag::ItemKey::Lyrics)
+        .map(str::to_owned)?;
+    let lyric = Lyric::parse(&text, None);
+    (!lyric.lines.is_empty()).then_some(lyric)
+}
+
 fn is_hidden(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -255,6 +292,28 @@ fn mtime_secs(metadata: &std::fs::Metadata) -> u64 {
 mod tests {
     use super::*;
     use crate::model::Quality;
+
+    /// 本地歌词三处查找：同目录同名 `.lrc` → `lyrics_dir` 里的同名 → 都没有就是没有。
+    #[test]
+    fn local_lyrics_come_from_the_sidecar_then_the_lyrics_dir() {
+        let dir = temp_tree("lyric-lookup");
+        let wav = dir.join("canto/一首.wav");
+        fixture_with_tags(&wav, "一首", "张宇", "消息");
+        let lyrics_dir = dir.join("lyrics");
+        std::fs::create_dir_all(&lyrics_dir).expect("建歌词目录");
+        assert!(local_lyric(&wav, &lyrics_dir).is_none(), "两处都没有就是没有");
+
+        std::fs::write(dir.join("canto/一首.lrc"), "[00:01.00]第一句\n[00:11.00]第二句\n")
+            .expect("写同目录的 .lrc");
+        let sidecar = local_lyric(&wav, &lyrics_dir).expect("同目录同名 .lrc 优先");
+        assert_eq!(sidecar.lines.len(), 2);
+        assert_eq!(sidecar.lines[1].text, "第二句");
+
+        std::fs::remove_file(dir.join("canto/一首.lrc")).expect("删掉同目录那份");
+        std::fs::write(lyrics_dir.join("一首.lrc"), "[00:02.00]来自歌词目录\n").expect("写歌词目录");
+        let from_dir = local_lyric(&wav, &lyrics_dir).expect("lyrics_dir 里的同名 .lrc");
+        assert_eq!(from_dir.lines[0].text, "来自歌词目录");
+    }
 
     /// 一棵测试用的目录树：`canto/{a.mp3, b.FLAC, c.txt, .hidden/d.mp3, sub/e.wav}`。
     fn temp_tree(name: &str) -> PathBuf {

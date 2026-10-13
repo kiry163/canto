@@ -28,11 +28,19 @@ use crate::qq::vkey::Candidate;
 /// 状态刷新间隔：够进度条平滑，也不会白烧 CPU。
 const TICK: Duration = Duration::from_millis(150);
 
-/// 一次播放请求：歌 + 已按偏好排好序的候选地址。
+/// 一次播放请求：歌 + 字节从哪来。
 #[derive(Debug, Clone)]
 pub struct Track {
     pub song: Song,
-    pub candidates: Vec<Candidate>,
+    pub source: TrackSource,
+}
+
+/// 字节的来源。QQ 那边是一串候选地址（已按偏好排好序），本地文件就是那条路径——
+/// 两支互斥，所以用枚举而不是「候选 + 可选路径」（后者能造出两种都没有的非法状态）。
+#[derive(Debug, Clone)]
+pub enum TrackSource {
+    Cdn(Vec<Candidate>),
+    Local(std::path::PathBuf),
 }
 
 impl Track {
@@ -476,6 +484,21 @@ fn open(
     cache_on: bool,
     promoted: &cache::Promoted,
 ) -> Result<Opened> {
+    // 本地文件：直接开，**不碰缓存也不碰网络**（候选为空也照样能开）。
+    if let Some(path) = track.song.path() {
+        let file = File::open(path).with_context(|| format!("打不开：{}", path.display()))?;
+        let size = file.metadata().ok().map(|metadata| metadata.len());
+        let decoder = Decoder::new(MediaSource::File(file))
+            .with_context(|| format!("打不开：{}", path.display()))?;
+        let duration = decoder.total_duration();
+        return Ok(Opened {
+            decoder,
+            // 本地文件没有「档位」这回事（播放条那一列对它没意义），给个占位值。
+            quality: Quality::Low128,
+            size,
+            duration,
+        });
+    }
     let mid = track.song.mid.as_str();
     // 缓存里已经有这首（任意档位）：直接读本地文件，一个请求都不用发。
     if cache_on
@@ -502,8 +525,13 @@ fn open(
         }
     }
     // 逐个候选真去开，第一个能解码的胜出（服务端对不存在的文件也会给 purl）。
+    let candidates = match &track.source {
+        TrackSource::Cdn(candidates) => candidates,
+        // 本地文件在上面就返回了；走到这儿只可能是「Song 说是本地、路径却对不上」。
+        TrackSource::Local(path) => bail!("打不开：{}（来源与路径不一致）", path.display()),
+    };
     let mut failures = Vec::new();
-    for candidate in &track.candidates {
+    for candidate in candidates {
         let mut stream = match MediaStream::open(&candidate.url) {
             Ok(stream) => stream,
             Err(error) => {
@@ -571,6 +599,32 @@ mod tests {
         assert_eq!(snapshot(118, None).progress(), 0.0);
         // 位置超过声明时长（有些文件头不准）也要夹在 1.0 以内。
         assert_eq!(snapshot(300, Some(236)).progress(), 1.0);
+    }
+
+    /// 本地文件：直接开文件解码，**不要候选也不写播放缓存**（候选取空也照样开）。
+    #[test]
+    fn a_local_file_opens_without_candidates_or_cache() {
+        let path =
+            std::env::temp_dir().join(format!("canto-local-play-{}.wav", std::process::id()));
+        write_sine_wav(&path, 44_100, 1.0, 440.0);
+
+        let song = crate::library::entry_to_song(&crate::library::read_entry(&path, 0, 0));
+        assert!(song.is_local(), "库里造出来的歌是本地曲目");
+        let track = Track {
+            song,
+            source: TrackSource::Local(path.clone()),
+        };
+        let opened = open(&track, false, &cache::Promoted::default()).expect("本地 WAV 要能开");
+        assert!(
+            opened.duration.is_some_and(|duration| duration > Duration::ZERO),
+            "解码器报得出时长：{:?}",
+            opened.duration
+        );
+        assert!(
+            crate::cache::for_song(&crate::model::local_mid(&path)).is_none(),
+            "本地文件不写播放缓存"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     /// 冒烟：真解码器 → 采集通道 → 分析器，整条链路在没有声卡的机器上也能跑。
