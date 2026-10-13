@@ -1894,6 +1894,8 @@ impl App {
             keys::Action::Down => self.move_selection(1),
             keys::Action::First => self.select_edge(false),
             keys::Action::Last => self.select_edge(true),
+            keys::Action::NextMenuItem => self.cycle_home(1),
+            keys::Action::PreviousMenuItem => self.cycle_home(-1),
             keys::Action::PageUp => self.nav.page_selection(-1),
             keys::Action::PageDown => self.nav.page_selection(1),
             keys::Action::Enter => {
@@ -2348,14 +2350,29 @@ impl App {
             step_state(state, playlists.len() + 1, delta);
             return;
         }
-        // 首页：挪它自己那一行选中。排在队列 / 选择框**之后**——首页上开着浮层时，
-        // `j`/`k` 归浮层（跟 `context()` 同一个次序）。
+        // 首页：挪格走 `Tab`（`Action::NextMenuItem`/`PreviousMenuItem`，见 `cycle_home`）。
+        // `Down`/`Up` 在首页没有按键会送进来，所以这里**不**兜它——真送进来了也只是不动，
+        // 免得挪到别的屏记着、首页上看不见的那份列表选中上去。
         if matches!(self.screen, Screen::Home) {
-            let local_on = self.local_features_on();
-            step_state(&mut self.home_state, Menu::menus(local_on).len(), delta);
             return;
         }
         self.nav.move_selection(delta);
+    }
+
+    /// `Tab` / `Shift+Tab`：首页的菜单格挪一格，**环绕**（列表那套到底就停，这里刻意不同）。
+    ///
+    /// 只在首页生效：别的屏上这两个键没绑定（`keys` 那层），真送进来也不该悄悄动首页。
+    fn cycle_home(&mut self, delta: isize) {
+        if !matches!(self.screen, Screen::Home) {
+            return;
+        }
+        let count = Menu::menus(self.local_features_on()).len() as isize;
+        if count == 0 {
+            return;
+        }
+        let current = self.home_state.selected().unwrap_or(0) as isize;
+        self.home_state
+            .select(Some((current + delta).rem_euclid(count) as usize));
     }
 
     /// `g`/`G`（Home/End）：落点同上，跳到首 / 尾。
@@ -3631,26 +3648,74 @@ mod tests {
         assert_eq!(app.nav.menu, Menu::History, "数字直达");
     }
 
-    /// 首页上挪选中：`j`/`k` 到底 / 到顶都不越界（`step_state` 夹住）。
+    /// 首页挪菜单格：`Tab`/`Shift+Tab`（`Next`/`Previous`）**环绕**，`g`/`G` 跳首尾。
+    ///
+    /// 环绕这条是刻意跟列表分开的：列表里 `j`/`k` 到底就停（`step_state` 夹住），
+    /// 而 Tab 的惯例是转圈。
     #[test]
-    fn the_home_moves_its_own_highlight() {
+    fn the_home_cycles_with_tab() {
         let (mut app, _runtime) = crate::tui::test_support::test_app();
-        app.go_home(); // 落地：高亮 = nav.menu 那一项
-        let start = app.home_state.selected().expect("该有高亮");
-        app.apply(keys::Action::Down);
-        assert_eq!(app.home_state.selected(), Some(start + 1));
+        let count = Menu::menus(app.local_features_on()).len();
+        app.go_home();
+        app.home_state.select(Some(0));
+
+        app.apply(keys::Action::PreviousMenuItem);
+        assert_eq!(app.home_state.selected(), Some(count - 1), "第一格往回 = 末格");
+
+        app.apply(keys::Action::NextMenuItem);
+        assert_eq!(app.home_state.selected(), Some(0), "末格往前 = 第一格");
+
         app.apply(keys::Action::Last);
-        assert_eq!(app.home_state.selected(), Some(Menu::ALL.len() - 1));
-        app.apply(keys::Action::Down);
-        assert_eq!(
-            app.home_state.selected(),
-            Some(Menu::ALL.len() - 1),
-            "到底不动"
-        );
+        assert_eq!(app.home_state.selected(), Some(count - 1));
+        app.apply(keys::Action::NextMenuItem);
+        assert_eq!(app.home_state.selected(), Some(0), "末格 Tab 回第一格");
         app.apply(keys::Action::First);
         assert_eq!(app.home_state.selected(), Some(0));
-        app.apply(keys::Action::Up);
-        assert_eq!(app.home_state.selected(), Some(0), "到顶不动");
+        app.apply(keys::Action::PreviousMenuItem);
+        assert_eq!(app.home_state.selected(), Some(count - 1), "第一格 Shift+Tab 去末格");
+    }
+
+    /// 本地功能关掉时首页只有四格：环绕按**当时**那个长度算，不能撞到第 5、6 格。
+    #[test]
+    fn the_home_cycles_inside_the_grid_it_actually_has() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.config.library.dirs = Some(Vec::new());
+        app.go_home();
+        let count = Menu::menus(app.local_features_on()).len();
+        assert_eq!(count, 4, "前提：`dirs = []` 时首页四格");
+        app.home_state.select(Some(count - 1));
+
+        app.apply(keys::Action::NextMenuItem);
+        assert_eq!(app.home_state.selected(), Some(0));
+        app.apply(keys::Action::PreviousMenuItem);
+        assert_eq!(app.home_state.selected(), Some(count - 1));
+    }
+
+    /// 首页不再兜 `Down`/`Up`：首页上没人能送出它们（`keys` 那层不绑），但真送进来了也不许
+    /// 去挪**别的屏**记着的那份列表选中（首页上看不见，等于把使用者的位置挪走）。
+    #[test]
+    fn arrows_do_not_move_anything_on_the_home_screen() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.nav
+            .favorites
+            .set_items(vec![crate::tui::test_support::test_song("a")]);
+        let home_before = {
+            app.go_home();
+            app.home_state.select(Some(0));
+            app.home_state.selected()
+        };
+        let list_before = app.nav.favorites.state.selected();
+
+        for action in [keys::Action::Down, keys::Action::Up] {
+            app.apply(action);
+        }
+
+        assert_eq!(app.home_state.selected(), home_before, "首页高亮不许动");
+        assert_eq!(
+            app.nav.favorites.state.selected(),
+            list_before,
+            "别的屏记着的选中也不许动"
+        );
     }
 
     /// 首页上开队列浮层（`u`）时，`j`/`k` 挪的是**浮层**的高亮，不是首页的（次序：
@@ -3719,12 +3784,13 @@ mod tests {
         );
     }
 
-    /// 已经在首页时 `0` 是**无操作**：高亮是刚用 `j`/`k` 挪好的，别给弹回默认那一行。
+    /// 已经在首页时 `0` 是**无操作**：高亮是刚用 `Tab` 挪好的，别给弹回默认那一行。
     #[test]
     fn home_key_on_the_home_leaves_the_highlight_alone() {
         let (mut app, _runtime) = crate::tui::test_support::test_app();
         app.go_home();
-        app.apply(keys::Action::Down);
+        app.home_state.select(Some(0));
+        app.apply(keys::Action::NextMenuItem);
         let moved = app.home_state.selected();
         assert_eq!(moved, Some(1), "先挪到第二项");
         app.apply(keys::Action::Home);

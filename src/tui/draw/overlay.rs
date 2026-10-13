@@ -149,9 +149,15 @@ impl Row {
 /// 已经在「列表」段里）。表格比浮层长（内容上限 18 行），最常查的得在上面。
 fn help_rows(screen: Option<Menu>, hotkeys: &HotkeyConfig) -> Vec<Row> {
     let mut rows = Vec::new();
-    // 首页（`None`）不单开一段：挪格、`Enter` 进屏是最通用的那几个键，状态行那句提示里也有
-    // ——帮助只留真需要查的，于是它从「切屏」开始。
+    // 首页（`None`）单开一段只为 `Tab`：挪格那一套**只在首页**成立（列表屏是 `j`/`k`），
+    // 不写出来没人猜得到。`Enter` 进屏到处都一样，照旧不进表。
     let list = screen.is_some();
+    if screen.is_none() {
+        rows.extend([
+            Row::Section("首页"),
+            Row::Keys { keys: "Tab / Shift+Tab", help: "挪格（到最后 / 最开始那一格会绕回去）" },
+        ]);
+    }
     if let Some(menu) = screen {
         let (title, section): (&'static str, Vec<Row>) = match menu {
             // 收藏屏没有专属键：`j`/`k` 选曲目、`/` 筛选都是所有列表共有的。
@@ -482,18 +488,29 @@ mod tests {
         assert!(!helps(Some(Menu::Favorites)).contains(&"进入该歌单的曲目"), "切屏换了那一节就该换");
         assert_eq!(sections(Some(Menu::History))[0], "历史");
 
-        // 首页：通用的挪 / `Enter` 不进表，它直接从「切屏」开始。
-        assert_eq!(sections(None)[0], "切屏", "首页不再单开一段：{:?}", sections(None));
+        // 首页单开一段只为 `Tab`（挪格那一套只在首页成立）；`Enter` 到处都一样，不进表。
+        assert_eq!(sections(None)[0], "首页", "{:?}", sections(None));
+        assert_eq!(
+            sections(None)[1],
+            "切屏",
+            "首页那一段之后照旧是「切屏」：{:?}",
+            sections(None)
+        );
+        assert!(
+            helps(None).iter().any(|help| help.starts_with("挪格")),
+            "首页得说清 `Tab` 挪格：{:?}",
+            helps(None)
+        );
         assert!(
             !helps(None).iter().any(|help| matches!(*help, "选入口" | "进选中那一屏" | "首 / 尾")),
-            "挪格与 Enter 是通用键，不必进帮助：{:?}",
+            "`Enter` 进屏到处都一样，不必进帮助：{:?}",
             helps(None)
         );
         assert!(!sections(None).contains(&"列表") && !sections(None).contains(&"歌曲"));
     }
 
     /// 首页那一套：列表 / 歌曲两段的键一个都不许在（`Context::Home` 里一个都没绑），
-    /// 通用的挪 / `Enter` 也不进表。
+    /// `Enter` 进屏也不进表。
     #[test]
     fn the_home_table_lists_no_keys_the_home_ignores() {
         let rows = help_rows(None, &HotkeyConfig::default());

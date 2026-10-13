@@ -21,6 +21,10 @@ pub enum Action {
     Down,
     First,
     Last,
+    /// `Tab` / `Shift+Tab`：挪到下一个 / 上一个**菜单格**（只有首页绑；环绕，与列表的
+    /// `Up`/`Down` 不同——那两个到底就停）。
+    NextMenuItem,
+    PreviousMenuItem,
     PageUp,
     PageDown,
     Enter,
@@ -188,8 +192,17 @@ pub fn resolve(context: Context, key: KeyEvent) -> Option<Action> {
         // 首页：没有「选中的歌」，所以列表专属键（`/`、`d`、`p`、`x`、`a`、`A`、`Shift+D`、
         // `PgUp`/`PgDn`）一个都不绑；`Esc` 也没有上一层可退，同样不绑。
         Context::Home => match key.code {
-            KeyCode::Char('j') | KeyCode::Down => Some(Action::Down),
-            KeyCode::Char('k') | KeyCode::Up => Some(Action::Up),
+            // 挪菜单格只认 `Tab` / `Shift+Tab`（环绕）。`j`/`k` 与上下方向键在首页**不绑**：
+            // 它们是「列表」那一套，首页上留着只会跟 Tab 混着用，说不清哪个是哪层。
+            KeyCode::Tab => Some(
+                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    // 有的终端把 `Shift+Tab` 送成 `Tab` + SHIFT。
+                    Action::PreviousMenuItem
+                } else {
+                    Action::NextMenuItem
+                },
+            ),
+            KeyCode::BackTab => Some(Action::PreviousMenuItem),
             KeyCode::Char('g') | KeyCode::Home => Some(Action::First),
             KeyCode::Char('G') | KeyCode::End => Some(Action::Last),
             KeyCode::Enter => Some(Action::Enter),
@@ -296,7 +309,7 @@ mod tests {
         for code in [KeyCode::Char('d'), KeyCode::Char('p'), KeyCode::Char('x'), KeyCode::Enter] {
             assert!(press(Context::Content, code).is_some(), "列表屏里这些键不许动：{code:?}");
         }
-        for code in [KeyCode::Enter, KeyCode::Char('j'), KeyCode::Char('u')] {
+        for code in [KeyCode::Enter, KeyCode::Tab, KeyCode::Char('u')] {
             assert!(press(Context::Home, code).is_some(), "首页自己的键不许动：{code:?}");
         }
         assert_eq!(press(Context::PlaylistPicker, KeyCode::Char('v')), None, "选择框里 v 不抢");
@@ -415,10 +428,9 @@ mod tests {
     #[test]
     fn the_home_screen_has_its_own_keys() {
         for (key, action) in [
-            (KeyCode::Char('j'), Action::Down),
-            (KeyCode::Down, Action::Down),
-            (KeyCode::Char('k'), Action::Up),
-            (KeyCode::Up, Action::Up),
+            // 首页挪菜单格只认 Tab 一套；`j`/`k` 与方向键在这儿没绑定（列表屏照旧）。
+            (KeyCode::Tab, Action::NextMenuItem),
+            (KeyCode::BackTab, Action::PreviousMenuItem),
             (KeyCode::Char('g'), Action::First),
             (KeyCode::Home, Action::First),
             (KeyCode::Char('G'), Action::Last),
@@ -445,9 +457,19 @@ mod tests {
         ] {
             assert_eq!(press(Context::Home, key), Some(action), "{key:?} 在首页该有绑定");
         }
+        // 首页挪菜单格：Tab 认，Shift+Tab 两种送法都认（终端给 `BackTab` 或 `Tab`+SHIFT）。
+        assert_eq!(
+            resolve(Context::Home, KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT)),
+            Some(Action::PreviousMenuItem),
+            "Shift+Tab 也得认"
+        );
         // 首页没有「选中的歌」，`Esc` 也没有上一层可退：这些一个都不绑。
         for key in [
             KeyCode::Esc,
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Up,
+            KeyCode::Down,
             KeyCode::Char('/'),
             KeyCode::Char('d'),
             KeyCode::Char('p'),

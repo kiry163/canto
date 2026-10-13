@@ -125,6 +125,11 @@ impl App {
                 areas.content
             };
             self.draw_spectrum_area(frame, area, &title);
+        } else if matches!(self.screen, Screen::Home) {
+            // 首页先判：`go_home()` 只动 `screen`，`nav.menu` 还记着上一屏（比如刚从「本地曲库」
+            // 按 `Esc` 回来）——本地曲库那条分支排在它前面的话，状态行提示是首页那套、
+            // 画面却还是曲库那屏，看着就像「`Esc` 没反应」。
+            self.draw_home(frame, areas.content);
         } else if self.nav.menu == Menu::LocalLibrary {
             // 本地曲库：列表来自索引，**不发任何请求**；空曲库给配置引导，扫描中带进度。
             if self.library.is_empty() {
@@ -137,8 +142,6 @@ impl App {
                 };
                 self.draw_songs(frame, areas.content, &title);
             }
-        } else if matches!(self.screen, Screen::Home) {
-            self.draw_home(frame, areas.content);
         } else {
             self.draw_content(frame, areas.content);
         }
@@ -819,10 +822,37 @@ mod tests {
         app.go_home();
         let text = frame_flat(&mut app, 120, 40);
         assert!(text.contains("▶1我的收藏"), "{text}");
-        app.apply(crate::tui::keys::Action::Down);
+        // 首页挪格是 `Tab`（`NextMenuItem`）；`j`/`k` 与上下方向键在首页已经没绑定。
+        app.apply(crate::tui::keys::Action::NextMenuItem);
         let text = frame_flat(&mut app, 120, 40);
         assert!(text.contains("▶2我的歌单"), "高亮该挪到第 2 格：{text}");
         assert!(!text.contains("▶1我的收藏"), "`▶` 只该在选中那格：{text}");
+    }
+
+    /// 从「本地曲库」回首页，画出来的**必须是首页那排格子**。
+    ///
+    /// 回归：`draw` 里「本地曲库」那条分支原来排在 `Screen::Home` 之前，而 `go_home()` 不动
+    /// `nav.menu` —— 于是 `Esc`/`0` 回首页后状态是首页、画面还是曲库那屏（看着像「Esc 没反应」）。
+    #[test]
+    fn coming_home_from_the_local_library_draws_the_home_grid() {
+        let (mut app, _runtime) = test_app();
+        app.library =
+            vec![crate::tui::test_support::local_song("C:/Music/canto/曲终人散.flac")];
+        app.switch_menu(Menu::LocalLibrary);
+        assert!(
+            frame_flat(&mut app, 120, 40).contains("本地曲库"),
+            "前提：这一屏画的是本地曲库"
+        );
+
+        app.apply(crate::tui::keys::Action::Back);
+
+        let text = frame_flat(&mut app, 120, 40);
+        assert!(matches!(app.screen, Screen::Home), "状态上该回首页");
+        assert!(text.contains("1我的收藏"), "画出来的得是首页那排格子：{text}");
+        // 高亮落在「本地曲库」那一格（`go_home()` 记住的就是它）——曲库那屏自己没有这串。
+        assert!(text.contains("▶5本地曲库"), "高亮该在曲库那一格：{text}");
+        // 曲库那屏的标题带条数（`本地曲库 · 1 首`），首页格子不带。
+        assert!(!text.contains("本地曲库·1首"), "不该还留着曲库那屏：{text}");
     }
 
     /// 最小窗口（内容区 10 行）与常规 80×24 里，四格都在界内。
