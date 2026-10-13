@@ -64,9 +64,11 @@
 - **内容区** = 窗口高 − 播放栏 4 行 − 状态栏 1 行（跟今天一样）。
 - **歌词栏**占位条件：`show_lyric` **且** 有歌在放（`engine.snapshot().phase != Idle`）**且**
   窗口高 ≥ `MIN_LYRIC_HEIGHT`（20，今天就有这条：矮屏里歌词会把主区挤成一两行）。
-  高度：频谱区关时 `(内容区 / 3).clamp(5, 12)`（今天日常那套）；频谱区开时
-  `(内容区 / 2).clamp(5, 12)`（今天全屏那套的拆分比例）——两套各自保留，只是不再属于「模式」。
-  上下限用 `MAX_LYRIC_HEIGHT`（12）；理由跟今天一样：频谱的高度收益是线性的，歌词的有用高度有上限。
+  高度：`(内容区 / 3).clamp(5, MAX_LYRIC_HEIGHT)`（`MAX_LYRIC_HEIGHT` = 12）——**只有这一套**。
+  今天全屏那套「`内容区 / 2` 夹 7..12」不再需要：那时歌词是主内容、要**读**，所以给得多；
+  现在它是底部一条，频谱才是要空间的那个（理由仍然是：频谱的高度收益是线性的，歌词的有用
+  高度有上限）。大窗口下两套结果一样（210×42 都是歌词 12 / 频谱 25），只在矮窗口下新规则
+  把空间让给频谱。
 - **频谱区**：`show_spectrum` 时 = 内容区 − 歌词栏（歌词栏不占位时就是整个内容区）。
 - **列表**：内容区 − 歌词栏（频谱区关时）。
 
@@ -80,7 +82,8 @@
 | `keys::Action::ToggleNowPlaying` | **删除**，换成 `Action::ToggleSpectrum` |
 | `keys::Action::ToggleLyric` / `Action::Home` | 不变 |
 | `keys::Context::NowPlaying` | **整个删除**（连它的 `resolve` 分支与测试）：列表永远看得见（或替掉它的频谱区就在原地），没有「对选中那首动手」的键该被禁用的场合 |
-| `draw::Areas` | `content` 的含义改成**内容区整块**；新增 `lyric: Option<Rect>`（已有）与 `spectrum: Option<Rect>`；列表那块由 `list: Option<Rect>` 表示（频谱区开着时为 `None`） |
+| `draw::Areas` | **不变**：`content` 仍是「内容区 − 歌词栏」，频谱区就画在它里面（频谱区开着时列表不画——绘制分支跟今天「全屏 / 列表」那条同构） |
+| `draw::SPLIT_MIN_HEIGHT` | **删除**：没有「拆不拆」这一步了（歌词栏是一条、频谱区吃剩下的） |
 
 `App::context()`：删掉 `if self.now_playing_full { return Context::NowPlaying }` 那一支——剩下的次序
 （帮助浮层 > 队列/选择框 > 输入框 > 首页 > 列表）不变。
@@ -101,24 +104,23 @@
 
 ## 4. 绘制
 
-- **列表**：频谱区关时照今天的 `draw_content` / `draw_home` 画在 `Areas.list` 上。
-- **频谱区**：频谱区开时画在 `Areas.spectrum` 上。标题：歌词栏不在时带歌名（`频谱 · 歌名`），
-  在时只写「频谱」——跟今天全屏的两条标题规则一致（歌名不能让两块都挂，也不能两块都不挂）。
-  没有可画的数据时照旧给 `spectrum_message(phase)`（「缓冲中…」/「未在播放」）。
+- **列表**：频谱区关时照今天的 `draw_content` / `draw_home` 画在 `Areas.content` 上。
+- **频谱区**：频谱区开时画在 `Areas.content` 上（列表不画）。标题：歌词栏不在时带歌名
+  （`频谱 · 歌名`），在时只写「频谱」——跟今天全屏的两条标题规则一致（歌名不能让两块都挂，
+  也不能两块都不挂）。没有可画的数据时照旧给 `spectrum_message(phase)`（「缓冲中…」/「未在播放」）。
 - **歌词栏**：`Areas.lyric` 上照今天的 `draw_lyric` 画（居中、当前句加亮、翻译、自动滚动都在原地）。
   **新增的只是「没有歌词也画」**：`lyric` 为 `None` 时写「歌词加载中…」（`lyric_loading`）或
   「暂无歌词」——这两句 `lyric.rs` 里现成，今天只是显示条件挡住了、画不到。
-- **浮层**（帮助 / 队列 / 选择框）：改画在 `Areas.content`（内容区整块）上，播放栏与状态行仍然
-  永远露着（这条不变量不变）。
+- **浮层不动**：队列浮层照今天画在 `Areas.content` 上（含义没变，所以频谱区开着时它照样看得见）；
+  帮助与选择框照今天的做法以整帧居中（见 §8 的已知限制）。
 - 播放栏、状态栏、桌面歌词覆盖层：**一律不动**。
 
 ## 5. 退化与错误处理
 
 - **最小窗口（60×15）**：内容区 = 15 − 4 − 1 = 10 行；窗口高 15 < `MIN_LYRIC_HEIGHT`（20），
   所以歌词栏**不占位**——10 行全给列表（或频谱区），不会挤成一条缝。尺寸矩阵最紧的一档是窗口
-  20 行（内容区 15 行）：频谱区关时歌词栏 `(15/3).clamp(5, 12)` = 5 行、列表 10 行；两个栏同时
-  开时歌词栏 `(15/2).clamp(5, 12)` = 7 行、频谱区 8 行——每一段都 ≥ 5 行，画得下（尺寸矩阵归
-  第一层 `TestBackend` 测试，见 §6）。
+  20 行（内容区 15 行）：歌词栏 `(15/3).clamp(5, 12)` = 5 行，剩下 10 行给列表或频谱区——
+  每一段都 ≥ 5 行，画得下（尺寸矩阵归第一层 `TestBackend` 测试，见 §6）。
 - 窗口高 < 20 行时按 `y` **不改变画面**（歌词栏在那个高度下本来就不占位），`v` 则拿到整个内容区
   ——这是高度规则的直接结果，不是键坏了。
 - **提速档**：`spectrum_wanted()` 的判据从「全屏 + 在播」改成「**频谱区开着 + 在播**」；
@@ -135,7 +137,7 @@
 | 模态浮层与输入态里 `v`/`y` 不抢（`None` / `InputChar`） | `keys.rs` |
 | 四种合成：`v`/`y` 各自的开关只改自己（正交）；换屏（`1`..`4` / `0`）收掉频谱区 | `state.rs` |
 | 歌词栏在有歌在放时**即使没有歌词**也占位（`phase = Playing`、`lyric = None`） | `state.rs`/`draw` |
-| 频谱区开着时列表让位（`Areas.list` 为 `None`），`?` 帮助表里有 `v` / `y` 两行 | `draw/mod.rs` |
+| 频谱区开着时列表让位（`draw` 走频谱那条分支），`?` 帮助表里有 `v` / `y` 两行 | `draw/mod.rs` |
 | 60×15 / 80×24 / 大窗口下：四种合成都不 panic、该在的都在界内 | `draw/mod.rs` |
 | 真机（tuios，真二进制）：播放中 `y` 收起/展开歌词栏、`v` 进出频谱区、`v` + `y` 得到大频谱、换屏收掉频谱 | tuios |
 
@@ -146,8 +148,9 @@
 `the_home_fullscreen_view_uses_the_now_playing_context`、`home_key_in_the_fullscreen_view_collapses_it`；
 `draw/mod.rs`：`fullscreen_lyric_takes_over_the_content_area`、
 `the_now_playing_view_splits_into_spectrum_above_lyric`、`the_content_area_takes_the_full_width_at_any_window_size`（布局区块变了）；
-`keys.rs`：`uppercase_y_opens_the_fullscreen_view_and_hides_list_keys`、`the_home_screen_has_its_own_keys`
-与 `Content` 的键位表里 `Y` 那两条。
+`keys.rs`：`Context::NowPlaying` 的键位表与「全屏里该没绑定」那两条（`press(Context::NowPlaying, …)` 的
+各处）整段删；`uppercase_y_opens_the_fullscreen_view_and_hides_list_keys`、`the_home_screen_has_its_own_keys`
+与 `Content` 的键位表里 `Y` 那两条要改。
 
 ## 7. 改动清单与成本
 
@@ -155,7 +158,7 @@
 |---|---|
 | `src/tui/keys.rs` | `Action::ToggleSpectrum`；删 `ToggleNowPlaying`；删 `Context::NowPlaying`（枚举 + 分支）；`v`/`y` 的绑定；键位测试 |
 | `src/tui/state.rs` | `show_spectrum`；删 `now_playing_full`；`context()` 少一支；`spectrum_wanted` 改判据；`switch_menu`/`go_home` 收频谱区；测试重写 |
-| `src/tui/draw/mod.rs` | `layout` 拆出 `lyric` / `spectrum` / `list` 三块；`draw` 的三条分支（列表 / 频谱区 / 歌词栏）；删 `draw_now_playing`；浮层画在 `Areas.content`；提示表删 `NowPlaying` 一支；测试重写 |
+| `src/tui/draw/mod.rs` | `layout` 的 `lyric_wanted` 判据改掉（不再看有没有歌词）；删 `draw_now_playing` 与 `SPLIT_MIN_HEIGHT`；`draw` 增一条「频谱区 / 列表」的分支；`hints` 删 `NowPlaying` 一支；测试重写 |
 | `src/tui/draw/overlay.rs` | 帮助表：删 `Y` 那行、补 `y`/`v` 两行 |
 | `README.md` | 键位表那两行（`y` / `Y`）改成 `y` / `v`，措辞改成「歌词栏 / 频谱区」 |
 | `docs/design.md` | 全屏那一节改写成两个栏；补一条键位约定（默认小写） |
@@ -168,6 +171,10 @@
 - 频谱区开着时列表被替掉，`d`/`p`/`x`/`A`/`Enter` 这些键**仍然可用**（作用在看不见的列表上）。
   这是刻意的：没有模式，就不该有「按键随视图变脸」那套玄学。`Esc` 同理（不再退频谱）。
 - 状态行在频谱区开着时给的是列表那套提示（不含 `v`）：想确认怎么退，按 `?`。
+- **先前就有、本次不动**：帮助浮层与歌单选择框是以**整帧**居中的（`draw_help` / `draw_picker` 拿到
+  的是 `frame.area()`），所以窗口矮的时候它们能盖住播放栏——跟代码里那句「浮层只盖内容区」的
+  注释不符。队列浮层是画在 `Areas.content` 上的，没问题。本 spec 不碰这条，记在这里免得下次又
+  当成新发现。
 
 ## 与旧决议的关系
 
