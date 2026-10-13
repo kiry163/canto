@@ -40,7 +40,7 @@ impl App {
                     .playlists
                     .visible_rows()
                     .map(|(playlist, _)| {
-                        ListItem::new(format!("{:>5}  {}", playlist.song_count, playlist.name))
+                        ListItem::new(super::playlist_row(Some(playlist.song_count), &playlist.name))
                     })
                     .collect();
                 let list = List::new(items)
@@ -51,20 +51,14 @@ impl App {
             }
             Menu::LocalPlaylists if self.nav.local_shown.is_none() => {
                 if self.nav.local_playlists.items().is_empty() {
-                    frame.render_widget(
-                        Paragraph::new("还没有本地歌单 · N 新建一张")
-                            .style(Style::new().fg(Color::DarkGray))
-                            .alignment(ratatui::layout::Alignment::Center)
-                            .block(panel_block(&title)),
-                        area,
-                    );
+                    frame.render_widget(super::empty_panel("还没有本地歌单 · N 新建一张", &title), area);
                 } else {
                     let items: Vec<ListItem> = self
                         .nav
                         .local_playlists
                         .visible_rows()
                         .map(|(playlist, _)| {
-                            ListItem::new(format!("{:>5}  {}", playlist.songs.len(), playlist.name))
+                            ListItem::new(super::playlist_row(Some(playlist.songs.len() as u64), &playlist.name))
                         })
                         .collect();
                     let list = List::new(items)
@@ -78,13 +72,7 @@ impl App {
             Menu::LocalPlaylists
                 if self.nav.local_shown.is_some() && self.nav.local_tracks.items().is_empty() =>
             {
-                frame.render_widget(
-                    Paragraph::new("空歌单 · 曲库里按 P 把歌加进来")
-                        .style(Style::new().fg(Color::DarkGray))
-                        .alignment(ratatui::layout::Alignment::Center)
-                        .block(panel_block(&title)),
-                    area,
-                );
+                frame.render_widget(super::empty_panel("空歌单 · 曲库里按 P 把歌加进来", &title), area);
             }
             Menu::Search => {
                 // 输入行占第一行（Task 7 把它做成常驻），结果在下面。
@@ -210,13 +198,7 @@ impl App {
     fn draw_history(&mut self, frame: &mut Frame, area: Rect, title: &str) {
         let block = panel_block(title);
         if self.history.is_empty() {
-            frame.render_widget(
-                Paragraph::new("暂无播放历史")
-                    .style(Style::new().fg(Color::DarkGray))
-                    .alignment(ratatui::layout::Alignment::Center)
-                    .block(block),
-                area,
-            );
+            frame.render_widget(super::empty_panel("暂无播放历史", title), area);
             return;
         }
         let want = self.config.quality;

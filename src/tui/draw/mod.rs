@@ -7,9 +7,9 @@ use std::borrow::Cow;
 use std::time::Duration as StdDuration;
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::Block;
+use ratatui::widgets::{Block, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 pub mod content;
@@ -218,6 +218,21 @@ pub fn hints(context: keys::Context, local_on: bool) -> &'static str {
 /// 内容块：只有一块内容区，所以不再有「焦点在这块」的黄边框。
 fn panel_block(title: &str) -> Block<'static> {
     Block::bordered().title(title.to_string())
+}
+
+/// 歌单行：`{:>5}  {名字}`。四处（QQ/本地歌单列表、两个选择框）共用这一份，缩进口径只有一处。
+///
+/// `count` 给 `None` 就是选择框里那行「新建…」——计数那 5 列留白，跟歌单行同一列起名字。
+pub(super) fn playlist_row(count: Option<u64>, name: &str) -> String {
+    format!("{:>5}  {name}", count.map_or_else(String::new, |count| count.to_string()))
+}
+
+/// 空态占位：`DarkGray` 居中 + 带标题的框（空本地歌单 / 空歌单 / 空历史三处共用）。
+fn empty_panel(text: &str, title: &str) -> Paragraph<'static> {
+    Paragraph::new(text.to_string())
+        .style(Style::new().fg(Color::DarkGray))
+        .alignment(Alignment::Center)
+        .block(panel_block(title))
 }
 
 fn highlight() -> Style {
@@ -1387,6 +1402,26 @@ mod tests {
         let text = frame_text(&mut app, 100, 30);
         assert!(text.contains("暂无播放历史"), "{text}");
         assert!(!text.contains("标题"), "空态不画表头：{text}");
+    }
+
+    /// 歌单行的缩进口径只有一处：选择框的「新建…」跟普通行同一列起名字。
+    #[test]
+    fn the_playlist_row_indent_has_one_source() {
+        let normal = crate::tui::draw::playlist_row(Some(3), "嗯");
+        let blank = crate::tui::draw::playlist_row(None, "新建…");
+        assert_eq!(normal, "    3  嗯");
+        assert_eq!(blank, "       新建…", "计数那一列留白");
+        assert_eq!(column_of(&blank, "新建"), column_of(&normal, "嗯"), "名字同一列起");
+
+        // 列表真的走这份口径（不是各写各的）。
+        let (mut app, _runtime) = test_app();
+        app.switch_menu(Menu::Playlists);
+        app.nav
+            .playlists
+            .set_items(vec![crate::tui::test_support::test_playlist("1", "嗯")]);
+        let rows = frame_raw(&mut app, 100, 30);
+        let data = rows.iter().find(|row| row.contains("嗯")).expect("有歌单行");
+        assert!(data.contains(&normal), "列表行就是 playlist_row 那一份：{data:?}");
     }
 
     /// 队列浮层也有表头（高度跟着 +1），缓存/下载两列在。

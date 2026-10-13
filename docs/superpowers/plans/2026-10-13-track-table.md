@@ -1836,16 +1836,15 @@ pub(super) fn empty_panel(text: &str, title: &str) -> Paragraph<'static> {
 三处空态改用 `empty_panel`：`content.rs:53-58`、`content.rs:80-85`、`content.rs:211-217`
 （`draw_empty_library` 是**别的**配方——左对齐带黄色强调，不动）。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**（376 项全过）
 
-Run: `cargo test --locked draw::tests` —— 预期全过。
+> **实施记录（2026-10-13）**：`playlist_row` 的计数收 `Option<u64>`——QQ 歌单的
+> `song_count` 本来就是 `u64`，本地歌单是 `songs.len()`（一次 `as u64` 拓宽），
+> `None` 就是选择框那行「新建…」（计数那 5 列留白）。断言改成「两行名字同一列起」+
+> 「列表行就是 `playlist_row` 那一份」（原来那条 `column_of(data,"3") == 2` 是按内容区
+> 起算的，实测渲染行里 `▶ ` 那两列也算进去了）。
 
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/tui/draw/content.rs src/tui/draw/overlay.rs src/tui/draw/mod.rs
-git commit -m "refactor(tui): 歌单行与空态各收成一处(缩进口径不再硬编码)"
-```
+- [x] **Step 5: Commit**
 
 ---
 

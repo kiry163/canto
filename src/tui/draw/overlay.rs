@@ -25,10 +25,10 @@ impl App {
         let height = playlists.len() as u16 + 3;
         let popup = super::overlay_rect(area, width, height);
         frame.render_widget(Clear, popup);
-        // 第一行是「新建…」，跟歌单行同样的缩进宽度（`{:>5}  ` = 7 列）。
-        let mut items = vec![ListItem::new("       新建…")];
+        // 第一行是「新建…」，缩进跟歌单行走同一份口径（计数那 5 列留白）。
+        let mut items = vec![ListItem::new(super::playlist_row(None, "新建…"))];
         items.extend(playlists.iter().map(|playlist| {
-            ListItem::new(format!("{:>5}  {}", playlist.songs.len(), playlist.name))
+            ListItem::new(super::playlist_row(Some(playlist.songs.len() as u64), &playlist.name))
         }));
         let list = List::new(items)
             .block(Block::bordered().title(format!(" 把《{}》加进本地歌单 ", song.title)))
@@ -48,7 +48,9 @@ impl App {
         frame.render_widget(Clear, popup);
         let items: Vec<ListItem> = playlists
             .iter()
-            .map(|playlist| ListItem::new(format!("{:>5}  {}", playlist.song_count, playlist.name)))
+            .map(|playlist| {
+                ListItem::new(super::playlist_row(Some(playlist.song_count), &playlist.name))
+            })
             .collect();
         let list = List::new(items)
             .block(Block::bordered().title(format!(" 把《{}》加进 ", song.title)))
