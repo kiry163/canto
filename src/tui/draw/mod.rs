@@ -1301,6 +1301,94 @@ mod tests {
         assert!(!text.contains("2首"), "筛过之后不该再挂一个总数：{text}");
     }
 
+    /// 历史屏也有表头与那些列；备注列写「时间 · 来源」。
+    #[test]
+    fn the_history_screen_has_a_header_and_a_note_column() {
+        let (mut app, _runtime) = test_app();
+        // 独立的下载目录：默认那个是 `~/Music/canto`，开发机上真躺着「刘若英 - 成全.mp3」，
+        // 这一行就会走「下载里已有」（容器 `MP3`）而不是记录里那份。列口径是 缓存 > 下载 > 记录。
+        app.config.download_dir = std::env::temp_dir()
+            .join(format!("canto-draw-hist-{}", std::process::id()));
+        std::fs::remove_dir_all(&app.config.download_dir).ok();
+        std::fs::create_dir_all(&app.config.download_dir).expect("建下载目录");
+        app.refresh_downloads();
+
+        // 一条「刚听完 QQ 歌」的记录：时长/体积是 Task 8 存进去的那份。
+        // （不真按 Enter 播：QQ 歌要等 vkey 拿到才落历史，测试里没有网络。）
+        app.history.push(
+            crate::history::Entry {
+                mid: "a".to_string(),
+                title: "成全".to_string(),
+                singers: "刘若英".to_string(),
+                at: crate::history::now_secs(),
+                origin: "我的收藏".to_string(),
+                local_path: None,
+                duration_secs: 276,
+                sizes: crate::model::FileSizes { mp3_128: 4_400_000, ..Default::default() },
+            },
+            50,
+        );
+        app.refresh_history_view();
+        app.switch_menu(Menu::History);
+
+        let rows = frame_raw(&mut app, 140, 30);
+        let header = rows
+            .iter()
+            .find(|row| row.contains("时长") && row.contains("备注"))
+            .expect("历史屏有表头");
+        let data = rows.iter().find(|row| row.contains("成全")).expect("有数据行");
+        // 时长右对齐：比右端（表头「时长」4 列、数据 `04:36` 5 列，起点天然差一列）。
+        let width = unicode_width::UnicodeWidthStr::width;
+        assert_eq!(
+            column_of(header, "时长") + width("时长"),
+            column_of(data, "04:36") + width("04:36"),
+            "时长列右端对齐"
+        );
+        assert_eq!(column_of(header, "备注"), column_of(data, "刚刚"), "备注列对齐");
+        assert!(data.contains("MP3 128k"), "历史也报音质：{data}");
+        assert!(data.contains("4.2MB"), "历史也报体积：{data}");
+        assert!(data.contains("刚刚 · 来自《我的收藏》"), "备注列写时间与来源：{data}");
+        assert!(!data.contains("成全 — 刘若英"), "不该再拼「标题 — 歌手」：{data}");
+
+        std::fs::remove_dir_all(&app.config.download_dir).ok();
+    }
+
+    /// 老条目（记录里没有时长/体积）显示占位符，不写假的 0。
+    #[test]
+    fn an_old_history_entry_shows_placeholders() {
+        let (mut app, _runtime) = test_app();
+        app.history.push(
+            crate::history::Entry {
+                mid: "a".to_string(),
+                title: "老条目".to_string(),
+                singers: "某人".to_string(),
+                at: crate::history::now_secs(),
+                origin: "我的收藏".to_string(),
+                local_path: None,
+                duration_secs: 0,
+                sizes: crate::model::FileSizes::default(),
+            },
+            50,
+        );
+        app.refresh_history_view();
+        app.switch_menu(Menu::History);
+        let rows = frame_raw(&mut app, 140, 30);
+        let data = rows.iter().find(|row| row.contains("老条目")).expect("有数据行");
+        assert!(data.contains("--:--"), "老记录写占位符：{data}");
+        // 状态栏那行本来就写引擎位置（`00:00/--:--`），这里只看数据行。
+        assert!(!data.contains("00:00"), "不许写假的 00:00：{data}");
+    }
+
+    /// 历史屏的空态照旧（不是表头的空壳）。
+    #[test]
+    fn the_history_screen_keeps_its_empty_state() {
+        let (mut app, _runtime) = test_app();
+        app.switch_menu(Menu::History);
+        let text = frame_text(&mut app, 100, 30);
+        assert!(text.contains("暂无播放历史"), "{text}");
+        assert!(!text.contains("标题"), "空态不画表头：{text}");
+    }
+
     /// 曲目列表有表头，且与数据同列；缓存/下载两个标记按数据落在正确的列上。
     #[test]
     fn song_lists_have_a_header_aligned_with_the_rows() {

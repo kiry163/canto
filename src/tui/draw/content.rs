@@ -203,10 +203,10 @@ impl App {
         frame.render_widget(Paragraph::new(line), area);
     }
 
-    /// 历史屏：行是「标题 — 歌手」，右侧写「时间 · 来自《来源》」。
+    /// 历史屏：跟别的曲目列表同一副表；备注列写「时间 · 来自《来源》」。
     ///
-    /// 不画时长 / 档位 / 体积那三列——历史里只有 mid / 标题 / 歌手，
-    /// 画出来会是假的 00:00。
+    /// 时长/体积来自记录里存的那份（Task 8），所以这一屏也是有话可说才画；
+    /// 老记录没有就是 `--:--` / `—`，不写假的 0。
     fn draw_history(&mut self, frame: &mut Frame, area: Rect, title: &str) {
         let block = panel_block(title);
         if self.history.is_empty() {
@@ -219,30 +219,34 @@ impl App {
             );
             return;
         }
+        let want = self.config.quality;
         let playing = self.now_playing_mid();
+        let library: HashMap<&str, &Song> =
+            self.library.iter().map(|song| (song.mid.as_str(), song)).collect();
+
+        let inner = block.inner(area);
+        let (head, list_area) = rows::group(inner);
+        let columns = rows::fit(&rows::history_columns(), rows::row_width(list_area.width));
+
         let items: Vec<ListItem> = self
             .nav
             .song_view()
             .visible_rows()
             .map(|(song, label)| {
-                let marker = if playing.as_deref() == Some(song.mid.as_str()) {
-                    "♪"
-                } else {
-                    " "
-                };
-                ListItem::new(Line::from(vec![
-                    Span::raw(format!("{marker} {} — {}", song.title, song.singers)),
-                    Span::raw("  "),
-                    Span::styled(label.to_string(), Style::new().fg(Color::DarkGray)),
-                ]))
+                let row = self.song_row(song, &library, playing.as_deref(), want);
+                // 历史自己的备注：`visible_rows()` 的第二项就是拼好的「时间 · 来自《来源》」。
+                let row = rows::Row { note: Some(label), ..row };
+                ListItem::new(rows::line(&columns, &row))
             })
             .collect();
+
+        frame.render_widget(block, area);
+        if let Some(head) = head {
+            frame.render_widget(Paragraph::new(rows::header(&columns)), head);
+        }
         let mut state = std::mem::take(&mut self.nav.song_view_mut().state);
-        let list = List::new(items)
-            .block(block)
-            .highlight_style(highlight())
-            .highlight_symbol("▶ ");
-        frame.render_stateful_widget(list, area, &mut state);
+        let list = List::new(items).highlight_style(highlight()).highlight_symbol("▶ ");
+        frame.render_stateful_widget(list, list_area, &mut state);
         self.nav.song_view_mut().state = state;
     }
 
