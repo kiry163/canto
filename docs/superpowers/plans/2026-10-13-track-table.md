@@ -1888,7 +1888,31 @@ tuios wait-for window-exit -s canto-dev -w canto-table --timeout 10000
 tuios close-window -s canto-dev canto-table
 ```
 
-- [ ] **Step 4: 跑完整验证并提交**
+- [x] **Step 4: 跑完整验证并提交**（`cargo test --locked` 378 项、clippy 干净）
+
+> **实施记录（2026-10-13，真机 macOS 208×55，未登录）**
+>
+> 验到的（真二进制 + `capture-pane`，日志 `~/.config/canto/canto.log`）：
+> ① 表头逐列对齐——拿显示宽度数过，本地曲库屏 5 列全对（左对齐比起点、右对齐比右端）；
+> ② 本地曲库两首 mp3 报 `MP3` + 真实大小（4.2MB / 3.4MB，与磁盘一致），不再显示配置档位；
+> ③ 临时放一个 3 秒 FLAC 进 `~/Music/canto`，`r` 之后那行是 `FLAC` + `53KB`（54360 字节 ÷ 1024），
+>    删掉文件再 `r` 那行消失（收尾已复原，机器上仍只有原来那两个 mp3）；
+> ④ 播一首本地歌：历史最上面两条（`刚刚`）带真时长/容器/体积，老条目同屏并排；自动续播也落记录；
+> ⑤ 队列浮层与历史屏表头都在（`capture-pane` 是数格子）。
+>
+> 没验到的（这台机器**未登录**：`~/.config/canto` 里没有 `session.json`，源码里 `history.json`
+> 109 条但历史屏只列本地条目、收藏 0 首）：`●`/`↓` 的真机表现、`d` 下载后 `↓` 立刻出现、
+> 删文件 + `r` 后 `↓` 消失、历史老条目的占位符。这几条要扫码登录后补；眼下由第一层代偿
+> （`rows.rs` 的行取值四态 + `draw/mod.rs` 的老条目 `--:--`）。
+>
+> 另外两处实测修正：
+> ① spec §6 里「内容区高 < 6 不画表头」**在真窗口里够不着**——窗口下限 60×15 给内容区 10 行，
+>    歌词栏要 `高 ≥ 20` 才占位（最紧一档仍是 10 行），所以这条只在 `rows::tests` 的 `group`
+>    单测里钉，draw 层改成钉「最小的合法窗口仍然画表头」（就是 spec 说的「最紧那一档仍然画」）。
+> ② 顺手发现一个**既有**缺陷（不属这次改动，未改）：`refresh_local_view`（`state.rs:2205`）
+>    把 `previous` 无条件写回 `state.select(previous)`，冷启动第一次进 `5` 时 `previous` 是 `None`
+>    → 那一屏一行都没高亮、`Enter/a/x/d` 全无反应，按一下 `j`/`k` 才恢复。`refresh_history_view`
+>    的写法是对的，照它改三行即可。
 
 ```bash
 cargo test --locked

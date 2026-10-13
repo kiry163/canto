@@ -1404,6 +1404,40 @@ mod tests {
         assert!(!text.contains("标题"), "空态不画表头：{text}");
     }
 
+    /// 60 列（最小窗口）下「备注」被撤掉、`缓存`/`下载` 还在；矮屏把表头那一行还给数据。
+    #[test]
+    fn a_sixty_column_history_drops_the_note_and_a_short_list_drops_the_header() {
+        let (mut app, _runtime) = test_app();
+        app.history.push(
+            crate::history::Entry {
+                mid: "a".to_string(),
+                title: "成全".to_string(),
+                singers: "刘若英".to_string(),
+                at: crate::history::now_secs(),
+                origin: "我的收藏".to_string(),
+                local_path: None,
+                duration_secs: 276,
+                sizes: crate::model::FileSizes::default(),
+            },
+            50,
+        );
+        app.refresh_history_view();
+        app.switch_menu(Menu::History);
+
+        let rows = frame_raw(&mut app, 60, 15);
+        let header = rows
+            .iter()
+            .find(|row| row.contains("缓存"))
+            .expect("60 列下也有表头");
+        assert!(header.contains("下载"), "两个标记列都在：{header:?}");
+        assert!(!header.contains("备注"), "60 列撤掉「备注」：{header:?}");
+        assert!(rows.iter().any(|row| row.contains("成全")), "数据行还在");
+        // 最小的合法窗口（60×15 → 内容区 10 行）仍然画表头：这一档是 spec 尺寸矩阵里最紧的
+        // 一档。「内容区 < 6 行不画表头」那条走 `group` 的单元测试（`rows::tests`）——它要
+        // 内容区真的矮到 6 行以下才触发，而窗口下限（60×15）与歌词栏下限（高 ≥ 20 才占位）
+        // 一起把这条路堵住了：最紧也只是 10 行。
+    }
+
     /// 歌单行的缩进口径只有一处：选择框的「新建…」跟普通行同一列起名字。
     #[test]
     fn the_playlist_row_indent_has_one_source() {

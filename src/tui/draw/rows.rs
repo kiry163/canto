@@ -430,6 +430,46 @@ mod tests {
     }
 
     /// 宽屏：9 列全在，定宽列一个都不许动。
+    /// spec §6：60 / 80 / 120 / 200 列各钉一次「哪些列在、`标题`/`歌手` 拿到多少列、正好铺满」。
+    #[test]
+    fn the_fit_shapes_at_the_four_window_widths() {
+        // (宽度, 用历史列集, 列数, 标题宽, 歌手宽)
+        let cases = [
+            (60_u16, false, 8, 12, 12), // 60 列（最小窗口）：撤「备注」，正好铺满
+            (80, false, 8, 22, 22),
+            (120, false, 8, 42, 42),
+            (200, false, 8, 82, 82),
+            (60, true, 8, 12, 12),
+            (80, true, 9, 13, 13), // 80 列起 9 列全在，余量在三个 `Fill` 里等分
+            (120, true, 9, 27, 26), // 除不尽时多出来那一列给前面的
+            (200, true, 9, 53, 53),
+        ];
+        for (width, history, count, title, singers) in cases {
+            let columns = if history { history_columns() } else { track_columns() };
+            let fitted = fit(&columns, width);
+            assert_eq!(
+                fitted.len(),
+                count,
+                "{width} 列（历史={history}）的列数：{fitted:?}"
+            );
+            assert_eq!(
+                width_of(&fitted, Field::Title),
+                title,
+                "{width} 列（历史={history}）的标题宽"
+            );
+            assert_eq!(
+                width_of(&fitted, Field::Singers),
+                singers,
+                "{width} 列（历史={history}）的歌手宽"
+            );
+            assert_eq!(
+                total(&fitted),
+                width,
+                "{width} 列（历史={history}）要正好铺满"
+            );
+        }
+    }
+
     #[test]
     fn a_wide_window_keeps_every_column() {
         let fitted = fit(&history_columns(), 160);
