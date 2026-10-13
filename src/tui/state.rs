@@ -3,7 +3,7 @@
 //! 这里只有「状态 + 网络消息 + 按键派发」，不画一帧（绘制在 [`super::draw`]）。
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -557,10 +557,9 @@ pub(super) struct App {
     /// 放在 `App::new` 里的话，`test_app()` 会跟着注册真的系统热键。
     pub(super) hotkeys: hotkeys::Hotkeys,
     /// 桌面歌词的覆盖层。同样从 `DesktopLyrics::none()` 起步，真装卸只发生在 `tui::run`
-    /// ——放在 `App::new` 里的话，`test_app()` 会跟着真弹一个窗口出来。
+    /// ——放在 `App::new` 里的话，`test_app()` 会跟着真弹一个窗口出来。开关归全局热键
+    /// （`Action::LyricsWindow`），拖动回传的位置通道也在这个句柄里。
     pub(super) overlay: overlay::DesktopLyrics,
-    /// 拖动歌词窗口后，窗口线程回传的新中心点（非 Windows 或关掉功能时是 `None`）。
-    pub(super) lyrics_positions: Option<Receiver<(i32, i32)>>,
     /// 当前屏幕。
     pub(super) screen: Screen,
     /// 播放历史（内存里这份是权威，落盘在每次追加后同步）。
@@ -636,7 +635,6 @@ impl App {
             config,
             hotkeys: hotkeys::Hotkeys::none(),
             overlay: overlay::DesktopLyrics::none(),
-            lyrics_positions: None,
             // 默认主界面；启动时由 `tui::run` 按会话状态决定，测试里也就不用管登录。
             screen: Screen::Main,
             history: History::default(),
@@ -1376,6 +1374,12 @@ impl App {
             keys::Action::ToggleLyric => self.show_lyric = !self.show_lyric,
             keys::Action::ToggleNowPlaying => self.now_playing_full = !self.now_playing_full,
             keys::Action::LyricsLock => self.overlay.toggle_lock(),
+            keys::Action::LyricsWindow => {
+                // 起不来只报一句（状态文件不动：它记的是「你想开着」，再按一次就是重试）。
+                if let Some(error) = self.overlay.toggle(&self.config.desktop_lyrics).1 {
+                    self.notify(error);
+                }
+            }
             keys::Action::PlayPause => self.engine.toggle_pause(),
             keys::Action::Next => self.play_relative(true),
             keys::Action::Prev => self.play_relative(false),
@@ -1763,22 +1767,21 @@ impl App {
         for action in self.hotkeys.drain() {
             self.dispatch_hotkey(action);
         }
-        // 桌面歌词：只在变化时推；拖出来的位置顺手落盘。
-        // 关掉功能时整段不进（`sync` 会现造 payload，哪怕句柄是空的）——「关掉就零成本」。
-        if self.config.desktop_lyrics.enabled {
+        // 桌面歌词：开着才推（`sync` 会现造 payload —— 「关掉就零成本」）。窗口是热键真拆真建的，
+        // 这里问的是「现在有没有窗口」，不是「配置里开着吗」。
+        if self.overlay.is_running() {
             let snapshot = self.engine.snapshot();
             self.overlay.sync(
                 overlay::Frame { lyric: self.lyric.as_ref(), snapshot: &snapshot },
                 &self.config.desktop_lyrics,
             );
         }
-        if let Some(positions) = &self.lyrics_positions {
-            let path = crate::paths::desktop_lyrics_path();
-            while let Ok(center) = positions.try_recv() {
-                if let Err(error) = overlay::save_center(&path, center) {
-                    tracing::warn!("写歌词窗口位置失败：{error:#}");
-                }
-            }
+        // 开关翻了、或拖出过新位置：落盘（开关与位置同在 `desktop-lyrics.json`）。
+        if let Some(state) = self.overlay.take_state()
+            && let Err(error) =
+                overlay::save_state(&crate::paths::desktop_lyrics_path(), state)
+        {
+            tracing::warn!("写歌词窗口状态失败：{error:#}");
         }
         // 频谱：只在全屏视图开着且正在播时取，别的屏不付这份算力。
         let now = std::time::Instant::now();
@@ -2242,6 +2245,16 @@ mod tests {
         app.screen = Screen::Login(LoginState::default());
         app.dispatch_hotkey(keys::Action::LyricsLock);
         assert_eq!(app.overlay.locked(), !before, "登录屏也要按同一条规则被挡住");
+    }
+
+    /// `lyrics` 是第 7 条全局热键（开 / 关歌词窗口）。这里只钉「登录屏挡住」这一半：
+    /// 主界面那一半会真建窗口，归真机冒烟（跟 `App::new` 不许 install 是同一个理由）。
+    #[test]
+    fn the_lyrics_window_hotkey_is_blocked_on_the_login_screen() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.screen = Screen::Login(LoginState::default());
+        app.dispatch_hotkey(keys::Action::LyricsWindow);
+        assert!(!app.overlay.is_running(), "登录屏不该被全局热键穿透");
     }
 
     #[test]

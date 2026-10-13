@@ -71,14 +71,14 @@ pub fn run(
     if let Some(text) = report.notice() {
         app.notify(text);
     }
-    // 桌面歌词（Windows）：装一个覆盖层窗口。关掉功能 / 非 Windows / 起不来都得到空句柄，
+    // 桌面歌词：装一个覆盖层窗口（Windows / macOS）。状态文件说开着（或者老配置里的
+    // `enabled` 说开着）才建窗口；之后由全局热键真拆真建。平台不支持 / 起不来都得到空句柄，
     // 界面照跑——起不来的原因在日志里。
     let installed = overlay::DesktopLyrics::install(
         &app.config.desktop_lyrics,
-        overlay::load_center(&crate::paths::desktop_lyrics_path()),
+        overlay::load_state(&crate::paths::desktop_lyrics_path()),
     );
     app.overlay = installed.overlay;
-    app.lyrics_positions = installed.positions;
     if let Some(error) = installed.error {
         tracing::warn!(%error, "桌面歌词起不来");
         app.notify("歌词窗口起不来");

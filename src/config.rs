@@ -87,6 +87,8 @@ pub struct HotkeyConfig {
     pub volume_down: String,
     /// 桌面歌词的锁定/解锁。
     pub lock: String,
+    /// 开 / 关桌面歌词窗口（关掉 = 把窗口拆了）。
+    pub lyrics: String,
 }
 
 impl Default for HotkeyConfig {
@@ -98,6 +100,7 @@ impl Default for HotkeyConfig {
             volume_up: String::new(),
             volume_down: String::new(),
             lock: String::new(),
+            lyrics: String::new(),
         };
         // 默认组合只在 `hotkeys::DEFAULTS` 里写一遍：配置模板也读它，改一处不会说岔。
         for (field, keys, _) in hotkeys::DEFAULTS {
@@ -118,6 +121,7 @@ impl HotkeyConfig {
             "volume_up" => &self.volume_up,
             "volume_down" => &self.volume_down,
             "lock" => &self.lock,
+            "lyrics" => &self.lyrics,
             _ => "",
         }
     }
@@ -131,6 +135,7 @@ impl HotkeyConfig {
             "volume_up" => self.volume_up = keys.to_string(),
             "volume_down" => self.volume_down = keys.to_string(),
             "lock" => self.lock = keys.to_string(),
+            "lyrics" => self.lyrics = keys.to_string(),
             _ => {}
         }
     }
@@ -171,14 +176,13 @@ impl Rgb {
     }
 }
 
-/// `[desktop_lyrics]` 段：桌面歌词（Windows 覆盖层）。
+/// `[desktop_lyrics]` 段：桌面歌词覆盖层（Windows / macOS）。
 ///
-/// 九个字段全是**偏好**；窗口位置是状态，写在 `desktop-lyrics.json` 里，不在这儿。
+/// 八个字段全是**偏好**；开 / 关与窗口位置是**状态**（全局热键翻、拖动改），记在
+/// `desktop-lyrics.json` 里，不在这儿。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesktopLyricsConfig {
-    /// 关掉 = 不建线程、不建窗口（零成本）。
-    pub enabled: bool,
-    /// 字体面；系统里没有这个字体就让 GDI 自己回退。
+    /// 字体面；系统里没有这个字体就让平台自己回退。
     pub font: String,
     /// 逻辑像素，实际按窗口 DPI 缩放。
     pub font_size: u32,
@@ -194,12 +198,14 @@ pub struct DesktopLyricsConfig {
     pub show_translation: bool,
     /// 暂停时是否隐藏（默认留着）。
     pub hide_when_paused: bool,
+    /// 老配置里的 `enabled`（**已移除**）：只在状态文件还没记过开关时当一次启动初值
+    /// （见 `overlay::start_shown`），之后一律由热键与状态文件说了算。
+    pub legacy_enabled: Option<bool>,
 }
 
 impl Default for DesktopLyricsConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
             font: "Microsoft YaHei UI".to_string(),
             font_size: 28,
             color: Rgb { r: 255, g: 255, b: 255 },
@@ -208,6 +214,7 @@ impl Default for DesktopLyricsConfig {
             opacity: 90,
             show_translation: true,
             hide_when_paused: false,
+            legacy_enabled: None,
         }
     }
 }
@@ -230,6 +237,7 @@ fn take_color(field: &str, text: Option<String>, slot: &mut Rgb, warnings: &mut 
 /// `u8`/`u32` 范围检查失败：那会把整份配置文件一起丢掉（用户只是多写了个数）。
 #[derive(Debug, Default, Deserialize)]
 struct RawDesktopLyrics {
+    /// 已移除的键：只剩「读出来、给一条警告、当一次启动初值」这点用处。
     enabled: Option<bool>,
     font: Option<String>,
     font_size: Option<i64>,
@@ -302,9 +310,12 @@ impl Raw {
         // 桌面歌词：全 `Option` 的原始形状折成配置。颜色写坏了退回默认值 + 一条点名警告。
         let raw = self.desktop_lyrics.unwrap_or_default();
         let mut lyrics = DesktopLyricsConfig::default();
-        if let Some(enabled) = raw.enabled {
-            lyrics.enabled = enabled;
+        // `enabled` 已移除：开关改用全局热键（状态记在 `desktop-lyrics.json`）。老配置里的值
+        // 不丢——状态文件还没记过开关时，`overlay::start_shown` 拿它当一次启动初值。
+        if raw.enabled.is_some() {
+            warnings.push("[desktop_lyrics] enabled 已移除（改用热键开关歌词）".to_string());
         }
+        lyrics.legacy_enabled = raw.enabled;
         if let Some(font) = raw.font.filter(|font| !font.trim().is_empty()) {
             lyrics.font = font;
         }
@@ -461,12 +472,12 @@ fn write_default(path: &Path) -> Result<()> {
          {hotkey_lines}\
          #\n\
          # 桌面歌词（Windows / macOS）：播放时在桌面之上浮一条歌词，默认点不着；\n\
-         # 全局热键 lock 解锁后能拖动（位置记在 desktop-lyrics.json）。\n\
-         # enabled = false 就完全不起这个窗口；颜色写 #RRGGBB，opacity 是 0-100。\n\
+         # 全局热键 lyrics（默认 ctrl+shift+d）开 / 关这个窗口，lock 解锁后能拖动\n\
+         # ——开关与位置都是状态，记在 desktop-lyrics.json 里。\n\
+         # 颜色写 #RRGGBB，opacity 是 0-100。\n\
          # font 是字体面：默认那串是 Windows 的中文字体，macOS 上认不出来会自动回退系统字体\n\
          # （想指定就写 macOS 上有的名字，如 \"PingFang SC\"）。\n\
          [desktop_lyrics]\n\
-         enabled = true\n\
          font = \"Microsoft YaHei UI\"\n\
          font_size = 28\n\
          color = \"#FFFFFF\"\n\
@@ -508,7 +519,7 @@ mod tests {
         assert_eq!(config.hotkeys, HotkeyConfig::default());
         assert_eq!(config.hotkeys.play_pause, "ctrl+shift+space");
         assert_eq!(config.hotkeys.volume_down, "ctrl+shift+down");
-        assert_eq!(config.hotkeys.bindings().len(), 6);
+        assert_eq!(config.hotkeys.bindings().len(), 7);
         assert!(warning.is_none(), "缺段不是错误：{warning:?}");
     }
 
@@ -518,7 +529,8 @@ mod tests {
         let (config, warning) = load_from("hotkeys-partial", "[hotkeys]\nnext = \"ctrl+alt+n\"\n");
         assert_eq!(config.hotkeys.next, "ctrl+alt+n");
         assert_eq!(config.hotkeys.prev, "ctrl+shift+left", "没写的字段用默认组合");
-        assert_eq!(config.hotkeys.bindings().len(), 6);
+        assert_eq!(config.hotkeys.bindings().len(), 7);
+        assert_eq!(config.hotkeys.lyrics, "ctrl+shift+d");
         assert!(warning.is_none(), "{warning:?}");
     }
 
@@ -527,7 +539,7 @@ mod tests {
         let (config, warning) = load_from("hotkeys-empty", "[hotkeys]\nplay_pause = \"\"\n");
         assert_eq!(config.hotkeys.play_pause, "");
         let bindings = config.hotkeys.bindings();
-        assert_eq!(bindings.len(), 5);
+        assert_eq!(bindings.len(), 6);
         assert!(!bindings.iter().any(|binding| binding.action == keys::Action::PlayPause));
         assert!(warning.is_none(), "明确禁用不该警告：{warning:?}");
     }
@@ -537,7 +549,7 @@ mod tests {
     fn a_bare_key_is_refused_and_cleared() {
         let (config, warning) = load_from("hotkeys-bare", "[hotkeys]\nplay_pause = \"space\"\n");
         assert_eq!(config.hotkeys.play_pause, "", "非法值要清掉，别留个不会注册的字符串");
-        assert_eq!(config.hotkeys.bindings().len(), 5, "其余五条照旧");
+        assert_eq!(config.hotkeys.bindings().len(), 6, "其余六条照旧");
         let warning = warning.expect("应给出警告");
         assert!(warning.contains("[hotkeys] play_pause"), "{warning}");
         assert!(warning.contains("space"), "{warning}");
@@ -581,12 +593,22 @@ mod tests {
     fn the_missing_desktop_lyrics_section_gives_the_documented_defaults() {
         let (config, warning) = load_from("lyrics-missing", "quality = \"flac\"\n");
         assert_eq!(config.desktop_lyrics, DesktopLyricsConfig::default());
-        assert!(config.desktop_lyrics.enabled, "默认就开（跟 [hotkeys] 一个口径）");
+        assert_eq!(config.desktop_lyrics.legacy_enabled, None, "没写就是没写");
         assert_eq!(config.desktop_lyrics.font, "Microsoft YaHei UI");
         assert_eq!(config.desktop_lyrics.font_size, 28);
         assert_eq!(config.desktop_lyrics.opacity, 90);
         assert!(!config.desktop_lyrics.hide_when_paused);
         assert!(warning.is_none(), "缺段不是错误：{warning:?}");
+    }
+
+    /// `enabled` 已移除（开关改用全局热键），但老配置里的值不能白丢：留着当启动初值 + 说一句。
+    #[test]
+    fn the_removed_enabled_key_warns_and_still_seeds_the_switch() {
+        let (config, warning) = load_from("lyrics-legacy", "[desktop_lyrics]\nenabled = false\n");
+        assert_eq!(config.desktop_lyrics.legacy_enabled, Some(false));
+        assert_eq!(config.desktop_lyrics.font, "Microsoft YaHei UI", "别的键照旧生效");
+        let warning = warning.expect("应给出警告");
+        assert!(warning.contains("[desktop_lyrics] enabled"), "{warning}");
     }
 
     #[test]
@@ -663,7 +685,8 @@ mod tests {
         assert!(warning.is_none(), "{warning:?}");
     }
 
-    /// 模板里九个键都写出来（值跟默认值一致），否则「改配置」这件事没有说明书。
+    /// 模板里八个键都写出来（值跟默认值一致），否则「改配置」这件事没有说明书；
+    /// `enabled` 已经不在那儿了（开关归热键）。
     #[test]
     fn the_generated_template_documents_desktop_lyrics() {
         let dir = std::env::temp_dir().join(format!("canto-config-lyrics-{}", std::process::id()));
@@ -676,7 +699,6 @@ mod tests {
         assert!(text.contains("[desktop_lyrics]"), "{text}");
         let defaults = DesktopLyricsConfig::default();
         for key in [
-            format!("enabled = {}", defaults.enabled),
             format!("font = \"{}\"", defaults.font),
             format!("font_size = {}", defaults.font_size),
             format!("opacity = {}", defaults.opacity),
@@ -686,6 +708,7 @@ mod tests {
             assert!(text.contains(&key), "模板里缺 {key}：{text}");
         }
         assert!(text.contains("color = \"#FFFFFF\""), "{text}");
+        assert!(!text.contains("enabled"), "enabled 已移除，别在模板里留个不生效的键：{text}");
     }
 
     #[test]

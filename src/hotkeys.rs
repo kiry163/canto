@@ -21,13 +21,14 @@ pub struct Binding {
 }
 
 /// 默认组合：字段名跟 `config::HotkeyConfig` 一一对应，也是配置模板与警告文案的真源。
-pub const DEFAULTS: [(&str, &str, Action); 6] = [
+pub const DEFAULTS: [(&str, &str, Action); 7] = [
     ("play_pause", "ctrl+shift+space", Action::PlayPause),
     ("next", "ctrl+shift+right", Action::Next),
     ("prev", "ctrl+shift+left", Action::Prev),
     ("volume_up", "ctrl+shift+up", Action::VolumeUp),
     ("volume_down", "ctrl+shift+down", Action::VolumeDown),
     ("lock", "ctrl+shift+l", Action::LyricsLock),
+    ("lyrics", "ctrl+shift+d", Action::LyricsWindow),
 ];
 
 /// 组合能不能用：crate 认键名（顺带给出解析好的 `HotKey`），另外**必须有修饰键**。
@@ -461,9 +462,12 @@ mod tests {
     }
 
     #[test]
-    fn the_defaults_are_the_six_combos_the_spec_fixed() {
+    fn the_defaults_are_the_seven_combos_the_spec_fixed() {
         let fields: Vec<&str> = DEFAULTS.iter().map(|(field, _, _)| *field).collect();
-        assert_eq!(fields, ["play_pause", "next", "prev", "volume_up", "volume_down", "lock"]);
+        assert_eq!(
+            fields,
+            ["play_pause", "next", "prev", "volume_up", "volume_down", "lock", "lyrics"]
+        );
         let combos: Vec<&str> = DEFAULTS.iter().map(|(_, keys, _)| *keys).collect();
         assert_eq!(
             combos,
@@ -473,7 +477,8 @@ mod tests {
                 "ctrl+shift+left",
                 "ctrl+shift+up",
                 "ctrl+shift+down",
-                "ctrl+shift+l"
+                "ctrl+shift+l",
+                "ctrl+shift+d"
             ]
         );
         let actions: Vec<Action> = DEFAULTS.iter().map(|(_, _, action)| *action).collect();
@@ -485,7 +490,8 @@ mod tests {
                 Action::Prev,
                 Action::VolumeUp,
                 Action::VolumeDown,
-                Action::LyricsLock
+                Action::LyricsLock,
+                Action::LyricsWindow
             ]
         );
         // 每个默认组合本身必须合法，否则开箱就报错。

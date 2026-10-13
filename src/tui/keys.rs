@@ -68,6 +68,9 @@ pub enum Action {
     InputBackspace,
     /// 全局热键 `lock`：切桌面歌词的锁定/解锁（界面上没有对应按键）。
     LyricsLock,
+    /// 全局热键 `lyrics`：开 / 关桌面歌词窗口——关掉是把窗口**拆了**（不是藏起来），
+    /// 状态记在 `desktop-lyrics.json`（界面上没有对应按键）。
+    LyricsWindow,
 }
 
 /// 按键时的上下文：模态与输入态在这里体现，`resolve` 不再自己猜。

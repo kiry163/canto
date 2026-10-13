@@ -1,8 +1,9 @@
 //! 桌面歌词：取词、状态机与窗口位置（平台无关的那一半）。
 //!
 //! 平台相关的部分在下面 `cfg` 子模块里：Windows 是「专用线程 + 分层窗口 + DIB 绘制」，
-//! 其它平台是空实现。状态机是两半共用的——将来写 macOS 那份只需要补窗口与画字，
-//! `Frame` / `Payload` / 位置状态一行都不用动。
+//! macOS 是「主线程上建无边框 NSPanel + 三个透明 label」，其它平台空实现。状态机是两半
+//! 共用的——多写一份窗口实现只需要补 `imp` 那三个方法（建、推、拆），
+//! `Frame` / `Payload` / 窗口位置 / 开关状态一行都不用动。
 
 use std::path::Path;
 use std::sync::mpsc::Receiver;
@@ -191,28 +192,60 @@ fn primary_screen() -> (i32, i32) {
     (1920, 1080)
 }
 
-/// 位置状态文件的内容。
-#[derive(Debug, serde::Deserialize, serde::Serialize)]
-struct Center {
-    cx: i32,
-    cy: i32,
+/// 开关与窗口中心点，都记在 `desktop-lyrics.json` 里。
+///
+/// 两件都是**状态**不是偏好：开关由全局热键翻（`DesktopLyrics::toggle`），位置由拖动改，所以
+/// 不写 `config.toml`——那里面写的是偏好，而且热键去改使用者的配置文件会连注释一起毁掉。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SavedState {
+    /// `None` = 还没记过开关（第一次跑，或者文件是升级前那份）。启动初值见 [`start_shown`]。
+    pub shown: Option<bool>,
+    /// 窗口中心点（左上原点）。`None` = 没记过，用默认的底部居中。
+    pub center: Option<(i32, i32)>,
 }
 
-/// 读窗口中心点；文件不在或读坏了就是 `None`（调用方退回默认位置）。
-pub fn load_center(path: &Path) -> Option<(i32, i32)> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let center: Center = serde_json::from_str(&text).ok()?;
-    Some((center.cx, center.cy))
+/// 文件里的形状：开关与中心点都可缺（升级前那份只有中心点）。
+#[derive(serde::Deserialize, serde::Serialize)]
+struct SavedFile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shown: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cx: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cy: Option<i32>,
 }
 
-/// 写窗口中心点（临时文件 + rename，中途失败不留坏文件——跟 `history.rs` 一个套路）。
-pub fn save_center(path: &Path, center: (i32, i32)) -> Result<()> {
+/// 启动时开不开：状态文件优先（缺 `shown` = 还没记过），其次老配置里遗留的 `enabled`
+/// （那个键已移除，但用它当一次初值，免得「明明设了关、升级后冒出个窗口」），再不然默认开。
+fn start_shown(saved: Option<bool>, legacy: Option<bool>) -> bool {
+    saved.or(legacy).unwrap_or(true)
+}
+
+/// 读开关与中心点；文件不在或读坏了就是「什么都没记」（调用方退回默认）。
+pub fn load_state(path: &Path) -> SavedState {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return SavedState::default();
+    };
+    let Ok(file) = serde_json::from_str::<SavedFile>(&text) else {
+        return SavedState::default();
+    };
+    // 半个坐标当没记：那种文件是人手改坏的。
+    SavedState { shown: file.shown, center: file.cx.zip(file.cy) }
+}
+
+/// 写开关与中心点（临时文件 + rename，中途失败不留坏文件——跟 `history.rs` 一个套路）。
+pub fn save_state(path: &Path, state: SavedState) -> Result<()> {
     let Some(parent) = path.parent() else {
         return Ok(());
     };
     std::fs::create_dir_all(parent)
         .with_context(|| format!("创建配置目录失败：{}", parent.display()))?;
-    let text = serde_json::to_string(&Center { cx: center.0, cy: center.1 })?;
+    let file = SavedFile {
+        shown: state.shown,
+        cx: state.center.map(|center| center.0),
+        cy: state.center.map(|center| center.1),
+    };
+    let text = serde_json::to_string(&file)?;
     let temp = path.with_extension("json.tmp");
     std::fs::write(&temp, text).with_context(|| format!("写 {} 失败", temp.display()))?;
     std::fs::rename(&temp, path).with_context(|| format!("替换 {} 失败", path.display()))
@@ -222,35 +255,122 @@ pub fn save_center(path: &Path, center: (i32, i32)) -> Result<()> {
 pub struct DesktopLyrics {
     state: State,
     imp: imp::Imp,
+    /// 意图：窗口该开着吗。落盘写的是它（真相看 [`DesktopLyrics::is_running`]）。
+    shown: bool,
+    /// 窗口中心点：上次拖动回传的，或启动时从状态文件读到的；没记过就是 `None`（用默认位置）。
+    center: Option<(i32, i32)>,
+    /// 拖动时窗口线程回传新中心点的通道。**跟窗口同生命周期**：拆窗口时一起丢、重建时换成
+    /// 新的——所以它在这儿，不在 `App` 上（放 `App` 上的话重建后拿到的还是旧通道）。
+    positions: Option<Receiver<(i32, i32)>>,
+    /// 开关或位置变过、还没落盘。
+    dirty: bool,
 }
 
 /// 装出来的东西。
 pub struct Installed {
     pub overlay: DesktopLyrics,
-    /// 拖动结束时回传的新中心点（Linux / 关掉功能 / 建不起来时是 `None`）。
-    pub positions: Option<Receiver<(i32, i32)>>,
     /// `Some` = 起不来（调用方报一句 + 日志），此时 `overlay` 是空句柄。
     pub error: Option<String>,
 }
 
 impl DesktopLyrics {
-    /// 空句柄：关掉功能、Linux、建不起来、`App::new` 与测试都用它；`sync`/`toggle_lock` 是空操作
-    /// （`sync` 仍会每帧泵一次平台事件，只是没有窗口可泵）。
+    /// 空句柄：Linux、`App::new` 与测试都用它；`sync` 什么都不做，`is_running()` 是 `false`。
     pub fn none() -> Self {
-        Self { state: State::default(), imp: imp::Imp::none() }
+        Self {
+            state: State::default(),
+            imp: imp::Imp::none(),
+            shown: false,
+            center: None,
+            positions: None,
+            dirty: false,
+        }
     }
 
-    /// 按配置与已存的中心点起覆盖层。
-    pub fn install(config: &DesktopLyricsConfig, saved: Option<(i32, i32)>) -> Installed {
-        if !config.enabled {
-            return Installed { overlay: Self::none(), positions: None, error: None };
+    /// 启动：状态文件（或老配置里的 `enabled`）说开着就建窗口。
+    ///
+    /// 建不起来只报一句、界面照跑——**不改意图、不落盘**：文件记的是「你想开着」，按一次热键
+    /// 就是重试。
+    pub fn install(config: &DesktopLyricsConfig, saved: SavedState) -> Installed {
+        let mut overlay = Self { center: saved.center, ..Self::none() };
+        if !start_shown(saved.shown, config.legacy_enabled) {
+            return Installed { overlay, error: None };
         }
-        // 存过中心点就用它（顺手夹回主屏内）；没有就用默认的底部居中。
+        let error = overlay.enable(config);
+        Installed { overlay, error }
+    }
+
+    /// 开 / 关（全局热键那一份）。返回新状态与「建不起来」的原因。
+    ///
+    /// 关 = 真拆窗口（Windows 收线程与窗口、macOS 放掉 panel），开 = 真建一个。两端共用的
+    /// 记账都在这里，平台差异只在 `imp`。
+    pub fn toggle(&mut self, config: &DesktopLyricsConfig) -> (bool, Option<String>) {
+        if self.imp.running() {
+            self.disable();
+            return (false, None);
+        }
+        if let Some(error) = self.enable(config) {
+            return (self.shown, Some(error));
+        }
+        if self.imp.running() {
+            self.shown = true;
+            self.dirty = true;
+            return (true, None);
+        }
+        // 这个平台没有覆盖层实现（跟 `hotkeys` 的空实现一个口径）：没窗口可管，什么都不动。
+        (self.shown, None)
+    }
+
+    /// 建窗口。`Some` = 起不来（此时 `imp` 仍是空句柄，`is_running()` 是 `false`）。
+    fn enable(&mut self, config: &DesktopLyricsConfig) -> Option<String> {
+        if self.imp.running() {
+            return None;
+        }
+        // 存过中心点就用它（顺手夹回主屏内，换过显示器/分辨率时不会跑到屏外）；没有就底部居中。
         let screen = primary_screen();
         let center =
-            saved.map_or_else(|| default_center(screen), |center| clamp_center(center, screen));
+            self.center.map_or_else(|| default_center(screen), |center| clamp_center(center, screen));
         let (imp, positions, error) = imp::install(config, center);
-        Installed { overlay: Self { state: State::default(), imp }, positions, error }
+        self.imp = imp;
+        if error.is_some() || !self.imp.running() {
+            return error;
+        }
+        self.adopt_window(center, positions);
+        None
+    }
+
+    /// 拆窗口：连线程/panel 一起收掉，位置通道作废，锁定态与 payload 记账一并忘掉。
+    ///
+    /// 位置（`center`）留着——下次开回来还在原地。
+    fn disable(&mut self) {
+        self.imp = imp::Imp::none();
+        self.positions = None;
+        self.state = State::default();
+        self.shown = false;
+        self.dirty = true;
+    }
+
+    /// 建完窗口之后的记账（跟「建窗口」那件不能单测的事分开，这里能单测）。
+    fn adopt_window(&mut self, center: (i32, i32), positions: Option<Receiver<(i32, i32)>>) {
+        // `State` 必须回到初始态：它记着上一份窗口的 payload，不清的话新窗口第一帧
+        // `advance()` 会判定「没变化」而什么都不推——窗口就永远空着。锁定态也跟着回默认
+        // （拆了再建是锁定的，鼠标穿透）。
+        self.state = State::default();
+        self.center = Some(center);
+        self.positions = positions;
+    }
+
+    /// 现在开着吗（真相，不是意图：起不来的窗口不算开着）。
+    pub fn is_running(&self) -> bool {
+        self.imp.running()
+    }
+
+    /// 开关或位置变过就给一份、并清掉标记；没变过给 `None`（调用方据此决定落不落盘）。
+    pub fn take_state(&mut self) -> Option<SavedState> {
+        if !self.dirty {
+            return None;
+        }
+        self.dirty = false;
+        Some(SavedState { shown: Some(self.shown), center: self.center })
     }
 
     /// 每帧调一次：先泵平台那边的事件，再有变化就把新 payload 推给窗口。
@@ -258,15 +378,38 @@ impl DesktopLyrics {
     /// 泵必须每帧都跑（payload 没变也要）：macOS 的拖动与重绘全靠它，而拖动过程中 payload
     /// 恰恰是不变的——只在变化时泵会把拖动冻住。
     pub fn sync(&mut self, frame: Frame<'_>, config: &DesktopLyricsConfig) {
+        // 没窗口就整段不进：连 payload 都不造（「关掉就零成本」靠这一句守着）。
+        if !self.imp.running() {
+            return;
+        }
         self.imp.pump();
         if let Some(payload) = self.state.advance(frame, config) {
             self.imp.push(payload);
         }
+        self.collect_centers();
     }
 
     /// 切锁定/解锁（下一帧 `sync` 自然会把新锁定态推出去）。
     pub fn toggle_lock(&mut self) {
         self.state.toggle_lock();
+    }
+
+    /// 排空位置通道（拖动结束时窗口线程回传的新中心点）：取最后一条，变了才置 `dirty`
+    /// ——中间那些没人看，反正写的都是同一个文件。
+    fn collect_centers(&mut self) {
+        let Some(positions) = &self.positions else {
+            return;
+        };
+        let mut latest = None;
+        while let Ok(center) = positions.try_recv() {
+            latest = Some(center);
+        }
+        if let Some(center) = latest
+            && self.center != Some(center)
+        {
+            self.center = Some(center);
+            self.dirty = true;
+        }
     }
 
     /// 现在是解锁的吗。
@@ -297,7 +440,9 @@ mod imp {
     use std::sync::{Arc, Mutex};
     use std::thread::JoinHandle;
 
-    use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
+    use windows_sys::Win32::Foundation::{
+        ERROR_CLASS_ALREADY_EXISTS, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
+    };
     use windows_sys::Win32::Graphics::Gdi::{
         AC_SRC_ALPHA, AC_SRC_OVER, ANTIALIASED_QUALITY, BI_RGB, BITMAPINFO, BITMAPINFOHEADER,
         BLENDFUNCTION, CLIP_DEFAULT_PRECIS, CreateCompatibleDC, CreateDIBSection, CreateFontW,
@@ -380,6 +525,11 @@ mod imp {
 
         /// Windows 的事件由窗口线程自己跑消息循环，主循环这边不用泵。
         pub(super) fn pump(&mut self) {}
+
+        /// 有窗口才算开着。拆掉之后句柄清成 0，所以重建前后的判断都靠它。
+        pub(super) fn running(&self) -> bool {
+            self.hwnd != 0
+        }
     }
 
     impl Drop for Imp {
@@ -458,10 +608,14 @@ mod imp {
                 ..std::mem::zeroed()
             });
             if registered == 0 {
+                // 类名在进程里注册过一次就够。窗口被拆掉再重建时这里必然「已存在」，
+                // 那不是失败（以前只会建一次，所以看不出来）。
                 let error = std::io::Error::last_os_error();
-                tracing::warn!(%error, "注册歌词窗口类失败");
-                let _ = ready.send(Err("歌词窗口起不来".to_string()));
-                return;
+                if error.raw_os_error() != Some(ERROR_CLASS_ALREADY_EXISTS as i32) {
+                    tracing::warn!(%error, "注册歌词窗口类失败");
+                    let _ = ready.send(Err("歌词窗口起不来".to_string()));
+                    return;
+                }
             }
 
             let ex_style = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW
@@ -961,6 +1115,11 @@ mod imp {
             };
             inner.push(&payload);
         }
+
+        /// panel 还在才算开着（拆掉 = `inner` 变回 `None`）。
+        pub(super) fn running(&self) -> bool {
+            self.inner.is_some()
+        }
     }
 
     impl Inner {
@@ -1284,6 +1443,11 @@ mod imp {
 
         /// 不建窗口，没什么可泵的。
         pub(super) fn pump(&mut self) {}
+
+        /// 这个平台永远没有窗口，所以永远是「没开着」（`sync` 也就什么都不做）。
+        pub(super) fn running(&self) -> bool {
+            false
+        }
     }
 
     /// 平台实现的回报：句柄、位置通道（拖完回传中心点）、失败原因。
@@ -1483,26 +1647,127 @@ mod tests {
     }
 
     #[test]
-    fn the_position_file_round_trips() {
-        let dir = std::env::temp_dir().join(format!("canto-lyrics-center-{}", std::process::id()));
+    fn the_state_file_round_trips() {
+        let dir = std::env::temp_dir().join(format!("canto-lyrics-state-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("建临时目录");
         let path = dir.join("desktop-lyrics.json");
 
-        save_center(&path, (123, 456)).expect("落盘");
-        assert_eq!(load_center(&path), Some((123, 456)));
+        let state = SavedState { shown: Some(false), center: Some((123, 456)) };
+        save_state(&path, state).expect("落盘");
+        assert_eq!(load_state(&path), state);
+
+        // 关着、也从没拖过：文件里只该有开关，不该凭空记一个位置。
+        let state = SavedState { shown: Some(true), center: None };
+        save_state(&path, state).expect("落盘");
+        assert_eq!(load_state(&path), state);
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    /// 文件不在 / 坏 JSON / 只写了半个坐标，一律当「什么都没记」；老文件（只有中心点）要读得回来
+    /// —— 那正是升级前的那一份。
     #[test]
-    fn a_broken_position_file_falls_back_to_the_default() {
+    fn a_missing_or_broken_state_file_is_no_opinion() {
         let dir = std::env::temp_dir().join(format!("canto-lyrics-broken-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("建临时目录");
         let path = dir.join("desktop-lyrics.json");
 
-        assert_eq!(load_center(&path), None, "文件不在就是 None");
+        assert_eq!(load_state(&path), SavedState::default(), "文件不在");
         std::fs::write(&path, "{ 不是 JSON").expect("写坏文件");
-        assert_eq!(load_center(&path), None, "坏文件当没有");
+        assert_eq!(load_state(&path), SavedState::default(), "坏文件当没有");
+        std::fs::write(&path, r#"{"shown":false,"cx":5}"#).expect("写半边");
+        assert_eq!(
+            load_state(&path),
+            SavedState { shown: Some(false), center: None },
+            "半个坐标当没记"
+        );
+        std::fs::write(&path, r#"{"cx":11,"cy":22}"#).expect("写老文件");
+        assert_eq!(load_state(&path), SavedState { shown: None, center: Some((11, 22)) });
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 启动时开不开：状态文件优先（缺 `shown` = 还没记过），其次老配置里遗留的 `enabled`。
+    #[test]
+    fn the_startup_switch_prefers_the_file_then_the_legacy_key() {
+        assert!(start_shown(Some(true), Some(false)), "文件说了算");
+        assert!(!start_shown(Some(false), Some(true)), "文件说了算");
+        assert!(!start_shown(None, Some(false)), "没记过才轮到老配置里的 enabled");
+        assert!(start_shown(None, None), "都没有就默认开（跟老 enabled = true 一个口径）");
+    }
+
+    /// 没窗口的时候连 payload 都不造——「关掉就零成本」这条性质靠它守着。
+    #[test]
+    fn a_stopped_handle_neither_runs_nor_builds_payloads() {
+        let lines = lyric(&[("第一句", None)]);
+        let snapshot = snapshot_at(Phase::Playing, 5);
+        let frame = Frame { lyric: Some(&lines), snapshot: &snapshot };
+
+        let mut overlay = DesktopLyrics::none();
+        assert!(!overlay.is_running());
+        overlay.sync(frame, &DesktopLyricsConfig::default());
+        assert!(overlay.state.last.is_none(), "关着的时候不该造 payload");
+    }
+
+    /// 关掉要落一次盘（开关是状态，得记住）；同一个状态只说一次。
+    #[test]
+    fn stopping_writes_the_off_choice_once() {
+        let mut overlay = DesktopLyrics::none();
+        assert!(overlay.take_state().is_none(), "没变过就不用落盘");
+
+        overlay.adopt_window((123, 456), None);
+        assert!(overlay.take_state().is_none(), "建窗口本身不用落盘");
+
+        overlay.disable();
+        assert_eq!(
+            overlay.take_state(),
+            Some(SavedState { shown: Some(false), center: Some((123, 456)) }),
+            "关掉要落一次，且位置留着（下次开回来还在原地）"
+        );
+        assert!(overlay.take_state().is_none(), "同一个状态只说一次");
+        assert!(!overlay.is_running());
+
+        overlay.toggle_lock();
+        assert_eq!(overlay.take_state(), None, "锁定态不落盘（每次启动都是锁的）");
+    }
+
+    /// 拆了再建：`State` 必须回到初始态。它记着上一份窗口的 payload，不清的话新窗口第一帧
+    /// `advance()` 会判定「没变化」而什么都不推——窗口永远空着。
+    #[test]
+    fn re_enabling_forgets_the_previous_window() {
+        let mut overlay = DesktopLyrics::none();
+        overlay.state.last = Some(Payload {
+            visible: true,
+            current: "上一句".to_string(),
+            next: String::new(),
+            translation: None,
+            locked: true,
+        });
+        overlay.toggle_lock();
+        assert!(!overlay.locked());
+
+        overlay.adopt_window((10, 20), None);
+        assert!(overlay.state.last.is_none(), "新窗口没有旧 payload 可比");
+        assert!(overlay.locked(), "拆了再建回到锁定态");
+        assert_eq!(overlay.center, Some((10, 20)));
+    }
+
+    /// 拖动回传的位置取最后一条（中间那些没人看，反正写的是同一个文件）。
+    #[test]
+    fn dragged_centers_are_coalesced_into_one_write() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut overlay = DesktopLyrics::none();
+        overlay.shown = true;
+        overlay.adopt_window((0, 0), Some(rx));
+
+        tx.send((10, 20)).expect("回传");
+        tx.send((11, 21)).expect("回传");
+        overlay.collect_centers();
+        assert_eq!(
+            overlay.take_state(),
+            Some(SavedState { shown: Some(true), center: Some((11, 21)) })
+        );
+
+        overlay.collect_centers();
+        assert!(overlay.take_state().is_none(), "没有新位置就别再写一遍");
     }
 
     /// 取流中（`Buffering`）锁定态变了要**立刻**推：否则按了解锁，窗口要等取流完才有反应

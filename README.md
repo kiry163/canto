@@ -21,7 +21,7 @@
 | 播放缓存（听过的歌留在 `~/.cache/canto`，重听 0 网络；列表里有「已缓存」标记） | ✅ |
 | 歌单写入：加进歌单 / 从歌单移除（「我喜欢」只读，见「已知限制」） | ✅ |
 | 配置文件 `config.toml`（音质下限 / 目录 / 缓存与历史上限 / 通知存活秒数 / 全局快捷键 / 桌面歌词） | ✅ |
-| 全局快捷键：canto 在后台时也能播放 / 暂停、上下一首、音量 ±5、切桌面歌词锁定（Windows / macOS，可配可禁） | ✅ |
+| 全局快捷键：canto 在后台时也能播放 / 暂停、上下一首、音量 ±5、开 / 关桌面歌词、切歌词锁定（Windows / macOS，可配可禁） | ✅ |
 | 桌面歌词（Windows / macOS，默认开）：当前句 + 翻译 + 下一句浮在桌面之上，默认鼠标穿透、热键解锁后可拖 | ✅ |
 | 单例运行（同一份数据目录只允许一个实例） | ✅ |
 
@@ -121,8 +121,10 @@ canto 在跑**：第二个实例直接退出并报出持有者的 pid（锁在 `
   队列里没版权的歌（实测常见）会自动跳过，连着 3 首都不可播就停下报错。**队列内容与各屏选中
   位置退出即丢**（不落盘）。
 
-全局热键（`[hotkeys]`）里还有第 6 条 `lock = "ctrl+shift+l"`：切桌面歌词窗口的锁定 / 解锁
-（桌面上那个窗口见「功能」，锁定态默认就是**点不着**的那一种）。
+全局热键（`[hotkeys]`）里关于桌面歌词的有两条：`lyrics = "ctrl+shift+d"` 开 / 关那个窗口
+（**关掉是把窗口拆了**，不是藏起来；再按一次重新建。开不开记在 `desktop-lyrics.json`，重启保持），
+`lock = "ctrl+shift+l"` 切它的锁定 / 解锁（桌面上那个窗口见「功能」，锁定态默认就是**点不着**的
+那一种）。两条只在主界面生效——登录屏没有可控制的东西，按了当没按。
 
 ## 配置
 
@@ -163,14 +165,15 @@ prev = "ctrl+shift+left"
 volume_up = "ctrl+shift+up"
 volume_down = "ctrl+shift+down"
 lock = "ctrl+shift+l"
+lyrics = "ctrl+shift+d"
 
 # 桌面歌词（Windows / macOS）：播放时在桌面之上浮一条歌词，默认点不着；
-# 全局热键 lock 解锁后能拖动（位置记在 desktop-lyrics.json）。
-# enabled = false 就完全不起这个窗口；颜色写 #RRGGBB，opacity 是 0-100。
+# 全局热键 lyrics（默认 ctrl+shift+d）开 / 关这个窗口，lock 解锁后能拖动
+# ——开关与位置都是状态，记在 desktop-lyrics.json 里。
+# 颜色写 #RRGGBB，opacity 是 0-100。
 # font 是字体面：默认那串是 Windows 的中文字体，macOS 上认不出来会自动回退系统字体
 # （想指定就写 macOS 上有的名字，如 "PingFang SC"）。
 [desktop_lyrics]
-enabled = true
 font = "Microsoft YaHei UI"
 font_size = 28
 color = "#FFFFFF"
@@ -194,7 +197,7 @@ hide_when_paused = false
   canto.log            # 日志（--log 控制级别）
   canto.lock           # 单例锁（内容只是持有者 pid）
   login-qr.png         # 二维码落盘的一份（o 用它调查看器，也可以自己用相册扫）
-  desktop-lyrics.json  # 桌面歌词窗口位置（可随时删，删了回默认位置）
+  desktop-lyrics.json  # 桌面歌词的开关与窗口位置（可随时删，删了回默认：开着 + 底部居中）
 
 ~/.cache/canto/           # 播放缓存（可随时丢；跟数据目录分开，备份不用带它）
   <mid>.<档位>.<ext>   # 完整听过的歌，重听直接读它
@@ -231,6 +234,13 @@ hide_when_paused = false
 - 「会话已失效」的判定码还没等来一次真实的会话过期去核对。
 - **桌面歌词只有 Windows / macOS 有**：Linux（含 Wayland）不建窗口，`[desktop_lyrics]` 整段不生效，
   界面与播放照常。
+- **`[desktop_lyrics] enabled` 已移除**：开关改用全局热键 `lyrics`（默认 `ctrl+shift+d`），开不开
+  记在 `desktop-lyrics.json` 里（跟窗口位置同一个文件，可随时删）。老配置里写着那个键的话，启动
+  会给一句点名警告，并且**在状态文件还没记过开关时拿它当一次启动初值**（所以设了 `enabled = false`
+  的人升级后不会突然冒出个窗口）；之后按热键就是唯一入口。
+- **热键「关」是真把窗口拆掉**（Windows 收线程与窗口、macOS 放掉 panel），不是藏起来——所以关着
+  的时候这块功能零成本；代价是刚拆的那一下窗口是重新建的，锁定态回到默认（锁定、点不着）、
+  拖动过的位置留着。
 - **macOS 的解锁态在「有歌词」时没有额外视觉标记**：Windows 解锁时会描一圈白线，macOS 只有没内容
   时才显示「拖动我（再按一次 ctrl+shift+l 锁定）」那句话。觉得不够显眼就说一声，补一圈边框不难。
 - **桌面歌词只认主屏**：多显示器下不会跟着跑到别的那块屏；换过显示器 / 分辨率导致窗口落在屏外
