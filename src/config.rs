@@ -189,8 +189,6 @@ pub struct LibraryConfig {
     pub dirs: Option<Vec<String>>,
 }
 
-// Task 4 的扫描线程接上 `resolve` 就摘掉（现在是「配置先落地」的中间态）。
-#[allow(dead_code)]
 impl LibraryConfig {
     /// 真正要扫的目录。相对路径原样留着（跟 `download_dir` 的语义一致，按当前工作目录解析）。
     pub fn resolve(&self, download_dir: &Path) -> Vec<PathBuf> {

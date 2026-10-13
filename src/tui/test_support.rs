@@ -66,6 +66,21 @@ pub(super) fn test_song(mid: &str) -> Song {
     }
 }
 
+/// 一棵两首曲目的临时曲库树：`<tmp>/canto/{a.wav, b.wav}`（内容是垃圾，只要扫得到）。
+pub(super) fn temp_library_tree(name: &str) -> std::path::PathBuf {
+    let root = std::env::temp_dir().join(format!(
+        "canto-test-{name}-{}-library",
+        std::process::id()
+    ));
+    std::fs::remove_dir_all(&root).ok();
+    let canto = root.join("canto");
+    std::fs::create_dir_all(&canto).expect("建曲库树");
+    for file in ["a.wav", "b.wav"] {
+        std::fs::write(canto.join(file), format!("{file} 的内容")).expect("写曲目");
+    }
+    root
+}
+
 /// 指定标题与歌手的曲目：筛选要按这两个字段命中，`test_song` 那套固定文案测不出来。
 pub(super) fn titled_song(mid: &str, title: &str, singers: &str) -> Song {
     let mut song = test_song(mid);

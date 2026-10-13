@@ -97,8 +97,6 @@ pub fn lock_path() -> PathBuf {
 ///
 /// 放缓存目录（不是数据目录）：它是**派生数据**，删了只会重扫一次；[`data_dir`] 只放
 /// 使用者自己建的东西（配置、会话、历史、本地歌单）。
-// Task 4 的扫描线程接上就摘掉。
-#[allow(dead_code)]
 pub fn library_index_path() -> PathBuf {
     cache_dir().join("library.json")
 }

@@ -56,6 +56,29 @@ pub(super) enum Screen {
     Main,
 }
 
+/// 扫一遍曲库并把索引落盘，返回给界面线程的消息。
+///
+/// **阻塞**（读 tag 是磁盘密集型）：只从后台线程里调。测试直接调它——线程那一层没有逻辑。
+fn scan_library(dirs: &[std::path::PathBuf], index_path: &std::path::Path) -> Msg {
+    let missing_dirs: Vec<std::path::PathBuf> = dirs
+        .iter()
+        .filter(|dir| !dir.is_dir())
+        .cloned()
+        .collect();
+    let previous = crate::library::load_index(index_path, dirs);
+    let outcome = crate::library::rescan(&previous, dirs);
+    if let Err(error) = crate::library::save_index(index_path, &outcome.index) {
+        tracing::warn!("曲库索引落盘失败（下次启动会重扫）：{error:#}");
+    }
+    Msg::LibraryReady {
+        songs: crate::library::index_songs(&outcome.index),
+        added: outcome.added,
+        removed: outcome.removed,
+        skipped_unsupported: outcome.skipped_unsupported,
+        missing_dirs,
+    }
+}
+
 /// 后台任务的回话。
 pub(super) enum Msg {
     /// 拿到一张二维码（`attempt` 是第几张）。
@@ -66,6 +89,14 @@ pub(super) enum Msg {
     LoggedIn(String),
     /// 登录流程失败（取码失败 / 多次过期 / 服务端拒绝）。
     LoginFailed(String),
+    /// 曲库扫完：`songs` 已排好序，`added` 含「新增」与「重读」两种。
+    LibraryReady {
+        songs: Vec<Song>,
+        added: usize,
+        removed: usize,
+        skipped_unsupported: usize,
+        missing_dirs: Vec<std::path::PathBuf>,
+    },
     Playlists(Result<Vec<Playlist>>),
     /// 「我喜欢」的曲目（菜单第一项，启动就拉）。
     Favorites(Result<Vec<Song>>),
@@ -624,6 +655,10 @@ pub(super) struct App {
 
     /// 状态行右侧的通知（进度与一次性消息共用这一把槽）。
     pub(super) notice: Option<Notice>,
+    /// 本地曲库（扫出来的曲目，已按 歌手 → 专辑 → 标题 排好）。
+    pub(super) library: Vec<Song>,
+    /// 曲库是不是正在扫（扫描中按 `r` 不再起第二次）。
+    pub(super) library_scanning: bool,
     pub(super) quit: bool,
 }
 
@@ -671,8 +706,38 @@ impl App {
             picker: None,
             transfer: None,
             notice: None,
+            library: Vec::new(),
+            library_scanning: false,
             quit: false,
         }
+    }
+
+    // -- 本地曲库 ------------------------------------------------------------
+
+    /// 起一次后台扫描：先读索引让「本地曲库」屏**立刻有歌**，再增量补扫，扫完发
+    /// [`Msg::LibraryReady`]。扫描中再调只出一句提示（同时只允许一次）。
+    pub(super) fn start_library_scan(&mut self) {
+        if self.library_scanning {
+            self.notify("正在扫描曲库…");
+            return;
+        }
+        let dirs = self.config.library.resolve(&self.config.download_dir);
+        if dirs.is_empty() {
+            return; // `[library] dirs = []`：本地功能整体关掉
+        }
+        let index_path = crate::paths::library_index_path();
+        self.library = crate::library::index_songs(&crate::library::load_index(&index_path, &dirs));
+        self.library_scanning = true;
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(scan_library(&dirs, &index_path));
+        });
+    }
+
+    /// 本地曲库（已按 歌手 → 专辑 → 标题 排好）。Task 5 的「本地曲库」屏接上就摘掉这个 allow。
+    #[allow(dead_code)]
+    pub(super) fn local_songs(&self) -> &[Song] {
+        &self.library
     }
 
     // -- 状态行那条通知 ------------------------------------------------------
@@ -1108,6 +1173,24 @@ impl App {
 
     pub(super) fn on_msg(&mut self, message: Msg) {
         match message {
+            Msg::LibraryReady {
+                songs,
+                added,
+                removed,
+                skipped_unsupported,
+                missing_dirs,
+            } => {
+                self.library = songs;
+                self.library_scanning = false;
+                // 通知槽只有一个：坏路径最要紧，其次是有变化，再次是「跳过了 N 首」。
+                if let Some(dir) = missing_dirs.first() {
+                    self.notify(format!("曲库目录不存在：{}", dir.display()));
+                } else if added + removed > 0 {
+                    self.notify(format!("本地曲库：新增 {added} · 移除 {removed}"));
+                } else if skipped_unsupported > 0 {
+                    self.notify(format!("跳过 {skipped_unsupported} 首不支持的格式"));
+                }
+            }
             Msg::Qr { png, attempt } => {
                 // PNG 一律留一份：终端画不下、想用相册扫，都靠它。
                 let saved = qr::save_png(&png, &paths::qr_png_path());
@@ -2322,6 +2405,80 @@ mod tests {
         assert_eq!(nav.favorites.state.selected(), Some(0));
         nav.move_selection(1);
         assert_eq!(nav.favorites.state.selected(), Some(1));
+    }
+
+    /// 曲库扫描：有变化才通知、坏路径点名、同时只允许一次、没变化不打扰。
+    #[test]
+    fn a_scan_fills_the_library_and_reports_it() {
+        let (mut app, _runtime) = test_app();
+        let dir = crate::tui::test_support::temp_library_tree("scan-fill");
+        let dirs = [dir.join("canto")];
+        app.on_msg(scan_library(&dirs, &dir.join("library.json")));
+        assert_eq!(app.local_songs().len(), 2, "两首都进曲库");
+        assert!(!app.library_scanning);
+        assert!(
+            app.notice_text().is_some_and(|text| text.contains("新增 2")),
+            "第一次要有变化通知：{:?}",
+            app.notice_text()
+        );
+    }
+
+    #[test]
+    fn an_unchanged_rescan_keeps_quiet() {
+        let (mut app, _runtime) = test_app();
+        let dir = crate::tui::test_support::temp_library_tree("scan-quiet");
+        let index = dir.join("library.json");
+        let dirs = [dir.join("canto")];
+        app.on_msg(scan_library(&dirs, &index));
+        app.notice = None;
+        app.on_msg(scan_library(&dirs, &index));
+        assert_eq!(app.local_songs().len(), 2);
+        assert!(app.notice_text().is_none(), "没变化就别打扰：{:?}", app.notice_text());
+    }
+
+    #[test]
+    fn removing_a_file_is_reported() {
+        let (mut app, _runtime) = test_app();
+        let dir = crate::tui::test_support::temp_library_tree("scan-removed");
+        let index = dir.join("library.json");
+        let dirs = [dir.join("canto")];
+        app.on_msg(scan_library(&dirs, &index));
+        app.notice = None;
+        std::fs::remove_file(dir.join("canto/b.wav")).expect("删一首");
+        app.on_msg(scan_library(&dirs, &index));
+        assert_eq!(app.local_songs().len(), 1);
+        assert!(
+            app.notice_text().is_some_and(|text| text.contains("移除 1")),
+            "{:?}",
+            app.notice_text()
+        );
+    }
+
+    #[test]
+    fn a_missing_directory_is_named() {
+        let (mut app, _runtime) = test_app();
+        let dir = crate::tui::test_support::temp_library_tree("scan-missing");
+        let missing = dir.join("没有这个目录");
+        app.on_msg(scan_library(&[missing], &dir.join("library.json")));
+        assert!(
+            app.notice_text().is_some_and(|text| text.contains("没有这个目录")),
+            "坏路径要点名：{:?}",
+            app.notice_text()
+        );
+    }
+
+    #[test]
+    fn a_running_scan_is_not_started_twice() {
+        let (mut app, _runtime) = test_app();
+        app.config.library.dirs = Some(vec!["C:/不存在的曲库".to_string()]);
+        app.library_scanning = true;
+        app.start_library_scan();
+        assert!(
+            app.notice_text().is_some_and(|text| text.contains("正在扫描")),
+            "{:?}",
+            app.notice_text()
+        );
+        assert!(app.library_scanning, "还是原来那次在跑");
     }
 
     /// 全局热键只在主界面生效：登录屏没有播放可控，按了就当没按。

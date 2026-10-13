@@ -6,9 +6,6 @@
 //!
 //! 三条硬约束（都与「不能把使用者机器上的目录扫炸」有关）：**不跟软链**（成环也不怕）、
 //! 跳过点开头的目录、同一路径只收一次。
-// Task 3/4 的索引与扫描线程一接上就摘掉这个 `allow(dead_code)`：
-// 现在是「模块先落地、消费者还没来」的中间态。
-#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

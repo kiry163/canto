@@ -57,6 +57,9 @@ pub fn run(
         tracing::info!("已注册 {} 个全局热键", report.registered);
     }
     app.history = crate::history::History::load(&app.history_path.clone(), app.config.history_limit);
+    // 曲库扫描在后台跑（读 tag 是磁盘密集型），界面不等它——先读索引的那一步在
+    // `start_library_scan` 里已经同步做掉了，所以「本地曲库」屏第一次进去就有歌。
+    app.start_library_scan();
     // 没登录就先出登录屏：所有功能都在界面里，命令行不再有 login 这条路。
     // 落屏**只在这儿决定一次**：`load_initial` 会写 `screen`，再补一次就会把登录屏顶掉
     // （登录屏没了，扫码的进度也就没人再接）。
