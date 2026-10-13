@@ -669,6 +669,9 @@ pub(super) struct App {
     /// 正在跑的下载。
     pub(super) transfer: Option<Arc<Mutex<Transfer>>>,
 
+    /// 现在有没有登录态。**启动时**从会话文件读一次（`App::new`），此后由登录 / 登出 /
+    /// 失效三条路自己维护——状态机不每次去摸全局单例，测试也才控得住。
+    pub(super) logged_in: bool,
     /// 状态行右侧的通知（进度与一次性消息共用这一把槽）。
     pub(super) notice: Option<Notice>,
     /// 本地曲库（扫出来的曲目，已按 歌手 → 专辑 → 标题 排好）。
@@ -722,6 +725,7 @@ impl App {
             picker: None,
             transfer: None,
             notice: None,
+            logged_in: crate::session::jar().state().logged_in,
             library: Vec::new(),
             library_scanning: false,
             quit: false,
@@ -858,6 +862,11 @@ impl App {
     /// 切屏。这一屏没拉过数据就顺手拉一次——每屏的选中位置由 `Nav` 留着，
     /// 所以来回切不会丢上下文。
     pub(super) fn switch_menu(&mut self, menu: Menu) {
+        // 要登录的屏：未登录时**只给一句提示、不跳屏**（本地两屏与历史照进）。
+        if !self.qq_screen_available(menu) {
+            self.notify("需要登录：按 L");
+            return;
+        }
         // 切屏就是离开这一屏：频谱区跟着收起来。
         self.show_spectrum = false;
         self.nav.switch_menu(menu);
@@ -1458,7 +1467,15 @@ impl App {
             }
             keys::Action::QueueOverlay => self.toggle_queue_overlay(),
             keys::Action::Home => self.go_home(),
-            keys::Action::Logout => self.sign_out("已登出，请重新登录"),
+            // `L`：未登录 = 去登录屏（这时候才取码）；已登录 = 登出回首页（队列留着）。
+            keys::Action::Logout => {
+                if self.logged_in() {
+                    self.sign_out("已登出");
+                } else {
+                    self.start_login();
+                }
+            }
+            keys::Action::LoginBack => self.go_home(),
             keys::Action::HistoryClear => {
                 // 只在历史屏有意义；别的屏按了不做事（Esc 在没得返回时也一样）。
                 if self.nav.menu == Menu::History {
@@ -1672,6 +1689,7 @@ impl App {
     fn finish_login(&mut self, identity: String) {
         tracing::info!("登录成功：{identity}");
         self.notify(format!("已登录：{identity}"));
+        self.logged_in = true;
         self.go_home();
     }
 
@@ -1688,16 +1706,25 @@ impl App {
         self.notify(error.to_string());
     }
 
-    /// 会话失效或被手动登出：清掉本地会话、回登录屏。
+    /// 现在有登录态吗（启动时读会话那一次，之后由登录 / 登出维护）。
+    pub(super) fn logged_in(&self) -> bool {
+        self.logged_in
+    }
+
+    /// 这一屏要不要求登录：QQ 三屏要，历史与本地曲库不要。
+    pub(super) fn qq_screen_available(&self, menu: Menu) -> bool {
+        self.logged_in() || !matches!(menu, Menu::Favorites | Menu::Playlists | Menu::Search)
+    }
+
     pub(super) fn sign_out(&mut self, reason: &str) {
         if let Err(error) = session::jar().clear() {
             tracing::warn!("清本地会话失败：{error:#}");
         }
-        self.queue.clear();
-        self.start_login();
-        if let Screen::Login(state) = &mut self.screen {
-            state.phase = LoginPhase::Failed(reason.to_string());
-        }
+        // **不动队列**：本地歌接着放，轮到 QQ 歌时才提示需要登录（以前这里会 `queue.clear()`
+        // 并把使用者扔回登录屏）。
+        self.logged_in = false;
+        self.go_home();
+        self.notify(reason.to_string());
     }
 
     /// `u`：开 / 关队列浮层。打开时高亮落在正在播的那首上。
@@ -1781,9 +1808,15 @@ impl App {
     /// mid），因此能直接播——这一点由实测确认（见 README 的已知限制）。
     pub(super) fn refresh_history_view(&mut self) {
         let previous = self.nav.history_view.state.selected();
-        let songs: Vec<Song> = self
+        // 未登录时只列本地条目：QQ 条目点了也播不了，按「直接跳过」处理。
+        let entries: Vec<history::Entry> = self
             .history
             .entries()
+            .iter()
+            .filter(|entry| self.logged_in() || entry.local_path.is_some())
+            .cloned()
+            .collect();
+        let songs: Vec<Song> = entries
             .iter()
             .map(|entry| Song {
                 mid: entry.mid.clone(),
@@ -1802,9 +1835,7 @@ impl App {
                 },
             })
             .collect();
-        let labels: Vec<String> = self
-            .history
-            .entries()
+        let labels: Vec<String> = entries
             .iter()
             .map(|entry| {
                 format!(
@@ -2459,6 +2490,92 @@ mod tests {
         assert_eq!(nav.favorites.state.selected(), Some(0));
         nav.move_selection(1);
         assert_eq!(nav.favorites.state.selected(), Some(1));
+    }
+
+    /// 没有会话也落首页：不再被扔进登录屏（启动这一下也不取码——`start_login` 只能从
+    /// 「按 L / 首页去登录」进来）。
+    #[test]
+    fn without_a_session_the_app_lands_on_home() {
+        let (mut app, _runtime) = test_app();
+        app.logged_in = false;
+        app.load_initial();
+        assert!(matches!(app.screen, Screen::Home), "没登录也落首页");
+    }
+
+    /// 未登录进 QQ 三屏：只给一句提示、**不跳屏**；本地曲库照进。
+    #[test]
+    fn qq_screens_refuse_to_open_without_a_session() {
+        let (mut app, _runtime) = test_app();
+        app.logged_in = false;
+        app.go_home();
+        for menu in [Menu::Favorites, Menu::Playlists, Menu::Search] {
+            app.notice = None;
+            app.switch_menu(menu);
+            assert!(matches!(app.screen, Screen::Home), "{menu:?} 不该进");
+            assert!(
+                app.notice_text().is_some_and(|text| text.contains("需要登录：按 L")),
+                "{menu:?} 要提示登录：{:?}",
+                app.notice_text()
+            );
+        }
+        app.notice = None;
+        app.switch_menu(Menu::LocalLibrary);
+        assert_eq!(app.nav.menu, Menu::LocalLibrary, "本地屏照进，不被拦");
+        assert!(app.notice_text().is_none(), "本地屏不该出「需要登录」：{:?}", app.notice_text());
+    }
+
+    /// 未登录时历史屏只列本地条目（QQ 条目直接不显示）。
+    #[test]
+    fn the_history_screen_hides_qq_entries_without_a_session() {
+        let (mut app, _runtime) = test_app();
+        app.logged_in = false;
+        app.history.push(
+            crate::history::Entry {
+                mid: "local:C:/Music/canto/曲终人散.wav".to_string(),
+                title: "曲终人散".to_string(),
+                singers: "张宇".to_string(),
+                at: 2,
+                origin: "本地曲库".to_string(),
+                local_path: Some(std::path::PathBuf::from("C:/Music/canto/曲终人散.wav")),
+            },
+            10,
+        );
+        app.history.push(
+            crate::history::Entry {
+                mid: "000DhFOL1o15dn".to_string(),
+                title: "QQ 那首".to_string(),
+                singers: "谁".to_string(),
+                at: 1,
+                origin: "我的收藏".to_string(),
+                local_path: None,
+            },
+            10,
+        );
+        app.switch_menu(Menu::History);
+        let titles: Vec<String> = app
+            .nav
+            .history_view
+            .items()
+            .iter()
+            .map(|song| song.title.clone())
+            .collect();
+        assert!(titles.iter().any(|title| title == "曲终人散"), "本地条目照列：{titles:?}");
+        assert!(!titles.iter().any(|title| title == "QQ 那首"), "QQ 条目不显示：{titles:?}");
+    }
+
+    /// `L` 未登录时去登录屏（这时候才取码）；登录屏能退出来；`sign_out` 回首页。
+    #[test]
+    fn l_goes_to_login_and_signing_out_keeps_the_queue() {
+        let (mut app, _runtime) = test_app();
+        app.logged_in = false;
+        app.apply(keys::Action::Logout);
+        assert!(matches!(app.screen, Screen::Login(_)), "未登录按 L 去登录屏");
+
+        app.apply(keys::Action::LoginBack);
+        assert!(matches!(app.screen, Screen::Home), "登录屏能退出来");
+
+        app.sign_out("测试");
+        assert!(matches!(app.screen, Screen::Home), "登出回首页");
     }
 
     /// 本地曲目进历史时带上路径；从历史还原时还是本地曲目（重播不再去要 vkey）。

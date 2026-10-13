@@ -23,7 +23,7 @@ pub(super) fn test_app() -> (App, tokio::runtime::Runtime) {
     let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
     let runtime = tokio::runtime::Runtime::new().expect("测试运行时");
     let (tx, _rx) = channel();
-    let app = App::new(
+    let mut app = App::new(
         runtime.handle().clone(),
         // 关掉缓存：测试不该往使用者真实的 ~/.cache/canto 里写东西。
         Engine::silent(false),
@@ -35,6 +35,9 @@ pub(super) fn test_app() -> (App, tokio::runtime::Runtime) {
         )),
         tx,
     );
+    // 大多数测试跑在「已登录」的世界里（未登录那几条自己把这个置回 false）：
+    // 这样它们不必依赖开发机上真实的会话文件，CI 上也一样。
+    app.logged_in = true;
     (app, runtime)
 }
 

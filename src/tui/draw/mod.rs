@@ -189,7 +189,7 @@ pub fn hints(context: keys::Context) -> &'static str {
         }
         // 首页没有「选中的歌」：提示里只给进屏 / 切屏与播放这几条。
         keys::Context::Home => {
-            "Enter 进入 · 1-4 直跳 · Space 暂停 · n/b 切歌 · u 队列 · ? 帮助"
+            "Enter 进入 · 1-5 直跳 · Space 暂停 · n/b 切歌 · u 队列 · ? 帮助"
         }
         keys::Context::SearchInput => "输入关键词 · Enter 搜索 · Esc 退出输入",
         keys::Context::FilterInput => "输入即筛选 · Enter 确认 · Esc 清空",
@@ -613,7 +613,7 @@ mod tests {
         app.screen = Screen::Home;
         let status = frame_rows(&mut app, 120, 30).pop().expect("状态行");
         assert!(status.contains("Enter进入"), "{status:?}");
-        assert!(status.contains("1-4直跳"), "{status:?}");
+        assert!(status.contains("1-5直跳"), "{status:?}");
         assert!(!status.contains("Enter播放"), "不是主界面那条：{status:?}");
     }
 

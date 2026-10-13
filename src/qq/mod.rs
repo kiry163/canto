@@ -32,7 +32,7 @@ const REFERER: &str = "https://y.qq.com/";
 fn require_login() -> Result<String> {
     let state = session::jar().state();
     if !state.logged_in {
-        bail!("未登录（或会话已失效）：先 `canto login --cookie '<cookie>'`");
+        bail!("需要登录：按 L");
     }
     state
         .identity

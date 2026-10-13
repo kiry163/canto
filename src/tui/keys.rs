@@ -73,6 +73,8 @@ pub enum Action {
     /// 全局热键 `lyrics`：开 / 关桌面歌词窗口——关掉是把窗口**拆了**（不是藏起来），
     /// 状态记在 `desktop-lyrics.json`（界面上没有对应按键）。
     LyricsWindow,
+    /// 登录屏的 `Esc`：不登录，回首页（本地曲库照样能用）。
+    LoginBack,
     /// `0`：回首页（屏幕层最外的那一层，各屏入口与编号都在它上面）。
     Home,
 }
@@ -136,6 +138,8 @@ pub fn resolve(context: Context, key: KeyEvent) -> Option<Action> {
             KeyCode::Char('c') => Some(Action::LoginCookie),
             KeyCode::Char('o') => Some(Action::LoginOpenPng),
             KeyCode::Char('r') => Some(Action::LoginRetry),
+            // 不登录，回首页：本地曲库与历史照样能用。
+            KeyCode::Esc => Some(Action::LoginBack),
             KeyCode::Char('q') => Some(Action::Quit),
             _ => None,
         },
