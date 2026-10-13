@@ -58,6 +58,8 @@ pub fn run(
     }
     app.history = crate::history::History::load(&app.history_path.clone(), app.config.history_limit);
     // 没登录就先出登录屏：所有功能都在界面里，命令行不再有 login 这条路。
+    // 落屏**只在这儿决定一次**：`load_initial` 会写 `screen`，再补一次就会把登录屏顶掉
+    // （登录屏没了，扫码的进度也就没人再接）。
     if crate::session::jar().state().logged_in {
         app.load_initial();
     } else {
@@ -83,7 +85,6 @@ pub fn run(
         tracing::warn!(%error, "桌面歌词起不来");
         app.notify("歌词窗口起不来");
     }
-    app.load_initial();
 
     let mut terminal = ratatui::init();
     let outcome = event_loop(&mut terminal, &mut app, &rx);

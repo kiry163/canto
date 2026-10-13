@@ -9,7 +9,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::config::HotkeyConfig;
 
-use super::super::state::{App, Menu};
+use super::super::state::{App, Menu, Screen};
 use super::format_duration;
 use super::highlight;
 
@@ -39,10 +39,17 @@ impl App {
     /// 帮助浮层：按当前屏列出**真的接了行为的**键（含 `[hotkeys]` 里那几条全局热键），
     /// 左侧按键、右侧说明；装不下时 `j`/`k` 滚。这是唯一的键位表。
     ///
+    /// 首页要单独认（它不是 `Menu` 的一员）：在首页上按 `?` 得看首页那套键，而不是
+    /// `nav.menu` 停在的那一屏的。
+    ///
     /// 浮层里**不写操作提示**：那统一归状态行（见 `draw::hints`），所以浮层高度就是
     /// 内容 + 上下边框。
     pub(super) fn draw_help(&mut self, frame: &mut Frame, area: Rect) {
-        let rows = help_rows(self.nav.menu, &self.config.hotkeys);
+        let screen = match self.screen {
+            Screen::Home => None,
+            _ => Some(self.nav.menu),
+        };
+        let rows = help_rows(screen, &self.config.hotkeys);
         let key_col = key_column(&rows);
         // 内容行数有上限（浮层不是全屏页面）：多了就滚。
         let height = rows.len().min(HELP_ROWS) as u16 + 2;
@@ -103,43 +110,59 @@ impl Row {
     }
 }
 
-/// 每屏一套键位说明：这一屏特有的 + 列表 + 切屏 + 全局 + 播放 + 歌曲 + 全局热键。
+/// 每屏一套键位说明。`Some(menu)` = 那四屏之一：屏专属 + 列表 + 切屏 + 全局 + 播放 + 歌曲 +
+/// 全局热键；`None` = 首页（它不是 `Menu` 的一员，`Menu` 的含义是「一份歌曲列表 + 选中位置 +
+/// 筛选」）：首页自己那段 + 切屏 + 全局（不含 `/`）+ 播放 + 全局热键。**没有的段整段不列**
+/// ——首页没有「选中的歌」，`d`、`a`、`PgUp`、`/` 在它那儿一个都没接，列出来就是骗人。
 ///
 /// **这是唯一的键位表**：菜单栏没了，切屏只有数字键，得让人在哪儿都能查到。同一按键只写
 /// 一次——`/`、`Enter`、`L` 这些通用的在后面几块写过，当前屏那节就只留这一屏特有的。
 ///
 /// 当前屏那节排在最前、且**只在真有屏专属键时才在**（收藏屏就没有：那点内容所有列表通用，
 /// 已经在「列表」段里）。表格比浮层长（内容上限 18 行），最常查的得在上面。
-fn help_rows(menu: Menu, hotkeys: &HotkeyConfig) -> Vec<Row> {
-    let (title, screen): (&'static str, Vec<Row>) = match menu {
-        // 收藏屏没有专属键：`j`/`k` 选曲目、`/` 筛选都是所有列表共有的。
-        Menu::Favorites => ("", Vec::new()),
-        Menu::Playlists => (
-            "歌单",
-            vec![
-                Row::Keys { keys: "Enter", help: "进入该歌单的曲目" },
-                Row::Keys { keys: "Esc", help: "回歌单列表" },
-            ],
-        ),
-        Menu::Search => (
-            "搜索",
-            vec![
-                Row::Keys { keys: "Enter", help: "搜索" },
-                Row::Keys { keys: "Esc", help: "取消输入" },
-            ],
-        ),
-        Menu::History => ("历史", vec![Row::Keys { keys: "Enter", help: "从那首重播" }]),
-    };
+fn help_rows(screen: Option<Menu>, hotkeys: &HotkeyConfig) -> Vec<Row> {
     let mut rows = Vec::new();
-    if !screen.is_empty() {
-        rows.push(Row::Section(title));
-        rows.extend(screen);
+    let list = screen.is_some();
+    match screen {
+        Some(menu) => {
+            let (title, section): (&'static str, Vec<Row>) = match menu {
+                // 收藏屏没有专属键：`j`/`k` 选曲目、`/` 筛选都是所有列表共有的。
+                Menu::Favorites => ("", Vec::new()),
+                Menu::Playlists => (
+                    "歌单",
+                    vec![
+                        Row::Keys { keys: "Enter", help: "进入该歌单的曲目" },
+                        Row::Keys { keys: "Esc", help: "回歌单列表" },
+                    ],
+                ),
+                Menu::Search => (
+                    "搜索",
+                    vec![
+                        Row::Keys { keys: "Enter", help: "搜索" },
+                        Row::Keys { keys: "Esc", help: "取消输入" },
+                    ],
+                ),
+                Menu::History => ("历史", vec![Row::Keys { keys: "Enter", help: "从那首重播" }]),
+            };
+            if !section.is_empty() {
+                rows.push(Row::Section(title));
+                rows.extend(section);
+            }
+            rows.extend([
+                Row::Section("列表"),
+                Row::Keys { keys: "j / k、↑ / ↓", help: "选曲目" },
+                Row::Keys { keys: "g / G、Home / End", help: "首 / 尾" },
+                Row::Keys { keys: "PgUp / PgDn", help: "翻页（Ctrl+U / Ctrl+D）" },
+            ]);
+        }
+        None => rows.extend([
+            Row::Section("首页"),
+            Row::Keys { keys: "j / k、↑ / ↓", help: "选入口" },
+            Row::Keys { keys: "g / G、Home / End", help: "首 / 尾" },
+            Row::Keys { keys: "Enter", help: "进选中那一屏" },
+        ]),
     }
     rows.extend([
-        Row::Section("列表"),
-        Row::Keys { keys: "j / k、↑ / ↓", help: "选曲目" },
-        Row::Keys { keys: "g / G、Home / End", help: "首 / 尾" },
-        Row::Keys { keys: "PgUp / PgDn", help: "翻页（Ctrl+U / Ctrl+D）" },
         Row::Section("切屏"),
         Row::Keys { keys: "0", help: "首页" },
         Row::Keys { keys: "1", help: "我的收藏" },
@@ -147,7 +170,12 @@ fn help_rows(menu: Menu, hotkeys: &HotkeyConfig) -> Vec<Row> {
         Row::Keys { keys: "3", help: "搜索" },
         Row::Keys { keys: "4", help: "历史" },
         Row::Section("全局"),
-        Row::Keys { keys: "/", help: "筛选当前列表" },
+    ]);
+    // `/` 筛的是列表：首页上没有列表。
+    if list {
+        rows.push(Row::Keys { keys: "/", help: "筛选当前列表" });
+    }
+    rows.extend([
         Row::Keys { keys: "Y", help: "全屏：歌词 + 频谱" },
         Row::Keys { keys: "?", help: "帮助" },
         Row::Keys { keys: "L", help: "登出（清空本地会话）" },
@@ -157,13 +185,17 @@ fn help_rows(menu: Menu, hotkeys: &HotkeyConfig) -> Vec<Row> {
         Row::Keys { keys: "n / b", help: "下一首 / 上一首" },
         Row::Keys { keys: "← / →", help: "后退 / 前进 10 秒" },
         Row::Keys { keys: "+ / -", help: "音量 ±5%" },
-        Row::Section("歌曲"),
-        Row::Keys { keys: "Enter", help: "播放选中" },
-        Row::Keys { keys: "a / A", help: "追加到队尾 / 插到下一首" },
-        Row::Keys { keys: "d", help: "下载（含 .lrc）" },
-        Row::Keys { keys: "p", help: "加进歌单" },
-        Row::Keys { keys: "x", help: "从歌单移除" },
     ]);
+    if list {
+        rows.extend([
+            Row::Section("歌曲"),
+            Row::Keys { keys: "Enter", help: "播放选中" },
+            Row::Keys { keys: "a / A", help: "追加到队尾 / 插到下一首" },
+            Row::Keys { keys: "d", help: "下载（含 .lrc）" },
+            Row::Keys { keys: "p", help: "加进歌单" },
+            Row::Keys { keys: "x", help: "从歌单移除" },
+        ]);
+    }
     let global = hotkey_rows(hotkeys);
     if !global.is_empty() {
         rows.push(Row::Section("全局热键（后台也能按）"));
@@ -309,7 +341,7 @@ mod tests {
     /// 表就是「左键右述」两列：分组标题没有键列，键行两边都有。
     #[test]
     fn the_table_pairs_every_key_with_a_description() {
-        let rows = help_rows(Menu::Favorites, &HotkeyConfig::default());
+        let rows = help_rows(Some(Menu::Favorites), &HotkeyConfig::default());
         let cells: Vec<(&str, &str)> = rows.iter().filter_map(Row::cells).collect();
         assert!(cells.contains(&("1", "我的收藏")), "{cells:?}");
         assert!(cells.contains(&("0", "首页")), "首页入口要在「切屏」段里：{cells:?}");
@@ -342,12 +374,13 @@ mod tests {
     }
 
     /// 屏专属段：只有真有专属键的屏才有，且排在最前（表格比浮层长，最常查的得在上面）。
+    /// 首页（`None`）自成一套：没有「选中的歌」，列表 / 歌曲两段整段不列。
     #[test]
     fn the_screen_section_follows_the_menu() {
         let hotkeys = HotkeyConfig::default();
-        let rows = |menu| help_rows(menu, &hotkeys);
-        let sections = |menu| -> Vec<&'static str> {
-            rows(menu)
+        let rows = |screen| help_rows(screen, &hotkeys);
+        let sections = |screen| -> Vec<&'static str> {
+            rows(screen)
                 .iter()
                 .filter_map(|row| match row {
                     Row::Section(title) => Some(*title),
@@ -355,21 +388,55 @@ mod tests {
                 })
                 .collect()
         };
-        let helps = |menu| -> Vec<&'static str> {
-            rows(menu).iter().filter_map(Row::cells).map(|(_, help)| help).collect()
+        let helps = |screen| -> Vec<&'static str> {
+            rows(screen).iter().filter_map(Row::cells).map(|(_, help)| help).collect()
         };
-        assert_eq!(sections(Menu::Favorites)[0], "列表", "收藏屏直接从「列表」开始");
-        assert_eq!(sections(Menu::Playlists)[0], "歌单");
-        assert!(helps(Menu::Playlists).contains(&"进入该歌单的曲目"));
-        assert!(!helps(Menu::Favorites).contains(&"进入该歌单的曲目"), "切屏换了那一节就该换");
-        assert_eq!(sections(Menu::History)[0], "历史");
+        assert_eq!(sections(Some(Menu::Favorites))[0], "列表", "收藏屏直接从「列表」开始");
+        assert_eq!(sections(Some(Menu::Playlists))[0], "歌单");
+        assert!(helps(Some(Menu::Playlists)).contains(&"进入该歌单的曲目"));
+        assert!(!helps(Some(Menu::Favorites)).contains(&"进入该歌单的曲目"), "切屏换了那一节就该换");
+        assert_eq!(sections(Some(Menu::History))[0], "历史");
+
+        // 首页：`Menu` 停在哪儿都不算数，它列的是首页自己的键。
+        assert_eq!(sections(None)[0], "首页");
+        assert!(helps(None).contains(&"进选中那一屏"), "首页 `Enter` 是进屏，不是播放选中");
+        assert!(
+            !helps(None).iter().any(|help| *help == "选曲目" || *help == "播放选中"),
+            "首页没有「选中的歌」，列表 / 歌曲那两套键一个都没接：{:?}",
+            helps(None)
+        );
+        assert!(!sections(None).contains(&"列表") && !sections(None).contains(&"歌曲"));
+    }
+
+    /// 首页那一套：列表 / 歌曲两段的键一个都不许在（`Context::Home` 里一个都没绑），
+    /// 首页自己的键要在。
+    #[test]
+    fn the_home_table_lists_no_keys_the_home_ignores() {
+        let rows = help_rows(None, &HotkeyConfig::default());
+        let cells: Vec<(&str, &str)> = rows.iter().filter_map(Row::cells).collect();
+        for dead in [
+            "选曲目",
+            "翻页（Ctrl+U / Ctrl+D）",
+            "筛选当前列表",
+            "播放选中",
+            "下载（含 .lrc）",
+            "加进歌单",
+            "从歌单移除",
+        ] {
+            assert!(
+                !cells.iter().any(|(_, help)| *help == dead),
+                "首页上按不出来，别写进表：{dead}（{cells:?}）"
+            );
+        }
+        assert!(cells.contains(&("Enter", "进选中那一屏")), "{cells:?}");
+        assert!(cells.contains(&("0", "首页")), "切屏那一节首页也得有：{cells:?}");
     }
 
     /// 全局热键那一节读的是**配置里的实际组合**，不是默认值。
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     #[test]
     fn the_hotkey_section_reads_the_configured_combos() {
-        let rows = help_rows(Menu::Favorites, &HotkeyConfig::default());
+        let rows = help_rows(Some(Menu::Favorites), &HotkeyConfig::default());
         let cells: Vec<(&str, &str)> = rows.iter().filter_map(Row::cells).collect();
         assert_eq!(
             cells.iter().filter(|(keys, _)| keys.starts_with("Ctrl+")).count(),
@@ -386,7 +453,7 @@ mod tests {
             next: "ctrl+alt+n".to_string(),
             ..HotkeyConfig::default()
         };
-        let rows = help_rows(Menu::Favorites, &hotkeys);
+        let rows = help_rows(Some(Menu::Favorites), &hotkeys);
         let cells: Vec<(&str, &str)> = rows.iter().filter_map(Row::cells).collect();
         assert!(
             !cells.iter().any(|(_, help)| *help == "歌词窗口锁定 / 解锁"),
@@ -399,7 +466,7 @@ mod tests {
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     #[test]
     fn the_hotkey_section_is_absent_where_nothing_registers() {
-        let rows = help_rows(Menu::Favorites, &HotkeyConfig::default());
+        let rows = help_rows(Some(Menu::Favorites), &HotkeyConfig::default());
         let cells: Vec<(&str, &str)> = rows.iter().filter_map(Row::cells).collect();
         assert!(
             !cells.iter().any(|(keys, _)| keys.contains("Ctrl+") || keys.contains("Win+")),
@@ -410,7 +477,7 @@ mod tests {
     /// 键列宽要装得下最宽的那个键（美化后的组合最长）。
     #[test]
     fn the_key_column_fits_the_widest_key() {
-        let rows = help_rows(Menu::Favorites, &HotkeyConfig::default());
+        let rows = help_rows(Some(Menu::Favorites), &HotkeyConfig::default());
         let key_col = key_column(&rows);
         for (keys, _) in rows.iter().filter_map(Row::cells) {
             assert!(key_col >= keys.width(), "{keys} 比键列还宽");

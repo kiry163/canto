@@ -757,11 +757,17 @@ impl App {
         self.go_home();
     }
 
-    /// 回首页：屏幕换成首页，高亮停在**刚离开的那一屏**。
+    /// 回首页：屏幕换成首页，高亮停在**刚离开的那一屏**；已经在首页就什么都不做
+    /// （`0` 在首页上 = 无操作，别把刚挪好的高亮弹回默认那一行）。
     ///
     /// 只动这两样——别的屏记住的层级（`nav.shown`）、筛选、选中位置都不碰：首页是最外
-    /// 一层，不该顺手改动谁。
+    /// 一层，不该顺手改动谁。全屏视图例外：它盖在屏上，回首页得收起来（不然在全屏里按
+    /// `0`，屏已经在首页了画面却一动不动）。
     pub(super) fn go_home(&mut self) {
+        self.now_playing_full = false;
+        if matches!(self.screen, Screen::Home) {
+            return;
+        }
         self.screen = Screen::Home;
         let index = Menu::ALL.iter().position(|menu| *menu == self.nav.menu).unwrap_or(0);
         self.home_state.select(Some(index));
@@ -2399,8 +2405,7 @@ mod tests {
     #[test]
     fn the_home_moves_its_own_highlight() {
         let (mut app, _runtime) = crate::tui::test_support::test_app();
-        app.screen = Screen::Home;
-        app.go_home(); // 高亮 = nav.menu 那一项
+        app.go_home(); // 落地：高亮 = nav.menu 那一项
         let start = app.home_state.selected().expect("该有高亮");
         app.apply(keys::Action::Down);
         assert_eq!(app.home_state.selected(), Some(start + 1));
@@ -2419,7 +2424,6 @@ mod tests {
     #[test]
     fn the_home_queue_overlay_takes_the_arrow_keys() {
         let (mut app, _runtime) = crate::tui::test_support::test_app();
-        app.screen = Screen::Home;
         app.go_home();
         let home_before = app.home_state.selected();
         app.queue = crate::tui::queue::Queue::new(
@@ -2454,6 +2458,30 @@ mod tests {
         assert_eq!(app.context(), keys::Context::NowPlaying);
         app.apply(keys::Action::ToggleNowPlaying);
         assert_eq!(app.context(), keys::Context::Home, "退回来还是首页");
+    }
+
+    /// 全屏视图里按 `0`：全屏那层要收起来——它是盖在屏上的一层，不收画面就一直不动
+    /// （`0` 在两处的上下文里都接着，却看着没反应）。
+    #[test]
+    fn home_key_in_the_fullscreen_view_collapses_it() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.apply(keys::Action::ToggleNowPlaying);
+        assert!(app.now_playing_full, "先开全屏");
+        app.apply(keys::Action::Home);
+        assert!(matches!(app.screen, Screen::Home), "`0` 要回首页");
+        assert!(!app.now_playing_full, "回首页要把全屏收起来");
+    }
+
+    /// 已经在首页时 `0` 是**无操作**：高亮是刚用 `j`/`k` 挪好的，别给弹回默认那一行。
+    #[test]
+    fn home_key_on_the_home_leaves_the_highlight_alone() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.go_home();
+        app.apply(keys::Action::Down);
+        let moved = app.home_state.selected();
+        assert_eq!(moved, Some(1), "先挪到第二项");
+        app.apply(keys::Action::Home);
+        assert_eq!(app.home_state.selected(), moved, "首页上再按 `0` 高亮不该动");
     }
 
     /// 列表顶部（没进歌单、没开筛选）再按 `Esc` 回首页；首页上 `Esc` 连绑定都没有（Task 1 的

@@ -431,6 +431,20 @@ mod tests {
         assert!(text.contains("L登出"), "登出是全局键，写在「全局」里：{text}");
     }
 
+    /// 首页不是列表屏：`?` 里只该列**首页上真按得出来**的键。列表 / 歌曲两段的键在首页上
+    /// 一个都没接（`d`、`/`、`PgUp`…），列出来就是骗人。
+    #[test]
+    fn the_home_help_table_only_lists_keys_that_work_there() {
+        let (mut app, _runtime) = test_app();
+        app.screen = crate::tui::state::Screen::Home;
+        app.apply(crate::tui::keys::Action::Help);
+        let text = frame_text(&mut app, 160, 40);
+        assert!(text.contains("进选中那一屏"), "首页自己的键要在表里：{text}");
+        for dead in ["选曲目", "翻页（Ctrl+U / Ctrl+D）", "筛选当前列表"] {
+            assert!(!text.contains(dead), "首页上按不出来，别写进表：{dead}");
+        }
+    }
+
     /// 操作提示统一归状态行：浮层里没有底栏，关闭/滚动那句话在最后一行。
     #[test]
     fn the_help_hints_live_in_the_status_row() {
@@ -557,7 +571,6 @@ mod tests {
     #[test]
     fn the_home_screen_lists_the_four_screens_with_numbers() {
         let (mut app, _runtime) = test_app();
-        app.screen = Screen::Home;
         app.go_home();
         let rows = frame_rows(&mut app, 120, 30);
         assert!(rows.iter().any(|row| row.contains("┌首页")), "标题：{rows:?}");
