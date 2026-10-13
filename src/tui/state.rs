@@ -2950,6 +2950,7 @@ mod tests {
             "进去看曲目"
         );
         assert_eq!(app.nav.local_tracks.items().len(), 1);
+        assert_eq!(app.nav.title_chain(), vec!["本地歌单", "通勤"], "面包屑要跟着进一层");
         app.apply(keys::Action::Back);
         assert_eq!(app.nav.local_shown, None, "Esc 回歌单列表");
     }

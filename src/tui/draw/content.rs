@@ -131,7 +131,9 @@ impl App {
     /// 历史那屏的条数是现算的派生信息，不进导航状态——以前它存在标题里，
     /// 记录一条播放历史就会把**别的屏**的标题改写成「历史（N 条）」。
     fn title_and_count(&self) -> (String, usize, &'static str) {
-        match (self.nav.menu, self.nav.shown.is_some()) {
+        // 第二项是「有没有进到下一层」：QQ 歌单看 `shown`，本地歌单看 `local_shown`。
+        let nested = self.nav.shown.is_some() || self.nav.local_shown.is_some();
+        match (self.nav.menu, nested) {
             (Menu::Playlists, true) => (
                 self.nav.title_chain().join(" › "),
                 self.nav.tracks.items().len(),
