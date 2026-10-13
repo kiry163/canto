@@ -196,7 +196,9 @@ pub fn hints(context: keys::Context) -> &'static str {
         keys::Context::SearchInput => "输入关键词 · Enter 搜索 · Esc 退出输入",
         keys::Context::FilterInput => "输入即筛选 · Enter 确认 · Esc 清空",
         keys::Context::PlaylistPicker => "j/k 选歌单 · Enter 确认 · Esc 取消",
-        keys::Context::HelpOverlay => "Esc 或 ? 关闭帮助",
+        // 帮助浮层自己不再带底栏：关闭 / 滚动在这条状态行提示里；**登出不写**——它已经
+        // 是全局键，浮层「全局」段里有它那一行，状态行只留这会儿最顺手的几个。
+        keys::Context::HelpOverlay => "Esc/? 关闭 · j/k ↑/↓ 滚动 · g/G 首尾",
         keys::Context::QueueOverlay => {
             "Enter 跳播 · d 删除 · Shift+D 清空 · j/k 选择 · Esc 关闭"
         }
@@ -261,6 +263,7 @@ mod tests {
     use super::*;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use unicode_width::UnicodeWidthStr;
 
     use crate::tui::queue;
     use crate::tui::state::Menu;
@@ -280,6 +283,55 @@ mod tests {
                     .filter(|character| !character.is_whitespace())
                     .collect()
             })
+            .collect()
+    }
+
+    /// 原样铺开（保留空格、按**显示宽度**拼）的每一行。
+    ///
+    /// 对齐类断言只能用它：`frame_flat` 会把空格一起吃掉——「说明从第几列开始」这种问题它
+    /// 答不了；而直接拼缓冲区单元格会把宽字符拼成「我 的 收 藏」（它占两格、第二格是空的），
+    /// 所以这里跳过那第二格，`find` 给出的列号才是显示列。
+    fn frame_raw(app: &mut App, width: u16, height: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("测试终端");
+        terminal.draw(|frame| app.draw(frame)).expect("绘制");
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                let mut row = String::new();
+                let mut x = 0;
+                while x < width {
+                    let symbol = buffer[(x, y)].symbol();
+                    row.push_str(symbol);
+                    x += if symbol.width() >= 2 { 2 } else { 1 };
+                }
+                row
+            })
+            .collect()
+    }
+
+    /// 帮助浮层那几行（含上下框线）：判「浮层里有什么 / 状态行里有什么」用。
+    fn help_box_rows(rows: &[String]) -> Vec<String> {
+        let top = rows.iter().position(|row| row.contains("┌ 帮助")).expect("帮助浮层");
+        let bottom = rows[top + 1..]
+            .iter()
+            .position(|row| row.contains('└'))
+            .map_or(rows.len() - 1, |offset| top + 1 + offset);
+        rows[top..=bottom].to_vec()
+    }
+
+    /// `needle` 在一个**显示列**从第几列开始。
+    ///
+    /// 不能用 `find` 的返回值直接比：那是字节偏移，而键列里有 `、`、`↑`、`↓` 这些多字节字符
+    /// ——两行的字节偏移一样，显示列却不一样。
+    fn column_of(row: &str, needle: &str) -> usize {
+        row.find(needle).map(|index| row[..index].width()).expect("该在那儿")
+    }
+
+    /// 一帧里的**文字**：空白与边框线都去掉，内容类断言用它。
+    fn frame_text(app: &mut App, width: u16, height: u16) -> String {
+        frame_flat(app, width, height)
+            .chars()
+            .filter(|character| !"│─┌┐└┘▶♪".contains(*character))
             .collect()
     }
 
@@ -364,14 +416,134 @@ mod tests {
         let (mut app, _runtime) = test_app();
         app.nav.switch_menu(Menu::Playlists);
         app.apply(crate::tui::keys::Action::Help);
-        let text = frame_flat(&mut app, 160, 40);
+        let text = frame_text(&mut app, 160, 40);
         assert!(text.contains("帮助"), "浮层标题");
+        assert!(text.contains("列表"), "分组标题");
+        assert!(text.contains("j/k、↑/↓选曲目"), "方向键要跟 `j`/`k` 写在一起：{text}");
+        assert!(text.contains("Enter进入该歌单的曲目"), "当前屏那一节要跟着菜单变：{text}");
+        assert!(text.contains("L登出"), "登出是全局键，写在「全局」里：{text}");
+    }
+
+    /// 操作提示统一归状态行：浮层里没有底栏，关闭/滚动那句话在最后一行。
+    #[test]
+    fn the_help_hints_live_in_the_status_row() {
+        let (mut app, _runtime) = test_app();
+        app.apply(crate::tui::keys::Action::Help);
+        let rows = frame_raw(&mut app, 160, 40);
+        let popup_rows = help_box_rows(&rows);
         assert!(
-            text.contains("切屏1我的收藏·2我的歌单·3搜索·4历史"),
-            "切屏表：{text}"
+            !popup_rows.iter().any(|row| row.contains("关闭")),
+            "浮层里不该再有底栏：{popup_rows:?}"
         );
-        assert!(text.contains("歌单Enter进入曲目"), "当前屏那一行要跟着菜单变：{text}");
-        assert!(text.contains("关闭Esc或?"), "关闭方式");
+        let status = rows.last().expect("状态行");
+        assert!(status.contains("Esc/? 关闭"), "状态行要给关闭方式：{status:?}");
+        assert!(status.contains("j/k ↑/↓ 滚动"), "状态行要给滚动方式：{status:?}");
+        assert!(!status.contains("登出"), "登出是全局键，说明在浮层里，状态行不重复：{status:?}");
+        // 登出那一行还在浮层「全局」段里（这一段在首屏可见范围内）。
+        assert!(
+            popup_rows.iter().any(|row| row.contains("L") && row.contains("登出")),
+            "浮层里该有登出那一行：{popup_rows:?}"
+        );
+    }
+
+    /// 两列表的判据：所有键行的说明都从**同一列**开始，键也从同一列开始。
+    #[test]
+    fn the_help_table_lines_up_key_and_description() {
+        let (mut app, _runtime) = test_app();
+        app.apply(crate::tui::keys::Action::Help);
+        let rows = frame_raw(&mut app, 160, 40);
+        // 只取浮层里的行：这样就不会被浮层外面的内容（面包屑里也有「我的收藏」）误导。
+        let table = help_box_rows(&rows);
+        let column = |needle: &str| -> usize {
+            table
+                .iter()
+                .find_map(|row| row.contains(needle).then(|| column_of(row, needle)))
+                .unwrap_or_else(|| panic!("{needle} 没画在浮层里：{table:?}"))
+        };
+        let columns: Vec<usize> = ["选曲目", "我的收藏", "筛选当前列表", "播放 / 暂停"]
+            .iter()
+            .map(|help| column(help))
+            .collect();
+        assert!(
+            columns.windows(2).all(|pair| pair[0] == pair[1]),
+            "说明该从同一列开始：{columns:?}"
+        );
+        let key_columns: Vec<usize> =
+            ["j / k、", "1 ", "Y ", "Space "].iter().map(|key| column(key)).collect();
+        assert!(
+            key_columns.windows(2).all(|pair| pair[0] == pair[1]),
+            "键列该从同一列开始：{key_columns:?}"
+        );
+        assert!(key_columns[0] < columns[0], "说明该在键的右边");
+    }
+
+    /// `j`/`k`（还有 `g`/`G`）滚的是这张表，滚到两头就停——和队列浮层同一套键。
+    #[test]
+    fn the_help_scrolls_and_stops_at_both_ends() {
+        let (mut app, _runtime) = test_app();
+        app.apply(crate::tui::keys::Action::Help);
+        // 先画一帧：可见行数由浮层的实际高度决定，滚动量在绘制时被回夹。
+        let _ = frame_raw(&mut app, 160, 40);
+        assert_eq!(app.help_scroll, 0);
+        assert!(frame_text(&mut app, 160, 40).contains("列表"), "开头看得见");
+
+        app.apply(crate::tui::keys::Action::Down);
+        assert_eq!(app.help_scroll, 1, "j 滚一行");
+        app.apply(crate::tui::keys::Action::Up);
+        app.apply(crate::tui::keys::Action::Up);
+        assert_eq!(app.help_scroll, 0, "到顶就不动了");
+
+        for _ in 0..60 {
+            app.apply(crate::tui::keys::Action::Down);
+        }
+        let _ = frame_raw(&mut app, 160, 40);
+        let bottom = app.help_scroll;
+        assert!(bottom > 0, "表比框长，应该滚得动");
+        assert!(bottom < 60, "上限该被框的高度夹住：{bottom}");
+
+        app.apply(crate::tui::keys::Action::Down);
+        let _ = frame_raw(&mut app, 160, 40);
+        assert_eq!(app.help_scroll, bottom, "到底之后 j 不动");
+        let end = frame_text(&mut app, 160, 40);
+        assert!(end.contains("从歌单移除"), "末尾那几行该看得见：{end}");
+        assert!(!end.contains("选曲目"), "开头已经滚过去了");
+
+        app.apply(crate::tui::keys::Action::First);
+        let _ = frame_raw(&mut app, 160, 40);
+        assert_eq!(app.help_scroll, 0, "g 回开头");
+        app.apply(crate::tui::keys::Action::Last);
+        let _ = frame_raw(&mut app, 160, 40);
+        assert_eq!(app.help_scroll, bottom, "G 到底");
+    }
+
+    /// 尺寸矩阵：最小窗口也得画得下（框在画面里、提示在状态行、说明列照样对齐）。
+    #[test]
+    fn the_help_fits_the_smallest_windows() {
+        for (width, height) in [(60u16, 15u16), (80, 24), (100, 30)] {
+            let (mut app, _runtime) = test_app();
+            app.apply(crate::tui::keys::Action::Help);
+            let rows = frame_raw(&mut app, width, height);
+            let popup_rows = help_box_rows(&rows);
+            assert!(popup_rows.len() >= 3, "{width}x{height} 浮层没画出来：{popup_rows:?}");
+            assert!(
+                rows.last().expect("状态行").contains("关闭"),
+                "{width}x{height} 状态行缺提示"
+            );
+            let columns: Vec<usize> = ["选曲目", "我的收藏"]
+                .iter()
+                .filter_map(|help| {
+                    popup_rows.iter().find_map(|row| row.contains(help).then(|| column_of(row, help)))
+                })
+                .collect();
+            assert!(
+                columns.windows(2).all(|pair| pair[0] == pair[1]),
+                "{width}x{height} 说明列该对齐：{columns:?}"
+            );
+            // 滚一格也得能滚（矮屏里可见行更少，但至少不是一步不动的死表）。
+            app.apply(crate::tui::keys::Action::Down);
+            let _ = frame_raw(&mut app, width, height);
+            assert_eq!(app.help_scroll, 1, "{width}x{height} 应该滚得动");
+        }
     }
 
     /// 全屏视图：歌词画在内容区，底部不再另开一块（同一份歌词不画两遍）。

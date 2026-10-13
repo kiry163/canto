@@ -606,6 +606,8 @@ pub(super) struct App {
     pub(super) filter_input: bool,
     /// 帮助浮层开着（`?`）。
     pub(super) help_open: bool,
+    /// 帮助浮层从表格第几行开始显示（`j`/`k` 滚；上限在绘制时按浮层实际高度回夹）。
+    pub(super) help_scroll: u16,
     /// 队列浮层开着（`u`）。
     pub(super) queue_open: bool,
     /// 队列浮层里的高亮位置。
@@ -656,6 +658,7 @@ impl App {
             cached: crate::cache::cached_entries(),
             filter_input: false,
             help_open: false,
+            help_scroll: 0,
             queue_open: false,
             queue_state: ListState::default(),
             picker: None,
@@ -1304,7 +1307,11 @@ impl App {
     pub(super) fn apply(&mut self, action: keys::Action) {
         match action {
             keys::Action::Quit => self.quit = true,
-            keys::Action::Help => self.help_open = !self.help_open,
+            keys::Action::Help => {
+                self.help_open = !self.help_open;
+                // 每次打开都从头看：上次滚到哪儿跟这次要查的东西没关系。
+                self.help_scroll = 0;
+            }
             keys::Action::QueueOverlay => self.toggle_queue_overlay(),
             keys::Action::Logout => self.sign_out("已登出，请重新登录"),
             keys::Action::HistoryClear => {
@@ -1683,6 +1690,11 @@ impl App {
     /// 队列浮层与歌单选择框各有一份 `ListState`——它们盖在主区上，方向键绝不该
     /// 穿透到底下的列表去（那正是「浮层里选不动」这个 bug 的成因）。
     fn move_selection(&mut self, delta: isize) {
+        // 帮助在最上层（跟 `context()` 同一个次序）：它开着时 `j`/`k` 滚的是帮助表。
+        if self.help_open {
+            self.scroll_help(delta);
+            return;
+        }
         if self.queue_open {
             step_state(&mut self.queue_state, self.queue.len(), delta);
             return;
@@ -1696,6 +1708,11 @@ impl App {
 
     /// `g`/`G`（Home/End）：落点同上，跳到首 / 尾。
     fn select_edge(&mut self, last: bool) {
+        if self.help_open {
+            // `u16::MAX` = 「跳到末尾」，绘制时按浮层高度回夹成真正的最底一行。
+            self.help_scroll = if last { u16::MAX } else { 0 };
+            return;
+        }
         if self.queue_open {
             edge_state(&mut self.queue_state, self.queue.len(), last);
             return;
@@ -1705,6 +1722,15 @@ impl App {
             return;
         }
         self.nav.edge_selection(last);
+    }
+
+    /// 帮助表滚动 `delta` 行。上限不在这儿管：绘制时按浮层的实际高度回夹。
+    fn scroll_help(&mut self, delta: isize) {
+        self.help_scroll = if delta < 0 {
+            self.help_scroll.saturating_sub(delta.unsigned_abs() as u16)
+        } else {
+            self.help_scroll.saturating_add(delta as u16)
+        };
     }
 
     /// 频谱是不是该动（全屏视图开着 + 正在播）。关着的时候不取、不算、不画。
@@ -2264,9 +2290,33 @@ mod tests {
         app.apply(keys::Action::Help);
         assert!(app.help_open);
         assert_eq!(app.context(), keys::Context::HelpOverlay);
+
+        // 滚动量是浮层的状态：关掉再打开要回到开头（上次滚到哪跟这次要查的东西没关系）。
+        app.help_scroll = 3;
         app.apply(keys::Action::Help);
         assert!(!app.help_open);
         assert_eq!(app.context(), keys::Context::Content, "关掉后回到主界面");
+        app.apply(keys::Action::Help);
+        assert_eq!(app.help_scroll, 0, "每次打开都从头看");
+    }
+
+    /// 帮助在最上层：队列浮层也开着时，`j`/`k` 滚帮助而不是队列。
+    #[test]
+    fn the_help_overlay_takes_the_scroll_keys_from_the_queue() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        let songs = vec![
+            crate::tui::test_support::test_song("a"),
+            crate::tui::test_support::test_song("b"),
+        ];
+        app.queue = crate::tui::queue::Queue::new(songs, 0, String::new());
+        app.apply(keys::Action::QueueOverlay);
+        assert!(app.queue_open);
+        let queued = app.queue_state.selected();
+
+        app.apply(keys::Action::Help);
+        app.apply(keys::Action::Down);
+        assert_eq!(app.help_scroll, 1, "帮助在最上层，滚动归它");
+        assert_eq!(app.queue_state.selected(), queued, "队列的高亮不许动");
     }
 
     #[test]

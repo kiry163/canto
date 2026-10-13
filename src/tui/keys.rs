@@ -121,6 +121,11 @@ pub fn resolve(context: Context, key: KeyEvent) -> Option<Action> {
         Context::HelpOverlay => match key.code {
             KeyCode::Esc | KeyCode::Char('?') | KeyCode::F(1) => Some(Action::Help),
             KeyCode::Char('L') => Some(Action::Logout),
+            // 表格比浮层长，得能滚：跟队列浮层同一套键（两者可能同时开着，派发时帮助优先）。
+            KeyCode::Char('j') | KeyCode::Down => Some(Action::Down),
+            KeyCode::Char('k') | KeyCode::Up => Some(Action::Up),
+            KeyCode::Char('g') | KeyCode::Home => Some(Action::First),
+            KeyCode::Char('G') | KeyCode::End => Some(Action::Last),
             _ => None,
         },
         Context::Login => match key.code {
@@ -154,6 +159,7 @@ pub fn resolve(context: Context, key: KeyEvent) -> Option<Action> {
             KeyCode::Char(digit @ '1'..='4') => Some(Action::Menu(digit as usize - '1' as usize)),
             KeyCode::Char('?') | KeyCode::F(1) => Some(Action::Help),
             KeyCode::Char('q') => Some(Action::Quit),
+            KeyCode::Char('L') => Some(Action::Logout),
             KeyCode::Char(' ') => Some(Action::PlayPause),
             KeyCode::Char('n') => Some(Action::Next),
             KeyCode::Char('b') => Some(Action::Prev),
@@ -177,6 +183,9 @@ fn common(key: KeyEvent) -> Option<Action> {
         // 数字键切屏——菜单栏去掉后这是唯一的切屏入口，帮助浮层里有这张表。
         KeyCode::Char(digit @ '1'..='4') => Some(Action::Menu(digit as usize - '1' as usize)),
         KeyCode::Char('q') => Some(Action::Quit),
+        // 登出：从帮助浮层里挪出来，主界面（含全屏视图）也能按。模态浮层另算——
+        // 它们开着时是「一个小编辑器」，仍然吞键（见各自的 match）。
+        KeyCode::Char('L') => Some(Action::Logout),
         KeyCode::Char('?') | KeyCode::F(1) => Some(Action::Help),
         KeyCode::Char('j') | KeyCode::Down => Some(Action::Down),
         KeyCode::Char('k') | KeyCode::Up => Some(Action::Up),
@@ -363,6 +372,22 @@ mod tests {
         assert_eq!(press(Context::PlaylistPicker, KeyCode::Char('y')), None);
     }
 
+    /// 登出从帮助浮层里挪出来了：主界面与全屏视图都能按（模态浮层与输入框不抢）。
+    #[test]
+    fn logout_is_available_from_the_main_screen() {
+        assert_eq!(press(Context::Content, KeyCode::Char('L')), Some(Action::Logout));
+        assert_eq!(press(Context::NowPlaying, KeyCode::Char('L')), Some(Action::Logout));
+        assert_eq!(press(Context::HelpOverlay, KeyCode::Char('L')), Some(Action::Logout));
+        // 模态浮层开着时仍然吞键：它们此刻是「正开着的小编辑器」，不往里面塞登出。
+        assert_eq!(press(Context::QueueOverlay, KeyCode::Char('L')), None);
+        assert_eq!(press(Context::PlaylistPicker, KeyCode::Char('L')), None);
+        // 输入态里 `L` 是打字。
+        assert_eq!(press(Context::SearchInput, KeyCode::Char('L')), Some(Action::InputChar('L')));
+        assert_eq!(press(Context::FilterInput, KeyCode::Char('L')), Some(Action::FilterChar('L')));
+        // 小写 `l` 还是快进 10 秒，别跟登出混了。
+        assert_eq!(press(Context::Content, KeyCode::Char('l')), Some(Action::SeekForward));
+    }
+
     #[test]
     fn the_main_screen_has_one_key_table() {
         for code in [
@@ -427,6 +452,24 @@ mod tests {
         assert_eq!(press(Context::HelpOverlay, KeyCode::Char('L')), Some(Action::Logout));
         assert_eq!(press(Context::HelpOverlay, KeyCode::Char('a')), None, "浮层吞键");
         assert_eq!(press(Context::HelpOverlay, KeyCode::Enter), None, "浮层里的回车也不该穿透");
+    }
+
+    /// 帮助浮层用跟队列浮层同一套滚动键（可能两者同时开着，优先给帮助）。
+    #[test]
+    fn the_help_overlay_scrolls_with_the_queue_keys() {
+        for (key, action) in [
+            (KeyCode::Char('j'), Action::Down),
+            (KeyCode::Down, Action::Down),
+            (KeyCode::Char('k'), Action::Up),
+            (KeyCode::Up, Action::Up),
+            (KeyCode::Char('g'), Action::First),
+            (KeyCode::Home, Action::First),
+            (KeyCode::Char('G'), Action::Last),
+            (KeyCode::End, Action::Last),
+        ] {
+            assert_eq!(press(Context::HelpOverlay, key), Some(action), "{key:?}");
+        }
+        assert_eq!(press(Context::HelpOverlay, KeyCode::PageDown), None, "翻页没绑，别悄悄吞语义");
     }
 
     #[test]

@@ -103,8 +103,8 @@ impl Default for HotkeyConfig {
             lyrics: String::new(),
         };
         // 默认组合只在 `hotkeys::DEFAULTS` 里写一遍：配置模板也读它，改一处不会说岔。
-        for (field, keys, _) in hotkeys::DEFAULTS {
-            config.set(field, keys);
+        for entry in hotkeys::DEFAULTS {
+            config.set(entry.field, entry.keys);
         }
         config
     }
@@ -144,10 +144,10 @@ impl HotkeyConfig {
     pub fn bindings(&self) -> Vec<hotkeys::Binding> {
         hotkeys::DEFAULTS
             .iter()
-            .filter(|(field, _, _)| !self.get(field).is_empty())
-            .map(|(field, _, action)| hotkeys::Binding {
-                action: *action,
-                keys: self.get(field).to_string(),
+            .filter(|entry| !self.get(entry.field).is_empty())
+            .map(|entry| hotkeys::Binding {
+                action: entry.action,
+                keys: self.get(entry.field).to_string(),
             })
             .collect()
     }
@@ -295,15 +295,15 @@ impl Raw {
         // 全局快捷键：写法不对（键名不认 / 没带修饰键）就清成空串 + 一条点名到字段的警告。
         // 清掉是为了让后面只认一条不变式：非空 = 合法 = 会被注册。
         let mut hotkeys = self.hotkeys.unwrap_or_default();
-        for (field, _, _) in hotkeys::DEFAULTS {
+        for entry in hotkeys::DEFAULTS {
             // 取值先 `to_string()`：紧接着要 `set` 它，不能再借着它。
-            let keys = hotkeys.get(field).to_string();
+            let keys = hotkeys.get(entry.field).to_string();
             if keys.is_empty() {
                 continue;
             }
             if let Err(why) = hotkeys::validate(&keys) {
-                warnings.push(format!("[hotkeys] {field} 不可用:{why}"));
-                hotkeys.set(field, "");
+                warnings.push(format!("[hotkeys] {} 不可用:{why}", entry.field));
+                hotkeys.set(entry.field, "");
             }
         }
         config.hotkeys = hotkeys;
@@ -443,7 +443,7 @@ fn write_default(path: &Path) -> Result<()> {
     // 全局快捷键：默认组合从 `DEFAULTS` 现取现写，不跟注释说岔。
     let hotkey_lines: String = hotkeys::DEFAULTS
         .iter()
-        .map(|(field, keys, _)| format!("{field} = \"{keys}\"\n"))
+        .map(|entry| format!("{} = \"{}\"\n", entry.field, entry.keys))
         .collect();
     let text = format!(
         "# canto 配置。改完重启 canto 生效。\n\
@@ -583,7 +583,8 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
 
         assert!(text.contains("[hotkeys]"), "{text}");
-        for (field, keys, _) in crate::hotkeys::DEFAULTS {
+        for entry in crate::hotkeys::DEFAULTS {
+            let (field, keys) = (entry.field, entry.keys);
             assert!(text.contains(&format!("{field} = \"{keys}\"")), "模板里缺 {field}：{text}");
         }
         assert!(text.contains("别的程序收不到"), "得说清注册期间组合是被独占的：{text}");

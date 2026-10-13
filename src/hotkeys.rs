@@ -20,16 +20,71 @@ pub struct Binding {
     pub keys: String,
 }
 
+/// 一条热键的默认设置：配置字段名、默认组合、帮助浮层里的说明、动作。
+///
+/// 这张表是**唯一真源**：默认值、配置模板、警告文案、帮助浮层都读它——加一条热键只要加一行。
+pub struct DefaultBinding {
+    /// `config::HotkeyConfig` 里的字段名。
+    pub field: &'static str,
+    /// 默认组合（默认值必须合法，所以不会是空串）。
+    pub keys: &'static str,
+    /// 帮助浮层右侧那列的字（短句，跟其它键位说明一个量级）。
+    pub help: &'static str,
+    /// 出来走 `keys::Action`，跟界面按键同一条派发路径。
+    pub action: Action,
+}
+
 /// 默认组合：字段名跟 `config::HotkeyConfig` 一一对应，也是配置模板与警告文案的真源。
-pub const DEFAULTS: [(&str, &str, Action); 7] = [
-    ("play_pause", "ctrl+shift+space", Action::PlayPause),
-    ("next", "ctrl+shift+right", Action::Next),
-    ("prev", "ctrl+shift+left", Action::Prev),
-    ("volume_up", "ctrl+shift+up", Action::VolumeUp),
-    ("volume_down", "ctrl+shift+down", Action::VolumeDown),
-    ("lock", "ctrl+shift+l", Action::LyricsLock),
-    ("lyrics", "ctrl+shift+d", Action::LyricsWindow),
+pub const DEFAULTS: [DefaultBinding; 7] = [
+    DefaultBinding {
+        field: "play_pause",
+        keys: "ctrl+shift+space",
+        help: "播放 / 暂停",
+        action: Action::PlayPause,
+    },
+    DefaultBinding {
+        field: "next",
+        keys: "ctrl+shift+right",
+        help: "下一首",
+        action: Action::Next,
+    },
+    DefaultBinding {
+        field: "prev",
+        keys: "ctrl+shift+left",
+        help: "上一首",
+        action: Action::Prev,
+    },
+    DefaultBinding {
+        field: "volume_up",
+        keys: "ctrl+shift+up",
+        help: "音量 +5",
+        action: Action::VolumeUp,
+    },
+    DefaultBinding {
+        field: "volume_down",
+        keys: "ctrl+shift+down",
+        help: "音量 -5",
+        action: Action::VolumeDown,
+    },
+    DefaultBinding {
+        field: "lock",
+        keys: "ctrl+shift+l",
+        help: "歌词窗口锁定 / 解锁",
+        action: Action::LyricsLock,
+    },
+    DefaultBinding {
+        field: "lyrics",
+        keys: "ctrl+shift+d",
+        help: "歌词窗口开 / 关",
+        action: Action::LyricsWindow,
+    },
 ];
+
+/// 这个平台真的会注册系统级热键吗。
+///
+/// Linux（含 Wayland）走空实现、一条都不注册（见下面 `imp`），所以帮助浮层里也不该列出
+/// 这些组合——跟启动时那句「此平台暂不支持全局热键」同一个口径。
+pub const SUPPORTED: bool = cfg!(any(target_os = "windows", target_os = "macos"));
 
 /// 组合能不能用：crate 认键名（顺带给出解析好的 `HotKey`），另外**必须有修饰键**。
 ///
@@ -463,12 +518,12 @@ mod tests {
 
     #[test]
     fn the_defaults_are_the_seven_combos_the_spec_fixed() {
-        let fields: Vec<&str> = DEFAULTS.iter().map(|(field, _, _)| *field).collect();
+        let fields: Vec<&str> = DEFAULTS.iter().map(|entry| entry.field).collect();
         assert_eq!(
             fields,
             ["play_pause", "next", "prev", "volume_up", "volume_down", "lock", "lyrics"]
         );
-        let combos: Vec<&str> = DEFAULTS.iter().map(|(_, keys, _)| *keys).collect();
+        let combos: Vec<&str> = DEFAULTS.iter().map(|entry| entry.keys).collect();
         assert_eq!(
             combos,
             [
@@ -481,7 +536,7 @@ mod tests {
                 "ctrl+shift+d"
             ]
         );
-        let actions: Vec<Action> = DEFAULTS.iter().map(|(_, _, action)| *action).collect();
+        let actions: Vec<Action> = DEFAULTS.iter().map(|entry| entry.action).collect();
         assert_eq!(
             actions,
             [
@@ -494,9 +549,18 @@ mod tests {
                 Action::LyricsWindow
             ]
         );
+        // 帮助浮层那一列也在这张表里：键行左键右述，说明不能是空的。
+        for entry in DEFAULTS {
+            assert!(!entry.help.is_empty(), "{} 缺帮助说明", entry.field);
+        }
         // 每个默认组合本身必须合法，否则开箱就报错。
-        for (field, keys, _) in DEFAULTS {
-            assert!(validate(keys).is_ok(), "默认组合 {field} = {keys:?} 不合法");
+        for entry in DEFAULTS {
+            assert!(
+                validate(entry.keys).is_ok(),
+                "默认组合 {} = {:?} 不合法",
+                entry.field,
+                entry.keys
+            );
         }
     }
 
