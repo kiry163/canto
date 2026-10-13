@@ -334,6 +334,35 @@ mod tests {
         row.find(needle).map(|index| row[..index].width()).expect("该在那儿")
     }
 
+    /// 一行里某个字符出现的所有**显示列**（宽字符按两列算）。
+    fn columns_of(row: &str, needle: char) -> Vec<usize> {
+        let mut columns = Vec::new();
+        let mut column = 0;
+        for character in row.chars() {
+            if character == needle {
+                columns.push(column);
+            }
+            column += character.to_string().width();
+        }
+        columns
+    }
+
+    /// 格子顶边框那一行：内容区自己的边框只有一次 `┌`，网格一行至少两格。
+    fn cell_border_row(rows: &[String]) -> &String {
+        rows.iter().find(|row| row.matches('┌').count() >= 2).expect("格子的顶边框")
+    }
+
+    /// 内容区（`layout` 切出来的那一块）面板边框**里面**那块。
+    fn content_inner(width: u16, height: u16) -> Rect {
+        let content = layout(Rect::new(0, 0, width, height), false).content;
+        Rect::new(content.x + 1, content.y + 1, content.width - 2, content.height - 2)
+    }
+
+    /// 内容区面板里头那几行（不含它自己的上下边框）。
+    fn body_rows(rows: &[String], inner: Rect) -> &[String] {
+        &rows[inner.y as usize..(inner.y + inner.height) as usize]
+    }
+
     /// 一帧里的**文字**：空白与边框线都去掉，内容类断言用它。
     fn frame_text(app: &mut App, width: u16, height: u16) -> String {
         frame_flat(app, width, height)
@@ -567,7 +596,7 @@ mod tests {
         }
     }
 
-    /// 首页画出来：标题 + 四行「编号 名字」 + 选中高亮。
+    /// 首页画出来：标题 + 四格「编号 名字」 + 选中高亮。
     #[test]
     fn the_home_screen_lists_the_four_screens_with_numbers() {
         let (mut app, _runtime) = test_app();
@@ -594,17 +623,87 @@ mod tests {
         assert!(!status.contains("Enter播放"), "不是主界面那条：{status:?}");
     }
 
-    /// 最小窗口（内容区 10 行）与常规 80×24 里，四行都在界内。
+    /// 首页是 3 列网格：1/2/3 在第 1 行，第 4 项换到第 2 行。
+    #[test]
+    fn the_home_grid_wraps_at_three_columns() {
+        let (mut app, _runtime) = test_app();
+        app.go_home();
+        let rows = frame_rows(&mut app, 120, 40);
+        let row_of = |needle: &str| {
+            rows.iter().position(|row| row.contains(needle)).expect("该画出来")
+        };
+        assert_eq!(row_of("1我的收藏"), row_of("2我的歌单"), "前两格同一行");
+        assert_eq!(row_of("2我的歌单"), row_of("3搜索"), "一行三格");
+        assert!(row_of("4历史") > row_of("3搜索"), "第 4 格换到下一行");
+    }
+
+    /// 列距一致、换行那一格对齐第 1 列。
+    #[test]
+    fn the_home_grid_lines_up_its_columns() {
+        let (mut app, _runtime) = test_app();
+        app.go_home();
+        let (width, height) = (120, 40);
+        let rows = frame_raw(&mut app, width, height);
+        let tops: Vec<Vec<usize>> = body_rows(&rows, content_inner(width, height))
+            .iter()
+            .map(|row| columns_of(row, '┌'))
+            .filter(|columns| !columns.is_empty())
+            .collect();
+        assert_eq!(tops.len(), 2, "两行格子（4 项 = 3 + 1）：{tops:?}");
+        assert_eq!(tops[0].len(), 3, "第 1 行三格：{tops:?}");
+        assert_eq!(tops[1].len(), 1, "第 2 行一格：{tops:?}");
+        assert_eq!(tops[0][1] - tops[0][0], tops[0][2] - tops[0][1], "列距要一致：{tops:?}");
+        assert_eq!(tops[1][0], tops[0][0], "换行那一格对齐第 1 列：{tops:?}");
+    }
+
+    /// 整块在内容区里居中：横竖留白都相等（差不超过 1——余数是奇数时只能差一格）。
+    #[test]
+    fn the_home_grid_block_is_centered() {
+        let (mut app, _runtime) = test_app();
+        app.go_home();
+        let (width, height) = (120, 40);
+        let rows = frame_raw(&mut app, width, height);
+        let inner = content_inner(width, height);
+        let border = cell_border_row(&rows);
+        let left = *columns_of(border, '┌').first().expect("第 1 格");
+        let right = *columns_of(border, '┐').last().expect("第 3 格");
+        let margin_left = left - inner.x as usize;
+        let margin_right = (inner.x + inner.width - 1) as usize - right;
+        assert!(margin_left > 4, "别贴着左边：{margin_left}");
+        assert!(margin_left.abs_diff(margin_right) <= 1, "左边 {margin_left}、右边 {margin_right}");
+
+        let body = body_rows(&rows, inner);
+        let grid_top = body.iter().position(|row| row.contains('┌')).expect("格子上边框") as u16;
+        let grid_bottom = body.iter().rposition(|row| row.contains('└')).expect("格子下边框") as u16;
+        let above = grid_top;
+        let below = inner.height - 1 - grid_bottom;
+        assert!(above.abs_diff(below) <= 1, "上留 {above} 行、下留 {below} 行");
+    }
+
+    /// 选中那格带 `▶`；`j` 挪一格，`▶` 跟着走、只在一格上。
+    #[test]
+    fn the_home_grid_moves_the_highlight() {
+        let (mut app, _runtime) = test_app();
+        app.go_home();
+        let text = frame_flat(&mut app, 120, 40);
+        assert!(text.contains("▶1我的收藏"), "{text}");
+        app.apply(crate::tui::keys::Action::Down);
+        let text = frame_flat(&mut app, 120, 40);
+        assert!(text.contains("▶2我的歌单"), "高亮该挪到第 2 格：{text}");
+        assert!(!text.contains("▶1我的收藏"), "`▶` 只该在选中那格：{text}");
+    }
+
+    /// 最小窗口（内容区 10 行）与常规 80×24 里，四格都在界内。
     #[test]
     fn the_home_screen_fits_the_smallest_windows() {
         let (mut app, _runtime) = test_app();
-        app.screen = Screen::Home;
+        app.go_home();
         for (width, height) in [(60, 15), (80, 24)] {
             let rows = frame_rows(&mut app, width, height);
-            for row in ["1我的收藏", "4历史"] {
+            for label in ["1我的收藏", "2我的歌单", "3搜索", "4历史"] {
                 assert!(
-                    rows.iter().any(|line| line.contains(row)),
-                    "{width}×{height} 四行都得在，缺 `{row}`：{rows:?}"
+                    rows.iter().any(|row| row.contains(label)),
+                    "{width}×{height} 缺 `{label}`：{rows:?}"
                 );
             }
         }

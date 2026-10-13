@@ -80,7 +80,7 @@ pub enum Action {
 pub enum Context {
     /// 主界面（菜单栏去掉后只剩这一块内容区）。
     Content,
-    /// 首页（`0` 界面）：四行屏入口，`Enter` 进屏。
+    /// 首页（`0` 界面）：3 列网格的屏入口，`Enter` 进屏。
     Home,
     /// 全屏视图：内容区被它占满，只留「看得见」的那些键。
     NowPlaying,

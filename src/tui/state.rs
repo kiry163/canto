@@ -50,7 +50,7 @@ fn edge_state(state: &mut ListState, len: usize, last: bool) {
 /// 当前在哪一屏。启动时看会话：没登录就先出登录屏。
 pub(super) enum Screen {
     Login(LoginState),
-    /// 首页（`0` 界面）：四行屏入口。它不是 `Menu` 的一员——`Menu` 的含义是「一份歌曲
+    /// 首页（`0` 界面）：3 列网格的屏入口。它不是 `Menu` 的一员——`Menu` 的含义是「一份歌曲
     /// 列表 + 选中位置 + 筛选」，首页不是列表，它自己只有一行选中位置（`home_state`）。
     Home,
     Main,
