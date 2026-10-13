@@ -1386,6 +1386,20 @@ Run: `cargo test --locked draw::tests::song_lists_have_a_header_aligned_with_the
 > `note` 的判定按 `Menu` 分岔（与今天 `content.rs:303-307` 等价）；Task 9 里历史屏覆盖它
 > （`rows::Row { note: Some(label), ..row }`），不用改签名。
 
+> **实施记录（2026-10-13）**：三处按实测调整，都是这一层才暴露的——
+> ① **缩进不能加两次**：`List` 渲染数据行时**自己**会留出 `highlight_symbol` 那 2 列，而
+>    `header` 是普通 `Paragraph`、不会。所以 `rows::line(columns, row)` **不带缩进参数**、
+>    `rows::header(columns)` 自带 `INDENT`；谁要再补一次就会整体右移 2 列（第一次实现就这么错了，
+>    draw 层那条对齐断言当场抓住）。
+> ② **列宽要扣掉那 2 列**：`fit` 必须拿「列表区宽 − `INDENT`」，所以新增
+>    `rows::row_width(list_area_width)` 专职这件事；少扣的后果是整行超宽、被 ratatui 裁掉尾巴
+>    （表现为表头的「体积」少一个字、数据的 `30.0MB` 少 `MB`）。
+> ③ **浮层左上角那一格可能画不出来**：表头的中文字（`标题`）占 cells 5–8，而 60 列时帮助浮层的
+>    `┌` 正好落在 cell 8——**宽字符后面那一格永远不会被重画**（ratatui `Buffer::diff` 的约定：
+>    `double width symbol at index 0 - skip index 1`，缓冲必须满足「宽字符后面没有非空白格」）。
+>    于是 `help_box_rows` 改成按标题 `帮助` 定位浮层（不再找 `┌ 帮助`）。这是 CJK + 覆盖层的固有
+>    交互（今天的列表行也可能撞上，只是列位不同），记进 `docs/design.md` 的已知限制。
+
 - [ ] **Step 4: 跑测试确认通过**
 
 Run: `cargo test --locked draw::tests` —— 预期上面两条过；**同时会挂掉几条旧断言**，按 Step 5 改。

@@ -409,8 +409,12 @@ mod tests {
     }
 
     /// 帮助浮层那几行（含上下框线）：判「浮层里有什么 / 状态行里有什么」用。
+    ///
+    /// 按**标题**找顶边，不按 `┌ 帮助`：浮层左上角那一格可能正好落在下面某行的中文字
+    /// 后半格上——ratatui 的缓冲约定是「宽字符后面那一格不再重画」（见 `Buffer::diff` 的
+    /// 「double width symbol at index 0 - skip index 1」），那时候角就画不出来。
     fn help_box_rows(rows: &[String]) -> Vec<String> {
-        let top = rows.iter().position(|row| row.contains("┌ 帮助")).expect("帮助浮层");
+        let top = rows.iter().position(|row| row.contains("帮助")).expect("帮助浮层");
         let bottom = rows[top + 1..]
             .iter()
             .position(|row| row.contains('└'))
@@ -1295,5 +1299,82 @@ mod tests {
         let text = frame_flat(&mut app, 120, 30);
         assert!(text.contains("筛选「非酋」1/2"), "{text}");
         assert!(!text.contains("2首"), "筛过之后不该再挂一个总数：{text}");
+    }
+
+    /// 曲目列表有表头，且与数据同列；缓存/下载两个标记按数据落在正确的列上。
+    #[test]
+    fn song_lists_have_a_header_aligned_with_the_rows() {
+        let (mut app, _runtime) = test_app();
+        let mut song = crate::tui::test_support::titled_song("a", "成全", "刘若英");
+        song.sizes.mp3_128 = 4_400_000;
+        app.nav.favorites.set_items(vec![song]);
+        app.cached
+            .insert("a".to_string(), (crate::model::Quality::High320, 9_800_000));
+        app.config.download_dir =
+            std::env::temp_dir().join(format!("canto-draw-dl-{}", std::process::id()));
+        std::fs::remove_dir_all(&app.config.download_dir).ok();
+        std::fs::create_dir_all(&app.config.download_dir).expect("建下载目录");
+        std::fs::write(
+            app.config.download_dir.join("刘若英 - 成全.mp3"),
+            vec![0_u8; 1_024],
+        )
+        .expect("写下载文件");
+        app.refresh_downloads();
+        app.switch_menu(Menu::Favorites);
+
+        let rows = frame_raw(&mut app, 100, 30);
+        let header = rows
+            .iter()
+            .find(|row| row.contains("标题") && row.contains("缓存"))
+            .expect("有表头");
+        let data = rows.iter().find(|row| row.contains("成全")).expect("有数据行");
+        // 对齐规则跟 `rows` 的单元测试一致：左对齐比起点、右对齐比终点、居中允许差 1 列
+        // （表头「缓存」占满 4 列，数据 `●` 居中，居中余数可以差一格）。
+        let width = unicode_width::UnicodeWidthStr::width;
+        for (needle, value, align) in [
+            ("标题", "成全", "left"),
+            ("歌手", "刘若英", "left"),
+            ("时长", "03:20", "right"),
+            ("音质", "MP3 320k", "left"),
+            ("体积", "9.3MB", "right"),
+            ("缓存", "●", "center"),
+            ("下载", "↓", "center"),
+        ] {
+            let (head_at, value_at) = (column_of(header, needle), column_of(data, value));
+            match align {
+                "left" => assert_eq!(
+                    head_at, value_at,
+                    "「{needle}」列没对齐：\n表头 {header:?}\n数据 {data:?}"
+                ),
+                "right" => assert_eq!(
+                    head_at + width(needle),
+                    value_at + width(value),
+                    "「{needle}」列的右端没对齐：\n表头 {header:?}\n数据 {data:?}"
+                ),
+                _ => assert!(
+                    head_at.abs_diff(value_at) <= 1,
+                    "「{needle}」列不该偏出 1 列：\n表头 {header:?}\n数据 {data:?}"
+                ),
+            }
+        }
+
+        std::fs::remove_dir_all(&app.config.download_dir).ok();
+    }
+
+    /// 本地曲库屏：容器（扩展名）与真实大小，不再显示配置档位。
+    #[test]
+    fn a_local_row_reports_its_own_container_and_size() {
+        let (mut app, _runtime) = test_app();
+        let mut song = crate::tui::test_support::local_song("C:/Music/canto/曲终人散.flac");
+        song.local_bytes = 31_457_280;
+        song.duration_secs = 270;
+        app.library = vec![song];
+        app.refresh_local_view();
+        app.switch_menu(Menu::LocalLibrary);
+
+        let text = frame_text(&mut app, 140, 40);
+        assert!(text.contains("FLAC"), "本地歌报容器：{text}");
+        assert!(text.contains("30.0MB"), "本地歌报真实大小：{text}");
+        assert!(!text.contains("MP3 128k"), "不该再显示配置档位：{text}");
     }
 }

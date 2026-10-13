@@ -206,8 +206,11 @@ pub(super) struct Row<'a> {
 }
 
 /// 表头那一行（`DarkGray`；对齐规则跟数据一致，所以「时长」这些标题也在它对的那一列上）。
-pub(super) fn header(columns: &[Column], indent: u16) -> Line<'static> {
-    let mut spans = vec![Span::raw(" ".repeat(indent as usize))];
+///
+/// **自带 [`INDENT`] 缩进**：`List` 渲染数据行时会先留出选中符号那两列，表头是普通
+/// `Paragraph`，得自己补上同样的两列才对得齐。
+pub(super) fn header(columns: &[Column]) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ".repeat(INDENT as usize))];
     for (order, column) in columns.iter().enumerate() {
         if order > 0 {
             spans.push(Span::raw(" "));
@@ -221,8 +224,10 @@ pub(super) fn header(columns: &[Column], indent: u16) -> Line<'static> {
 ///
 /// 返回**拥有数据**的 `Line<'static>`：三处绘制函数是「建 items → `mem::take(&mut …state)`
 /// → 渲染」的顺序，行若借着 `self.nav` 里的歌单就会与 `&mut` 撞上。
-pub(super) fn line<'a>(columns: &[Column], row: &Row<'a>, indent: u16) -> Line<'static> {
-    let mut spans = vec![Span::raw(" ".repeat(indent as usize))];
+///
+/// **不加缩进**：选中符号那两列由 `List` 自己留（再补一次就会比表头右移两列）。
+pub(super) fn line<'a>(columns: &[Column], row: &Row<'a>) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
     for (order, column) in columns.iter().enumerate() {
         if order > 0 {
             spans.push(Span::raw(" "));
@@ -311,6 +316,12 @@ pub(super) fn group(inner: Rect) -> (Option<Rect>, Rect) {
     } else {
         (None, inner)
     }
+}
+
+/// 行内容能用的宽度：`List` 会给每一行留 [`INDENT`] 列给选中符号（`▶ `），
+/// 所以按列表区宽度分配列宽时必须把这 2 列扣掉——不然整行超宽，尾巴会被 ratatui 裁掉。
+pub(super) fn row_width(list_area_width: u16) -> u16 {
+    list_area_width.saturating_sub(INDENT)
 }
 
 /// 行上「本地已有那份」的解析结果（spec §3：**已有那份就报那一份**）。
@@ -538,25 +549,31 @@ mod tests {
 
     /// 表头与数据落在同一批列区间里：两行显示宽度一样，左对齐比起点、右对齐比终点、
     /// 居中允许一个字符的居中余数差。
+    ///
+    /// 数据行按**列表渲染的样子**补上 [`INDENT`]（`List` 给每行留的选中符号那两列），
+    /// 所以这里比的是绝对显示列。
     #[test]
     fn the_header_lines_up_with_the_row() {
         let columns = fit(&history_columns(), 60);
-        let head = render(&header(&columns, INDENT));
-        let row = render(&line(
-            &columns,
-            &Row {
-                playing: true,
-                title: "成全",
-                singers: "刘若英",
-                duration: Some(276),
-                tier: Some("MP3 128k".into()),
-                size: Some(4_400_000),
-                cached: true,
-                downloaded: true,
-                note: None,
-            },
-            INDENT,
-        ));
+        let head = render(&header(&columns));
+        let row = format!(
+            "{}{}",
+            " ".repeat(INDENT as usize),
+            render(&line(
+                &columns,
+                &Row {
+                    playing: true,
+                    title: "成全",
+                    singers: "刘若英",
+                    duration: Some(276),
+                    tier: Some("MP3 128k".into()),
+                    size: Some(4_400_000),
+                    cached: true,
+                    downloaded: true,
+                    note: None,
+                },
+            ))
+        );
         // 两行一样宽，且正好是「缩进 + 这批列要占的列数」。
         let expected = INDENT as usize + total(&columns) as usize;
         assert_eq!(UnicodeWidthStr::width(head.as_str()), expected, "{head:?}");
@@ -614,7 +631,6 @@ mod tests {
                     downloaded: false,
                     note: None,
                 },
-                INDENT,
             ))
         };
         let long = build("一二三四五六七八九十十一十二十三");
@@ -650,7 +666,6 @@ mod tests {
                 downloaded: false,
                 note: None,
             },
-            INDENT,
         ));
         assert!(text.contains("--:--"), "时长未知：{text:?}");
         assert!(text.contains('—'), "音质/体积未知：{text:?}");
