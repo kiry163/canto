@@ -141,6 +141,7 @@ fn help_rows(menu: Menu, hotkeys: &HotkeyConfig) -> Vec<Row> {
         Row::Keys { keys: "g / G、Home / End", help: "首 / 尾" },
         Row::Keys { keys: "PgUp / PgDn", help: "翻页（Ctrl+U / Ctrl+D）" },
         Row::Section("切屏"),
+        Row::Keys { keys: "0", help: "首页" },
         Row::Keys { keys: "1", help: "我的收藏" },
         Row::Keys { keys: "2", help: "我的歌单" },
         Row::Keys { keys: "3", help: "搜索" },
@@ -311,6 +312,7 @@ mod tests {
         let rows = help_rows(Menu::Favorites, &HotkeyConfig::default());
         let cells: Vec<(&str, &str)> = rows.iter().filter_map(Row::cells).collect();
         assert!(cells.contains(&("1", "我的收藏")), "{cells:?}");
+        assert!(cells.contains(&("0", "首页")), "首页入口要在「切屏」段里：{cells:?}");
         assert!(cells.contains(&("?", "帮助")), "{cells:?}");
         assert!(cells.contains(&("Space", "播放 / 暂停")), "{cells:?}");
         assert!(cells.contains(&("L", "登出（清空本地会话）")), "登出是全局键：{cells:?}");
