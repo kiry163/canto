@@ -2214,6 +2214,14 @@ mod tests {
         assert!(!app.show_spectrum, "回首页也要收");
     }
 
+    /// 频谱区开着，四屏的上下文也不变（列表键照旧可用）。
+    #[test]
+    fn the_spectrum_leaves_the_list_context_alone() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.apply(keys::Action::ToggleSpectrum);
+        assert_eq!(app.context(), keys::Context::Content);
+    }
+
     /// `Esc` 退层，但**不**动频谱区（频谱区不是一层，要退按 `v`）。
     #[test]
     fn esc_pops_a_level_and_does_not_touch_the_spectrum() {

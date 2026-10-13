@@ -30,9 +30,6 @@ pub const MIN_WIDTH: u16 = 60;
 pub const MIN_HEIGHT: u16 = 15;
 /// 歌词块高度上限（行）。
 pub const MAX_LYRIC_HEIGHT: u16 = 12;
-/// 全屏视图拆两半的最低内容区高度。再矮就只画歌词——15 行的下限终端拆出来是
-/// 3 行频谱，废的。
-pub const SPLIT_MIN_HEIGHT: u16 = 14;
 
 /// 骨架切出来的几块。
 pub struct Areas {
@@ -103,13 +100,18 @@ impl App {
             );
             return;
         }
-        // 歌词块只在「正在放 + 有歌词 + 面板开着」时占位，不播放时不画空框。
-        // 全屏视图时底部不再单开一块——同一份歌词没有画两遍的道理。
-        let lyric_wanted =
-            self.show_lyric && self.lyric.is_some() && self.player_active() && !self.show_spectrum;
+        // 歌词栏在「开着 + 有歌在放」时占位（有没有歌词都画：没有就写「暂无歌词」）。
+        let lyric_wanted = self.show_lyric && self.player_active();
         let areas = layout(area, lyric_wanted);
         if self.show_spectrum {
-            self.draw_now_playing(frame, areas.content);
+            // 两个栏都在时歌名归歌词栏（两块都挂一遍没意义）；频谱区独占内容区时
+            // 名字得跟着它走，不然屏幕上没有歌名。
+            let title = if areas.lyric.is_some() {
+                SPLIT_TITLE.to_string()
+            } else {
+                spectrum_title(self.engine.snapshot().title.as_deref())
+            };
+            self.draw_spectrum_area(frame, areas.content, &title);
         } else if matches!(self.screen, Screen::Home) {
             self.draw_home(frame, areas.content);
         } else {
@@ -120,8 +122,7 @@ impl App {
         }
         self.draw_player(frame, areas.player);
         self.draw_status(frame, areas.status);
-        // 浮层只盖**内容区**：播放条与状态行是常驻的，不该被挡住
-        // （全屏视图也是这个规矩）。
+        // 浮层只盖**内容区**：播放条与状态行是常驻的，不该被挡住。
         if self.help_open {
             self.draw_help(frame, area);
         } else if self.queue_open {
@@ -134,35 +135,6 @@ impl App {
     /// 音频引擎是否已经离开 `Idle`（有歌在放、缓冲或暂停）。
     fn player_active(&self) -> bool {
         self.engine.snapshot().phase != Phase::Idle
-    }
-
-    /// 全屏正在播放视图：上半屏频谱、下半屏歌词。
-    ///
-    /// 顺序是「频谱在上」：频谱永远在动、歌词是要读的，动态元素放上方当氛围层，视线
-    /// 主焦点留在下半屏；这也让歌词与日常模式（底部那块）在屏幕上的位置基本一致，
-    /// 按 Y 时眼睛不用跳。
-    ///
-    /// 三条规则，按先后：**没有歌词**就把整块高度给频谱（不画空框）；**内容区太矮**
-    /// （< [`SPLIT_MIN_HEIGHT`]）就不拆，只画歌词；否则按
-    /// `歌词 = clamp(内容区 / 2, 7, 12)` 拆，余量全给频谱（频谱的高度收益是线性的，
-    /// 歌词的有用高度有上限）。
-    fn draw_now_playing(&mut self, frame: &mut Frame, area: Rect) {
-        let has_lyric = self.lyric.is_some() || self.lyric_loading;
-        if !has_lyric {
-            // 没有歌词时歌名只能挂在这一块上（下方没有歌词块了）
-            let title = spectrum_title(self.engine.snapshot().title.as_deref());
-            self.draw_spectrum_area(frame, area, &title);
-            return;
-        }
-        if area.height < SPLIT_MIN_HEIGHT {
-            self.draw_lyric(frame, area);
-            return;
-        }
-        let lyric_height = (area.height / 2).clamp(7, MAX_LYRIC_HEIGHT);
-        let rows =
-            Layout::vertical([Constraint::Min(3), Constraint::Length(lyric_height)]).split(area);
-        self.draw_spectrum_area(frame, rows[0], SPLIT_TITLE);
-        self.draw_lyric(frame, rows[1]);
     }
 
     /// 画频谱那一块：有数据就画柱子，没有就给提示。
@@ -723,40 +695,30 @@ mod tests {
         }
     }
 
-    /// 全屏视图：歌词画在内容区，底部不再另开一块（同一份歌词不画两遍）。
+    /// 频谱区替掉列表：内容区里只剩频谱块（歌词栏关着）。
     #[test]
-    fn fullscreen_lyric_takes_over_the_content_area() {
+    fn the_spectrum_takes_over_the_content_area() {
         let (mut app, _runtime) = test_app();
         app.nav.favorites.set_items(vec![test_song("a")]);
-        app.lyric = Some(crate::tui::test_support::test_lyric());
+        app.show_lyric = false;
         app.show_spectrum = true;
         let text = frame_flat(&mut app, 120, 30);
-        // 空闲时没有歌名，标题就只有「歌词」——不写行数，也不写操作提示。
-        assert!(text.contains("歌词"), "内容区标题变成歌词：{text}");
-        assert!(!text.contains("行）"), "标题不该写行数：{text}");
-        // 操作提示统一在底部状态行：标题里没有，状态行里得有（这才是「统一交互」）。
+        assert!(text.contains("频谱"), "内容区变成频谱区：{text}");
+        assert!(!text.contains("歌a"), "列表让位给频谱区：{text}");
+        assert!(!text.contains("歌词"), "歌词栏关着就没有歌词块：{text}");
+
+        // 操作提示统一在底部状态行：没有「模式」之后给的就是列表那套。
         let rows = frame_rows(&mut app, 120, 30);
-        let title_row = rows
-            .iter()
-            .find(|row| row.starts_with("┌歌词"))
-            .expect("歌词块标题");
-        assert!(!title_row.contains("退出"), "标题不写操作提示：{title_row}");
         let status_row = rows.last().expect("状态行");
-        // 没有「全屏模式」之后上下文不变，状态行给的就是列表那套提示。
         assert!(
             status_row.contains("Enter播放"),
             "操作提示该在状态行：{status_row}"
         );
-        assert!(text.contains("第1句"), "歌词正文画出来了：{text}");
-        assert_eq!(text.matches("歌词").count(), 1, "只有一块歌词：{text}");
-        assert!(!text.contains("歌a"), "列表让位给歌词：{text}");
 
-        // 关掉全屏就回到列表。底部那块歌词画不画是另一条规则（只在播放中开），
-        // 这里引擎是空闲的，所以它本来就不出现。
+        // 关掉频谱区就回到列表。
         app.show_spectrum = false;
         let back = frame_flat(&mut app, 120, 30);
         assert!(back.contains("歌a"), "回到列表：{back}");
-        assert!(!back.contains("歌词"), "回到列表就没有歌词块了：{back}");
     }
 
     /// 频谱块的提示文案按播放态选：缓冲中与「没在播」不是一回事（纯函数，所以
@@ -771,10 +733,11 @@ mod tests {
         assert_eq!(spectrum_message(&Phase::Failed("x".into())), "未在播放");
     }
 
-    /// 全屏视图：上半屏频谱、下半屏歌词，两块各带自己的标题。
+    /// 频谱区在上、歌词栏在下；歌词栏高度是 `(内容区/3).clamp(5, 12)`。
     #[test]
-    fn the_now_playing_view_splits_into_spectrum_above_lyric() {
+    fn the_spectrum_sits_above_the_lyric_bar() {
         let (mut app, _runtime) = test_app();
+        app.engine.force_phase(crate::player::Phase::Playing);
         app.lyric = Some(crate::tui::test_support::test_lyric());
         app.show_spectrum = true;
         app.spectrum_smooth = vec![1.0; crate::spectrum::BANDS];
@@ -788,25 +751,33 @@ mod tests {
         let lyric = rows
             .iter()
             .position(|row| row.starts_with("┌歌词"))
-            .expect("歌词块");
-        assert!(spectrum < lyric, "频谱该在歌词上面：{spectrum} vs {lyric}");
+            .expect("歌词栏");
+        assert!(spectrum < lyric, "频谱区该在歌词栏上面：{spectrum} vs {lyric}");
         assert!(rows[spectrum + 1].contains('█'), "频谱块里该有柱子");
         assert!(
             rows[lyric + 1..].iter().any(|row| row.contains("第1句")),
-            "歌词块里该有歌词"
+            "歌词栏里该有歌词"
         );
+        // 内容区 = 30 − 播放条 4 − 状态行 1 = 25 行 → (25/3).clamp(5, 12) = 8 行。
+        let height = rows[lyric..]
+            .iter()
+            .position(|row| row.starts_with("└"))
+            .expect("歌词栏下边框")
+            + 1;
+        assert_eq!(height, 8, "歌词栏高度该是内容区的三分之一：{rows:?}");
 
         // 歌名只在歌词块上出现一次（频谱块整块归它时才带歌名）。
         let text = frame_flat(&mut app, 120, 30);
         assert_eq!(text.matches("频谱").count(), 1, "频谱块只有一块：{text}");
     }
 
-    /// 没有歌词时整块给频谱（不画空框），标题带上歌名。
+    /// 歌词栏关着时，频谱区吃满整个内容区（不留空框、也不留歌词栏）。
     #[test]
-    fn without_a_lyric_the_spectrum_takes_the_whole_area() {
+    fn without_the_lyric_bar_the_spectrum_takes_the_whole_area() {
         let (mut app, _runtime) = test_app();
-        app.lyric = None;
-        app.lyric_loading = false;
+        app.engine.force_phase(crate::player::Phase::Playing);
+        app.lyric = Some(crate::tui::test_support::test_lyric());
+        app.show_lyric = false;
         app.show_spectrum = true;
         app.spectrum_smooth = vec![1.0; crate::spectrum::BANDS];
         app.spectrum_peak = vec![1.0; crate::spectrum::BANDS];
@@ -818,11 +789,12 @@ mod tests {
         );
         assert!(
             !rows.iter().any(|row| row.starts_with("┌歌词")),
-            "没有歌名块：{rows:?}"
+            "歌词栏关着就不画：{rows:?}"
         );
     }
 
-    /// 没在播时：进过 tick 之后不该留着上一帧的柱子（`tick()` 会清掉缓冲）。
+    /// 没在播时：进过 tick 之后不该留着上一帧的柱子（`tick()` 会清掉缓冲）；
+    /// 也没有歌词栏（它要求有歌在放）。
     #[test]
     fn an_idle_engine_shows_a_message_instead_of_stale_bars() {
         let (mut app, _runtime) = test_app();
@@ -839,45 +811,73 @@ mod tests {
             .iter()
             .position(|row| row.starts_with("┌频谱"))
             .expect("频谱块");
-        let lyric = rows
+        let height = rows[spectrum..]
             .iter()
-            .position(|row| row.starts_with("┌歌词"))
-            .expect("歌词块");
+            .position(|row| row.starts_with("└"))
+            .expect("频谱块下边框");
+        let inside = &rows[spectrum..spectrum + height];
         assert!(
-            rows[spectrum..lyric]
-                .iter()
-                .any(|row| row.contains("未在播放")),
+            inside.iter().any(|row| row.contains("未在播放")),
             "空闲该给提示：{rows:?}"
         );
         assert!(
-            !rows[spectrum..lyric].iter().any(|row| row.contains('█')),
+            !inside.iter().any(|row| row.contains('█')),
             "不该画残留的柱子：{rows:?}"
+        );
+        assert!(
+            !rows.iter().any(|row| row.starts_with("┌歌词")),
+            "没在播就没有歌词栏：{rows:?}"
         );
     }
 
-    /// 太矮的终端不拆：15 行高的窗口只画歌词（就是今天的 Y）。
+    /// 窗口太矮（< `MIN_LYRIC_HEIGHT` = 20）时歌词栏不占位：`y` 开着也一样；
+    /// 频谱区则拿到整个内容区。
     #[test]
-    fn a_short_window_keeps_the_lyric_only_view() {
+    fn the_lyric_bar_needs_a_tall_enough_window() {
         let (mut app, _runtime) = test_app();
+        app.engine.force_phase(crate::player::Phase::Playing);
         app.lyric = Some(crate::tui::test_support::test_lyric());
         app.show_spectrum = true;
 
-        // 15 行的下限窗口：内容区 10 行 < SPLIT_MIN_HEIGHT
         let rows = frame_rows(&mut app, 100, 15);
         assert!(
-            rows.iter().any(|row| row.starts_with("┌歌词")),
-            "歌词块还在：{rows:?}"
+            !rows.iter().any(|row| row.starts_with("┌歌词")),
+            "15 行窗口里歌词栏不占位：{rows:?}"
         );
         assert!(
-            !rows.iter().any(|row| row.starts_with("┌频谱")),
-            "矮屏不拆：{rows:?}"
+            rows.iter().any(|row| row.starts_with("┌频谱")),
+            "频谱区拿到整个内容区：{rows:?}"
         );
     }
 
-    /// 全屏视图里当前句是高亮的（黄 + 粗），别的行不是——看真实单元格的颜色。
+    /// 没有歌词也画歌词栏：还在拉写「歌词加载中…」，拉完没有写「暂无歌词」。
+    #[test]
+    fn the_lyric_bar_shows_even_without_lyrics() {
+        let (mut app, _runtime) = test_app();
+        app.engine.force_phase(crate::player::Phase::Playing);
+        app.lyric_loading = true;
+        assert!(frame_text(&mut app, 120, 40).contains("歌词加载中…"));
+        app.lyric_loading = false;
+        assert!(frame_text(&mut app, 120, 40).contains("暂无歌词"));
+    }
+
+    /// 频谱区开着时队列浮层照样看得见（它画在 `Areas.content` 上）。
+    #[test]
+    fn the_queue_overlay_stays_visible_over_the_spectrum() {
+        let (mut app, _runtime) = test_app();
+        app.engine.force_phase(crate::player::Phase::Playing);
+        app.show_spectrum = true;
+        app.queue = queue::Queue::new(vec![test_song("a")], 0, String::new());
+        app.apply(crate::tui::keys::Action::QueueOverlay);
+        // 曲子标题只在浮层里出现（频谱开着时列表不画；测试里引擎没有曲名）。
+        assert!(frame_text(&mut app, 120, 40).contains("歌a"), "浮层该压得住频谱区");
+    }
+
+    /// 歌词栏里当前句是高亮的（黄 + 粗），别的行不是——看真实单元格的颜色。
     #[test]
     fn the_current_lyric_line_is_highlighted() {
         let (mut app, _runtime) = test_app();
+        app.engine.force_phase(crate::player::Phase::Playing);
         app.lyric = Some(crate::tui::test_support::test_lyric());
         app.show_spectrum = true;
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("测试终端");
