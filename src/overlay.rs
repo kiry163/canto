@@ -1088,12 +1088,15 @@ mod imp {
         config: DesktopLyricsConfig,
         /// 拖动结束后的新中心点回传给主线程（落盘在 `tui/state.rs`）。
         positions: Sender<(i32, i32)>,
-        /// 上次报出去的中心点（左上原点）：变了才回传（与 Windows 逐 draw 采纳窗口自身矩形同一口径）。
+        /// 中心点（左上原点）：既是重画时的摆位依据，也是报给主线程落盘的值。
         reported: (i32, i32),
         /// 主屏高：左上原点 ↔ AppKit 左下原点换算用。
         screen_height: f64,
         /// 现在是 `orderOut` 状态吗（避免每帧重复调）。
         hidden: bool,
+        /// 现在是锁定态吗（跟随 `push` 的 payload）。锁定态窗口动不了，`pump` 连矩形都不量
+        /// ——量回来的中心带着 `setFrame` 整点吸附的舍入，误当成拖动就会让位置自己飘。
+        locked: bool,
     }
 
     impl Imp {
@@ -1145,16 +1148,31 @@ mod imp {
             // 拖动：解锁态窗口被系统拖走，位置以**窗口自己**为准。每帧读一次真实矩形，
             // 跟上次报过的比——变了才回传（不指望「拖动结束」事件：Windows 那边踩过
             // `WM_EXITSIZEMOVE` 进不了消息队列的坑，改成逐 draw 采纳窗口自身的矩形）。
+            //
+            // 锁定态窗口动不了（点不着，也没有别的东西会挪它），干脆不读：`setFrame` 会把原点
+            // **吸附到整点**，量回来的中心天生带 ±0.5 的舍入，当成「挪了」写进状态文件就会累积。
+            if self.locked {
+                return;
+            }
+            let center = self.window_center();
+            // 1 点以内的差就是上面那个吸附的舍入（量回来最多差 1 点），不是拖动：真拖动是逐像素的，
+            // 而这个回路的每一轮都会把那 1 点加上去——几次开关/解锁，窗口就自己往下飘。
+            if (center.0 - self.reported.0).abs() <= 1 && (center.1 - self.reported.1).abs() <= 1 {
+                return;
+            }
+            self.reported = center;
+            // 通道那头没了（主线程收摊）就算了，不影响界面。
+            let _ = self.positions.send(center);
+        }
+
+        /// 窗口自己的中心点（左上原点）。给 `pump` 判断「窗口被挪了没有」用（原点被整点吸附过，
+        /// 所以这里量出来的值天生带 ±0.5 的误差）。
+        fn window_center(&self) -> (i32, i32) {
             let frame = self.panel.frame();
-            let center = (
+            (
                 (frame.origin.x + frame.size.width / 2.0).round() as i32,
                 (self.screen_height - (frame.origin.y + frame.size.height / 2.0)).round() as i32,
-            );
-            if center != self.reported {
-                self.reported = center;
-                // 通道那头没了（主线程收摊）就算了，不影响界面。
-                let _ = self.positions.send(center);
-            }
+            )
         }
 
         /// 一帧 payload → 窗口。内容没变化时 `State::advance` 根本不会调到这里。
@@ -1164,6 +1182,7 @@ mod imp {
             // ——于是 `setMovableByWindowBackground` 才能让系统把它拖走。传的就是 `locked` 本身；
             // 这行写反过一次（`!locked`），症状是「锁定态点得着、解锁后拖不动」。
             self.panel.setIgnoresMouseEvents(payload.locked);
+            self.locked = payload.locked;
 
             // 隐藏：`orderOut` 而不是销毁（位置与锁定态留着），下次 `orderFrontRegardless` 回来。
             if !payload.visible {
@@ -1218,13 +1237,10 @@ mod imp {
                 + PAD * 2.0;
             let height = rows.iter().map(|field| field.frame().size.height).sum::<f64>() + PAD * 2.0;
 
-            // 位置以**窗口自己**为准：解锁态的拖动是系统直接改窗口，缓存里的中心点会是旧的。
-            // 每次重画都重新采纳一次——拖动途中换行不会把窗口拽回旧位置，也不用指望「拖动结束」事件。
-            let frame = self.panel.frame();
-            let center = (
-                (frame.origin.x + frame.size.width / 2.0).round() as i32,
-                (self.screen_height - (frame.origin.y + frame.size.height / 2.0)).round() as i32,
-            );
+            // 位置以**我们记着的中心点**（`reported`）为准：建窗口时给的那个，或解锁态拖动跟出来的
+            // 那个。不去读窗口自己的矩形再摆回去——`setFrame` 的整点吸附会让这个回路每转一圈多挪
+            // 一点（见 `pump` 里那段）；拖动照样跟手，因为 `pump` 会把窗口的位移采纳进来。
+            let center = self.reported;
             self.panel.setAlphaValue(f64::from(self.config.opacity) / 100.0);
             self.panel.setFrame_display(
                 NSRect::new(
@@ -1250,6 +1266,16 @@ mod imp {
             // 从 `orderOut` 回来（第一次显示也走这里）；`orderFrontRegardless` 不激活自己。
             self.panel.orderFrontRegardless();
             self.hidden = false;
+        }
+    }
+
+    impl Drop for Inner {
+        fn drop(&mut self) {
+            // 只 release 窗口对象**不会**把它从屏幕上拿走：窗口上屏期间 AppKit 自己持有它，
+            // 实测「release 不 close」的 panel 留在屏上，而 Rust 这边已经当它没了（`is_running()`
+            // 变 `false`、`sync` 整段不再进）——症状就是「热键关不掉、窗口冻住不再换词」。
+            // 拆窗口必须显式 close（Windows 那边对应的是 `WM_CLOSE` → `DestroyWindow`）。
+            self.panel.close();
         }
     }
 
@@ -1355,6 +1381,10 @@ mod imp {
         panel.setIgnoresMouseEvents(true);
         // 解锁后拖动交给系统自己拖（见 Task 3）。
         panel.setMovableByWindowBackground(true);
+        // 关窗的释放权归 Rust 的 `Retained`（见 `Drop for Inner`）：显式关掉「关闭时自己 release」
+        // 这条，免得 `close()` 与 `Retained` 各 release 一次。
+        // SAFETY: panel 是主线程上刚建的，这个句柄是它的唯一所有者。
+        unsafe { panel.setReleasedWhenClosed(false) };
         panel
     }
 
@@ -1374,9 +1404,14 @@ mod imp {
             tracing::warn!("桌面歌词要在主线程建窗口");
             return (Imp::none(), None, Some("歌词窗口起不来".to_string()));
         };
-        // 附属进程：不进 Dock、不抢别人的焦点（返回 `false` = 这次调用没生效）。
+        // 附属进程：不进 Dock、不抢别人的焦点。
         let app = NSApplication::sharedApplication(mtm);
-        if !app.setActivationPolicy(NSApplicationActivationPolicy::Accessory) {
+        // 幂等：**已经**是 Accessory 时 `setActivationPolicy` 返回 `false`——那是「没变化」，不是失败
+        // （实测第 2 次起必 `false`）。策略是进程级的，装机第一次真生效就够，所以这里只挡
+        // 「想设却没设上」；不这么写的话每次热键重开窗口都会撞在这儿报「歌词窗口起不来」。
+        if app.activationPolicy() != NSApplicationActivationPolicy::Accessory
+            && !app.setActivationPolicy(NSApplicationActivationPolicy::Accessory)
+        {
             tracing::warn!("设置 Accessory 激活策略失败");
             return (Imp::none(), None, Some("歌词窗口起不来".to_string()));
         }
@@ -1405,8 +1440,10 @@ mod imp {
             reported: center,
             screen_height,
             hidden: false,
+            // 启动一律锁定（`make_panel` 里也是这么设的）。
+            locked: true,
         };
-        // 先把窗口摆到记下来的中心点（`push` 之后会按窗口自己的矩形重算，这里只是给个起点）。
+        // 先把窗口摆到记下来的中心点（首次 `push` 会按这个中心重新量尺寸；锁定态用的就是它）。
         inner.panel.setFrame_display(
             NSRect::new(
                 NSPoint::new(
