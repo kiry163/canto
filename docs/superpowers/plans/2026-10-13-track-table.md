@@ -1909,10 +1909,11 @@ tuios close-window -s canto-dev canto-table
 > ① spec §6 里「内容区高 < 6 不画表头」**在真窗口里够不着**——窗口下限 60×15 给内容区 10 行，
 >    歌词栏要 `高 ≥ 20` 才占位（最紧一档仍是 10 行），所以这条只在 `rows::tests` 的 `group`
 >    单测里钉，draw 层改成钉「最小的合法窗口仍然画表头」（就是 spec 说的「最紧那一档仍然画」）。
-> ② 顺手发现一个**既有**缺陷（不属这次改动，未改）：`refresh_local_view`（`state.rs:2205`）
+> ② 顺手发现一个**既有**缺陷，已在本分支收尾 commit 修掉：`refresh_local_view`（`state.rs:2205`）
 >    把 `previous` 无条件写回 `state.select(previous)`，冷启动第一次进 `5` 时 `previous` 是 `None`
->    → 那一屏一行都没高亮、`Enter/a/x/d` 全无反应，按一下 `j`/`k` 才恢复。`refresh_history_view`
->    的写法是对的，照它改三行即可。
+>    → 那一屏一行都没高亮、`Enter/a/x/d` 全无反应，按一下 `j`/`k` 才恢复。改成照
+>    `refresh_history_view` 那样只在 `previous` 还指得到人时写回；两条回归测试（冷启动选中第一行 /
+>    重扫保留仍有效的选中）。
 
 ```bash
 cargo test --locked

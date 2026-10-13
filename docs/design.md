@@ -231,10 +231,11 @@ Windows 那半不受影响：`Drop` 走 `WM_CLOSE` → `DestroyWindow`（真销�
   历史老条目的占位符（QQ 老条目未登录时不列）。这几条由第一层测试代偿：`rows.rs` 的
   「行取值四态」（缓存命中 / 下载命中 / 都没有 / 本地歌）与 `draw/mod.rs` 的
   「老条目写 `--:--`」都在跑；真机补验要先扫码登录。
-- **顺手发现（未修，不属这次改动）**：`refresh_local_view`（`state.rs:2205`）把 `previous`
-  **无条件**写回 `state.select(previous)`，而 `previous` 可能是 `None`（冷启动第一次进 `5`）——
-  于是那一屏一行都没高亮，`Enter/a/x/d` 这些「作用于选中曲目」的键全无反应，按一下 `j`/`k`
-  才恢复。`refresh_history_view` 是**对的**（只在 `previous` 落在新长度内才写回），照它改即可。
+- **顺手发现并修掉（收尾 commit）**：`refresh_local_view`（`state.rs:2205`）原来把刷新前的选中
+  **无条件**写回 `state.select(previous)`，而它可能是 `None`（冷启动第一次进 `5`）——于是那一屏
+  一行都没高亮，`Enter/a/x/d` 这些「作用于选中曲目」的键全无反应，得先按一下 `j`/`k`。改成跟
+  `refresh_history_view` 一样只在 `previous` 还指得到人（`*index < view.len()`）时写回。
+  实测：修前冷启动进 `5` 一个 `▶` 都没有；修后第一行有 `▶`，`Enter` 立刻起播。
 
 ## 本地曲库（`5`，阶段一，2026-10-13）
 

@@ -2205,8 +2205,14 @@ impl App {
     pub(super) fn refresh_local_view(&mut self) {
         let previous = self.nav.local_view.state.selected();
         let songs = self.library.clone();
-        self.nav.local_view.set_items(songs);
-        self.nav.local_view.state.select(previous);
+        let view = &mut self.nav.local_view;
+        view.set_items(songs);
+        // 重建之后把高亮放回原来那一行；但**只在它还指得到人**的时候写回——
+        // 写回一个 `None`（冷启动第一次进这一屏）会把 `set_items` 刚设好的第一行抹掉，
+        // 于是整屏没有选中行、`Enter/a/x/d` 这些「作用于选中曲目」的键全不响应。
+        if let Some(index) = previous.filter(|index| *index < view.len()) {
+            view.state.select(Some(index));
+        }
     }
 
     /// 历史屏：新在前；每行右侧写「时间 · 来自《来源》」。
@@ -4196,6 +4202,61 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 冷启动第一次进「本地曲库」（这一屏还没选过）也要有选中行：`Enter/a/x/d` 全按「选中那首」
+    /// 办事，选中是 `None` 的话那批键一个都不响。
+    ///
+    /// 回归：`refresh_local_view` 原来把刷新前的选中**无条件**写回，而它可能是 `None`
+    /// （`ListState::default()`），于是把 `set_items` 刚设好的第一行又抹掉了。
+    #[test]
+    fn entering_the_local_library_selects_the_first_row() {
+        let (mut app, _runtime) = test_app();
+        app.library = vec![
+            crate::tui::test_support::local_song("C:/m/a.wav"),
+            crate::tui::test_support::local_song("C:/m/b.wav"),
+        ];
+        assert_eq!(
+            app.nav.local_view.state.selected(),
+            None,
+            "前提：这一屏还没选过"
+        );
+
+        app.switch_menu(Menu::LocalLibrary);
+
+        assert_eq!(
+            app.nav.local_view.state.selected(),
+            Some(0),
+            "第一行要选中，否则 Enter 这些键全不响应"
+        );
+    }
+
+    /// 重扫之后：还在范围内的选中留着（不打断使用者），缩到范围外就退回第一行。
+    #[test]
+    fn a_rescan_keeps_the_selection_when_it_still_fits() {
+        let (mut app, _runtime) = test_app();
+        app.library = vec![
+            crate::tui::test_support::local_song("C:/m/a.wav"),
+            crate::tui::test_support::local_song("C:/m/b.wav"),
+            crate::tui::test_support::local_song("C:/m/c.wav"),
+        ];
+        app.refresh_local_view();
+        app.nav.local_view.state.select(Some(2));
+
+        app.refresh_local_view();
+        assert_eq!(
+            app.nav.local_view.state.selected(),
+            Some(2),
+            "还在范围内就留着"
+        );
+
+        app.library.truncate(1);
+        app.refresh_local_view();
+        assert_eq!(
+            app.nav.local_view.state.selected(),
+            Some(0),
+            "缩到范围外要退回第一行（不能留一个指不到人的下标）"
+        );
     }
 
     /// `r`（本地曲库重扫）也顺手重扫下载目录：手工删掉文件之后按一下就该消失。
