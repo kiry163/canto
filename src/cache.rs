@@ -32,7 +32,7 @@ pub fn for_song(mid: &str) -> Option<(PathBuf, Quality)> {
     for_song_in(&paths::cache_dir(), mid)
 }
 
-fn for_song_in(dir: &Path, mid: &str) -> Option<(PathBuf, Quality)> {
+pub(crate) fn for_song_in(dir: &Path, mid: &str) -> Option<(PathBuf, Quality)> {
     let entries = std::fs::read_dir(dir).ok()?;
     for entry in entries.flatten() {
         let path = entry.path();

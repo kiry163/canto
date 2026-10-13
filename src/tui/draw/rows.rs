@@ -361,7 +361,7 @@ pub(super) struct LocalCopy<'a> {
 pub(super) fn copy_of<'a>(
     song: &'a Song,
     cached: &'a HashMap<String, (Quality, u64)>,
-    downloads: &'a HashMap<String, (String, u64)>,
+    downloads: &'a HashMap<String, crate::download::Downloaded>,
     want: Quality,
 ) -> LocalCopy<'a> {
     if song.is_local() {
@@ -388,10 +388,10 @@ pub(super) fn copy_of<'a>(
             downloaded: downloads.contains_key(&stem),
         };
     }
-    if let Some((container, bytes)) = downloads.get(&stem) {
+    if let Some(found) = downloads.get(&stem) {
         return LocalCopy {
-            tier: container.clone().into(),
-            size: Some(*bytes),
+            tier: found.container.clone().into(),
+            size: Some(found.bytes),
             cached: false,
             downloaded: true,
         };
@@ -775,11 +775,18 @@ mod tests {
             .collect()
     }
 
-    fn downloaded_index(entries: &[(&str, &str, u64)]) -> HashMap<String, (String, u64)> {
+    fn downloaded_index(entries: &[(&str, &str, u64)]) -> HashMap<String, crate::download::Downloaded> {
         entries
             .iter()
             .map(|(stem, container, bytes)| {
-                ((*stem).to_string(), ((*container).to_string(), *bytes))
+                (
+                    (*stem).to_string(),
+                    crate::download::Downloaded {
+                        path: std::path::PathBuf::from(*stem),
+                        container: (*container).to_string(),
+                        bytes: *bytes,
+                    },
+                )
             })
             .collect()
     }

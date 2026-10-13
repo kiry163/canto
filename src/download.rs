@@ -167,14 +167,25 @@ pub(crate) fn container_label(extension: &str) -> String {
     extension.to_ascii_uppercase()
 }
 
-/// 扫一遍下载目录：`文件名（不含扩展名） → (容器, 字节数)`。
+/// 下载目录里的一份文件。
+#[derive(Debug, Clone)]
+pub struct Downloaded {
+    /// 磁盘上那份（起播时直接开它——列表里写着 `↓` 就该放这一份）。
+    pub path: PathBuf,
+    /// 容器名（`.mp3` → `MP3`）。列表那一列的「音质」位就写它。
+    pub container: String,
+    pub bytes: u64,
+}
+
+/// 扫一遍下载目录：`文件名（不含扩展名） → 那份文件`。
 ///
-/// 列表里的 `↓` 与「体积报磁盘那份」用它（按 `file_stem` 查表，O(1)）。用文件名当键是**唯一
-/// 可选**的口径：文件里没有 mid。同一个 stem 有多份时（mp3 + flac）按容器排
-/// `flac/wav > m4a/ogg > 其它`，同级取体积大的——体积是文件本身唯一读得出的「档位高低」信号。
+/// 列表里的 `↓` 与「体积报磁盘那份」用它（按 `file_stem` 查表，O(1)）；起播优先放本地
+/// 那份也用它（见 `player::local_copy`）。用文件名当键是**唯一可选**的口径：文件里没有 mid。
+/// 同一个 stem 有多份时（mp3 + flac）按容器排 `flac/wav > m4a/ogg > 其它`，同级取体积大的
+/// ——体积是文件本身唯一读得出的「档位高低」信号。
 /// 目录不存在 / 没权限一律给空表（下载目录可能还没建）。
-pub(crate) fn scan_downloads(dir: &Path) -> HashMap<String, (String, u64)> {
-    let mut found: HashMap<String, (String, u64)> = HashMap::new();
+pub(crate) fn scan_downloads(dir: &Path) -> HashMap<String, Downloaded> {
+    let mut found: HashMap<String, Downloaded> = HashMap::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
         return found;
     };
@@ -196,7 +207,11 @@ pub(crate) fn scan_downloads(dir: &Path) -> HashMap<String, (String, u64)> {
         if !metadata.is_file() {
             continue;
         }
-        let candidate = (container_label(&extension), metadata.len());
+        let candidate = Downloaded {
+            path,
+            container: container_label(&extension),
+            bytes: metadata.len(),
+        };
         match found.get(&stem) {
             Some(current) if rank(&candidate) <= rank(current) => {}
             _ => {
@@ -208,13 +223,13 @@ pub(crate) fn scan_downloads(dir: &Path) -> HashMap<String, (String, u64)> {
 }
 
 /// 「哪一份更高」：先看容器，同级看体积。
-fn rank(entry: &(String, u64)) -> (u8, u64) {
-    let tier = match entry.0.as_str() {
+fn rank(entry: &Downloaded) -> (u8, u64) {
+    let tier = match entry.container.as_str() {
         "FLAC" | "WAV" => 2,
         "M4A" | "OGG" => 1,
         _ => 0,
     };
-    (tier, entry.1)
+    (tier, entry.bytes)
 }
 
 /// 歌词落地：正文 `.lrc`；有翻译再写一份 `.trans.lrc`。都写进 `dir`（歌词目录）。
@@ -377,13 +392,19 @@ mod tests {
         std::fs::write(dir.join("README.txt"), "说明".as_bytes()).expect("写非音频");
 
         let found = scan_downloads(&dir);
+        let best = found.get("刘若英 - 成全").expect("同名两份里总有一份");
+        assert_eq!(best.container, "FLAC", "取容器更高的那份：{found:?}");
+        assert_eq!(best.bytes, 314_570);
         assert_eq!(
-            found.get("刘若英 - 成全"),
-            Some(&("FLAC".to_string(), 314_570)),
-            "同一个 stem 有多份时取容器更高的那份：{found:?}"
+            best.path,
+            dir.join("刘若英 - 成全.flac"),
+            "路径要指到磁盘上那份（起播直接开它）"
         );
-        assert_eq!(found.get("周杰伦 - 晴天"), None, "`.part` 不算：{found:?}");
-        assert_eq!(found.get("README"), Some(&("TXT".to_string(), 6)));
+        assert!(
+            !found.contains_key("周杰伦 - 晴天"),
+            "`.part` 不算：{found:?}"
+        );
+        assert_eq!(found.get("README").map(|found| found.container.as_str()), Some("TXT"));
         assert!(
             scan_downloads(&dir.join("没有这个目录")).is_empty(),
             "目录不存在就是空表"
@@ -403,7 +424,7 @@ mod tests {
 
         let found = scan_downloads(&dir);
         assert_eq!(
-            found.get(&file_stem(&song)).map(|(container, _)| container.as_str()),
+            found.get(&file_stem(&song)).map(|found| found.container.as_str()),
             Some("MP3")
         );
 

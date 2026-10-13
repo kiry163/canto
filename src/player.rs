@@ -35,12 +35,61 @@ pub struct Track {
     pub source: TrackSource,
 }
 
-/// 字节的来源。QQ 那边是一串候选地址（已按偏好排好序），本地文件就是那条路径——
-/// 两支互斥，所以用枚举而不是「候选 + 可选路径」（后者能造出两种都没有的非法状态）。
+/// 字节的来源。两支互斥，所以用枚举而不是「候选 + 可选路径」（后者能造出两种都没有的非法状态）。
+///
+/// 「本地已有这份吗」由 [`local_copy`] **一处**判定，命中就不再取流——一个请求都不发。
 #[derive(Debug, Clone)]
 pub enum TrackSource {
+    /// 线上：一串候选地址（已按偏好排好序）。
     Cdn(Vec<Candidate>),
-    Local(std::path::PathBuf),
+    /// 本地文件（曲库 / 播放缓存 / 下载目录）。
+    ///
+    /// `quality` 只在知道时才有值：缓存文件名里带着档位；曲库与下载目录那份读不出来
+    /// （`.mp3` 是 128 还是 320，文件本身不说），播放条就只报体积、不瞎报档位。
+    Local {
+        path: std::path::PathBuf,
+        quality: Option<Quality>,
+    },
+}
+
+/// 本地已有这份吗——顺序就是优先级：曲库路径（`Song` 自带）→ 播放缓存 → 下载目录。
+///
+/// `cache_dir` 给 `None` 就是不查缓存（`config.toml` 里 `cache_mb = 0`）。目录传进来而不是
+/// 内部写死 `paths::cache_dir()`：这条判定要能拿一个临时目录测。
+pub fn local_copy(
+    song: &Song,
+    cache_dir: Option<&std::path::Path>,
+    downloads: &std::collections::HashMap<String, crate::download::Downloaded>,
+) -> Option<TrackSource> {
+    if let Some(path) = song.path() {
+        return Some(TrackSource::Local {
+            path: path.to_path_buf(),
+            quality: None,
+        });
+    }
+    if let Some(dir) = cache_dir
+        && let Some((path, quality)) = cache::for_song_in(dir, &song.mid)
+    {
+        return Some(TrackSource::Local {
+            path,
+            quality: Some(quality),
+        });
+    }
+    let downloaded = downloads.get(&crate::download::file_stem(song))?;
+    Some(TrackSource::Local {
+        path: downloaded.path.clone(),
+        quality: None,
+    })
+}
+
+impl TrackSource {
+    /// 本地那份的路径（线上源给 `None`）。
+    pub fn path(&self) -> Option<&std::path::Path> {
+        match self {
+            TrackSource::Cdn(_) => None,
+            TrackSource::Local { path, .. } => Some(path),
+        }
+    }
 }
 
 impl Track {
@@ -361,9 +410,12 @@ fn handle(
                     new_player.set_volume(*volume);
                     // 包一层：采样原样透传给播放器，顺带把第 0 声道记进频谱窗口。
                     new_player.append(LevelMeter::new(opened.decoder, levels.clone()));
-                    tracing::info!("播放中：{}", opened.quality.label());
+                    tracing::info!(
+                        "播放中：{}",
+                        opened.quality.map_or("本地文件（读不出档位）", Quality::label)
+                    );
                     update(state, |snapshot| {
-                        snapshot.quality = Some(opened.quality);
+                        snapshot.quality = opened.quality;
                         snapshot.size = opened.size;
                         snapshot.phase = Phase::Playing;
                         snapshot.duration = opened.duration;
@@ -470,7 +522,8 @@ fn update(state: &Arc<Mutex<Snapshot>>, act: impl FnOnce(&mut Snapshot)) {
 /// 开出来的那份流：解码器 + 它是哪个档位、多大、多长。
 struct Opened {
     decoder: Decoder<MediaSource>,
-    quality: Quality,
+    /// CDN 与缓存那份知道档位（缓存文件名里带着）；本地文件读不出来就是 `None`。
+    quality: Option<Quality>,
     size: Option<u64>,
     duration: Option<Duration>,
 }
@@ -484,8 +537,8 @@ fn open(
     cache_on: bool,
     promoted: &cache::Promoted,
 ) -> Result<Opened> {
-    // 本地文件：直接开，**不碰缓存也不碰网络**（候选为空也照样能开）。
-    if let Some(path) = track.song.path() {
+    // 本地文件（曲库 / 缓存 / 下载目录）：直接开，**不碰缓存也不碰网络**。
+    if let TrackSource::Local { path, quality } = &track.source {
         let file = File::open(path).with_context(|| format!("打不开：{}", path.display()))?;
         let size = file.metadata().ok().map(|metadata| metadata.len());
         let decoder = Decoder::new(MediaSource::File(file))
@@ -493,14 +546,16 @@ fn open(
         let duration = decoder.total_duration();
         return Ok(Opened {
             decoder,
-            // 本地文件没有「档位」这回事（播放条那一列对它没意义），给个占位值。
-            quality: Quality::Low128,
+            quality: *quality,
             size,
             duration,
         });
     }
     let mid = track.song.mid.as_str();
     // 缓存里已经有这首（任意档位）：直接读本地文件，一个请求都不用发。
+    //
+    // 这是 [`local_copy`] 之下的一道保险：取流前那一步已经按缓存判定过了，只有
+    // 「`Song` 说是 QQ 歌、缓存却在这之后才出现」这类分叉才会走到这里。
     if cache_on
         && let Some((path, quality)) = cache::for_song(mid)
     {
@@ -513,7 +568,7 @@ fn open(
                         tracing::info!("命中缓存：{}", path.display());
                         return Ok(Opened {
                             decoder,
-                            quality,
+                            quality: Some(quality),
                             size,
                             duration,
                         });
@@ -525,10 +580,9 @@ fn open(
         }
     }
     // 逐个候选真去开，第一个能解码的胜出（服务端对不存在的文件也会给 purl）。
-    let candidates = match &track.source {
-        TrackSource::Cdn(candidates) => candidates,
-        // 本地文件在上面就返回了；走到这儿只可能是「Song 说是本地、路径却对不上」。
-        TrackSource::Local(path) => bail!("打不开：{}（来源与路径不一致）", path.display()),
+    let TrackSource::Cdn(candidates) = &track.source else {
+        // 本地那份在上面就返回了，所以这里只可能是 CDN——对不上就说明构造 `Track` 时写错了。
+        bail!("播放源与路径不一致：{}", track.song.mid);
     };
     let mut failures = Vec::new();
     for candidate in candidates {
@@ -554,7 +608,7 @@ fn open(
                 let duration = decoder.total_duration();
                 return Ok(Opened {
                     decoder,
-                    quality: candidate.quality,
+                    quality: Some(candidate.quality),
                     size,
                     duration,
                 });
@@ -601,6 +655,100 @@ mod tests {
         assert_eq!(snapshot(300, Some(236)).progress(), 1.0);
     }
 
+    /// 「本地已有这份吗」的顺序：曲库路径 → 播放缓存 → 下载目录；缓存关掉（`cache_mb = 0`）
+    /// 就整段缓存判定不作数。这条判定只有一处，顺序错了就会出现「本地明明有那份还去取流」。
+    #[test]
+    fn local_copy_prefers_the_library_then_the_cache_then_the_download() {
+        let cache_dir =
+            std::env::temp_dir().join(format!("canto-copy-cache-{}", std::process::id()));
+        let download_dir =
+            std::env::temp_dir().join(format!("canto-copy-dl-{}", std::process::id()));
+        std::fs::remove_dir_all(&cache_dir).ok();
+        std::fs::remove_dir_all(&download_dir).ok();
+        std::fs::create_dir_all(&cache_dir).expect("建缓存目录");
+        std::fs::create_dir_all(&download_dir).expect("建下载目录");
+
+        let song = Song {
+            mid: "abc123".to_string(),
+            song_id: None,
+            media_mid: None,
+            title: "成全".to_string(),
+            singers: "刘若英".to_string(),
+            album_mid: String::new(),
+            album_name: String::new(),
+            duration_secs: 276,
+            sizes: crate::model::FileSizes::default(),
+            local_bytes: 0,
+            source: crate::model::Source::Qq,
+        };
+        // 下载目录那份（键就是文件名，跟列表里 `↓` 用的是同一份索引）。
+        let stem = crate::download::file_stem(&song);
+        let downloaded = download_dir.join(format!("{stem}.mp3"));
+        std::fs::write(&downloaded, vec![0_u8; 4400]).expect("写下载文件");
+        let downloads: std::collections::HashMap<String, crate::download::Downloaded> = [(
+            stem,
+            crate::download::Downloaded {
+                path: downloaded.clone(),
+                container: "MP3".to_string(),
+                bytes: 4400,
+            },
+        )]
+        .into_iter()
+        .collect();
+        // 缓存那份：文件名就是 `<mid>.<档位>.<扩展名>`，所以档位也读得出来。
+        let cached = cache_dir.join("abc123.320.mp3");
+        std::fs::write(&cached, vec![0_u8; 9800]).expect("写缓存文件");
+
+        let local = |source: Option<TrackSource>| match source {
+            Some(TrackSource::Local { path, quality }) => Some((path, quality)),
+            Some(TrackSource::Cdn(_)) => panic!("本地判定不该给出线上源"),
+            None => None,
+        };
+
+        assert_eq!(
+            local(local_copy(&song, Some(&cache_dir), &downloads)),
+            Some((cached.clone(), Some(Quality::High320))),
+            "有缓存就用缓存，档位从文件名读"
+        );
+
+        std::fs::remove_file(&cached).expect("删缓存");
+        assert_eq!(
+            local(local_copy(&song, Some(&cache_dir), &downloads)),
+            Some((downloaded.clone(), None)),
+            "缓存没了就看下载目录；下载那份读不出档位"
+        );
+
+        std::fs::write(&cached, vec![0_u8; 9800]).expect("写回缓存");
+        assert_eq!(
+            local(local_copy(&song, None, &downloads)),
+            Some((downloaded.clone(), None)),
+            "`cache_mb = 0` 时缓存不算数，仍走下载目录"
+        );
+
+        let nothing = std::collections::HashMap::new();
+        assert_eq!(
+            local(local_copy(&song, Some(&cache_dir.join("没有这个目录")), &nothing)),
+            None,
+            "两边都没有才交给线上取流"
+        );
+
+        // 曲库歌：`Song` 自带路径，排在缓存前面（缓存里那个 mid 压根不会是它）。
+        let path = std::env::temp_dir().join("canto-copy-local.wav");
+        let local_song = Song {
+            mid: crate::model::local_mid(&path),
+            source: crate::model::Source::Local(path.clone()),
+            ..song
+        };
+        assert_eq!(
+            local(local_copy(&local_song, Some(&cache_dir), &nothing)),
+            Some((path, None)),
+            "曲库歌用自己的路径"
+        );
+
+        std::fs::remove_dir_all(&cache_dir).ok();
+        std::fs::remove_dir_all(&download_dir).ok();
+    }
+
     /// 本地文件：直接开文件解码，**不要候选也不写播放缓存**（候选取空也照样开）。
     #[test]
     fn a_local_file_opens_without_candidates_or_cache() {
@@ -612,9 +760,17 @@ mod tests {
         assert!(song.is_local(), "库里造出来的歌是本地曲目");
         let track = Track {
             song,
-            source: TrackSource::Local(path.clone()),
+            source: TrackSource::Local {
+                path: path.clone(),
+                quality: None,
+            },
         };
         let opened = open(&track, false, &cache::Promoted::default()).expect("本地 WAV 要能开");
+        assert!(
+            opened.quality.is_none(),
+            "本地文件读不出档位，不许瞎报一个：{:?}",
+            opened.quality
+        );
         assert!(
             opened.duration.is_some_and(|duration| duration > Duration::ZERO),
             "解码器报得出时长：{:?}",

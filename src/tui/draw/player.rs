@@ -23,13 +23,15 @@ impl App {
             Phase::Failed(message) => format!("失败：{message}"),
         };
         // 档位后面跟实际文件的字节数：同一档位不同歌、不同 CDN 文件大小差很多，
-        // 一眼能看出「这首为什么大」。
+        // 一眼能看出「这首为什么大」。本地那份读不出档位（`.mp3` 是 128 还是 320，文件本身
+        // 不说），那时就只报体积，不瞎报一个档位。
         let quality = match (snapshot.quality, snapshot.size) {
             (Some(quality), Some(size)) => {
                 format!("[{} {}]", quality.label(), format_size(size))
             }
             (Some(quality), None) => format!("[{}]", quality.label()),
-            (None, _) => String::new(),
+            (None, Some(size)) => format!("[{}]", format_size(size)),
+            (None, None) => String::new(),
         };
         let queue = if self.queue.is_empty() {
             format!("  ·  {}  ·  无队列", self.queue.mode().label())

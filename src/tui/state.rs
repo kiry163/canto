@@ -18,7 +18,7 @@ use crate::hotkeys;
 use crate::model::{Lyric, Playlist, Song};
 use crate::overlay;
 use crate::paths;
-use crate::player::{Engine, Track};
+use crate::player::{Engine, Track, TrackSource};
 use crate::playlists::{self, LocalPlaylist};
 use crate::qq;
 use crate::qq::vkey::Candidate;
@@ -770,9 +770,10 @@ pub(super) struct App {
     /// 并显示缓存档位（命中缓存时播放/下载用的就是它）；启动时扫一遍目录，播放中刚听完
     /// 转正的那首由音频线程回传（见 `Engine::take_cached`）。
     pub(super) cached: std::collections::HashMap<String, (crate::model::Quality, u64)>,
-    /// 下载目录里已有的文件：`文件名（不含扩展名） → (容器, 字节)`。列表里标 `↓`、并让
-    /// 「音质/体积」报磁盘上那份。启动扫一次，下载完成后与 `r` 重扫时更新（见 `refresh_downloads`）。
-    pub(super) downloads: std::collections::HashMap<String, (String, u64)>,
+    /// 下载目录里已有的文件：`文件名（不含扩展名） → 那份文件`。列表里标 `↓`、「音质/体积」
+    /// 报磁盘那份，起播也优先放它（见 `player::local_copy`）。启动扫一次，下载完成后与 `r`
+    /// 重扫时更新（见 `refresh_downloads`）。
+    pub(super) downloads: std::collections::HashMap<String, download::Downloaded>,
     /// `/` 的筛选框开着（输入即筛当前列表）。
     pub(super) filter_input: bool,
     /// 帮助浮层开着（`?`）。
@@ -1323,25 +1324,15 @@ impl App {
         });
     }
 
-    /// 从队列里播第 `index` 首：先取候选地址（后台），拿到就交给引擎。
+    /// 从队列里播第 `index` 首：**本地已有这份就直接放本地那份**（不取流），
+    /// 否则先取候选地址（后台），拿到就交给引擎。
     fn play_index(&mut self, index: usize) {
         let Some(song) = self.queue.items().get(index).cloned() else {
             return;
         };
-        // 本地文件：不取流、不取歌词（歌词在本地三处找），直接起播——**一个请求都不发**。
-        if let Some(path) = song.path() {
-            self.clear_progress();
-            self.skipped = 0;
-            self.queue.jump(index);
-            let lyric = crate::library::local_lyric(path, &self.config.lyrics_dir);
-            crate::cache::put_lyric(&song.mid, lyric.as_ref());
-            self.lyric = lyric;
-            self.lyric_loading = false;
-            self.engine.play(Track {
-                song: song.clone(),
-                source: crate::player::TrackSource::Local(path.to_path_buf()),
-            });
-            self.record_history(&song);
+        // 曲库歌（`Song` 自带路径）/ 播放缓存 / 下载目录：命中就一个请求都不发。
+        if let Some(source) = self.local_source(&song) {
+            self.play_local(index, &song, source);
             return;
         }
         self.request += 1;
@@ -1351,27 +1342,83 @@ impl App {
         self.lyric = None;
         self.lyric_loading = true;
         let tx = self.tx.clone();
-        let handle_song = song.clone();
         let quality = self.config.quality;
-        let cache_on = self.cache_on();
         self.handle.spawn(async move {
-            let result = qq::vkey::candidates(&handle_song, Some(quality)).await;
-            let playable = result.is_ok();
+            let result = qq::vkey::candidates(&song, Some(quality)).await;
             let _ = tx.send(Msg::Candidates {
                 request,
                 index,
-                song: song.clone(),
+                song,
                 result,
             });
-            // 取流成功才取歌词：放不了的歌没必要取。
-            if playable {
-                let result = qq::lyric::get(&song, cache_on).await;
-                let _ = tx.send(Msg::Lyric {
-                    request,
-                    title: song.title,
-                    result,
-                });
+        });
+    }
+
+    /// 本地已有那份吗——顺序就是优先级：曲库路径 → 播放缓存 → 下载目录（见 `player::local_copy`）。
+    ///
+    /// **起播判定只有这一处**：命中就不取流，`cache_mb = 0` 时整段缓存判定都不作数。
+    fn local_source(&self, song: &Song) -> Option<TrackSource> {
+        crate::player::local_copy(
+            song,
+            self.cache_on().then(paths::cache_dir).as_deref(),
+            &self.downloads,
+        )
+    }
+
+    /// 起播本地那份：不取流。歌词先在本地找（同名 `.lrc` → 歌词目录 → 内嵌 tag），
+    /// 下载下来的那份歌词就在歌词目录里，命中同样是一个请求都不发。
+    fn play_local(&mut self, index: usize, song: &Song, source: TrackSource) {
+        self.clear_progress();
+        self.skipped = 0;
+        self.queue.jump(index);
+        // 让还在路上的取流 / 歌词结果作废（否则上一首的歌词会盖到这一首上）。
+        self.request += 1;
+        let request = self.request;
+        let path = source.path().map(std::path::Path::to_path_buf);
+        if let Some(path) = &path {
+            // 「放的是本地那份」要能一眼从日志看出来（排查「怎么还去取流」就靠这一行）。
+            tracing::info!("本地播放：{}", path.display());
+        }
+        let found = path
+            .as_deref()
+            .and_then(|path| crate::library::local_lyric(path, &self.config.lyrics_dir));
+        match found {
+            Some(lyric) => {
+                crate::cache::put_lyric(&song.mid, Some(&lyric));
+                self.lyric = Some(lyric);
+                self.lyric_loading = false;
             }
+            // 曲库歌本地没有就是没有（网上也没有它），别去取。
+            None if song.is_local() => {
+                crate::cache::put_lyric(&song.mid, None);
+                self.lyric = None;
+                self.lyric_loading = false;
+            }
+            // QQ 歌：本地没找到就先看歌词缓存，还没有才取一次（只有歌词走网络）。
+            None => {
+                self.lyric = None;
+                self.lyric_loading = true;
+                self.fetch_lyric(request, song.clone());
+            }
+        }
+        self.engine.play(Track {
+            song: song.clone(),
+            source,
+        });
+        self.record_history(song);
+    }
+
+    /// 后台取歌词：先查歌词缓存（命中一个请求都不发），结果按 `request` 序号丢弃过期的。
+    fn fetch_lyric(&mut self, request: u64, song: Song) {
+        let tx = self.tx.clone();
+        let cache_on = self.cache_on();
+        self.handle.spawn(async move {
+            let result = qq::lyric::get(&song, cache_on).await;
+            let _ = tx.send(Msg::Lyric {
+                request,
+                title: song.title,
+                result,
+            });
         });
     }
 
@@ -1709,9 +1756,11 @@ impl App {
                         self.queue.jump(index);
                         self.engine.play(Track {
                             song: song.clone(),
-                            source: crate::player::TrackSource::Cdn(candidates),
+                            source: TrackSource::Cdn(candidates),
                         });
                         self.record_history(&song);
+                        // 取流成功才取歌词：放不了的歌没必要取。
+                        self.fetch_lyric(request, song);
                     }
                     Err(error) => {
                         // 队列里夹着没版权的歌（实测常见）：跳过去接着放，
@@ -3149,6 +3198,56 @@ mod tests {
         app.switch_menu(Menu::LocalPlaylists);
         app.apply(keys::Action::Enter);
         assert_eq!(app.nav.origin_name(), "通勤");
+    }
+
+    /// 下载过的那首（列表里带 `↓`）：起播放的是**磁盘上那份**——不取流（状态行没有「取流…」），
+    /// 歌词也从歌词目录里那份 `.lrc` 拿，一个请求都不发。
+    #[test]
+    fn a_downloaded_song_plays_from_disk_instead_of_streaming() {
+        let (mut app, _runtime) = test_app();
+        let dir = std::env::temp_dir().join(format!("canto-play-dl-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("建下载目录");
+        app.config.download_dir = dir.clone();
+        app.config.lyrics_dir = dir.join("lyrics");
+
+        let song = crate::tui::test_support::titled_song("abc123", "成全", "刘若英");
+        let stem = crate::download::file_stem(&song);
+        std::fs::write(dir.join(format!("{stem}.mp3")), vec![0_u8; 4400]).expect("写下载文件");
+        std::fs::create_dir_all(&app.config.lyrics_dir).expect("建歌词目录");
+        std::fs::write(
+            app.config.lyrics_dir.join(format!("{stem}.lrc")),
+            "[00:01.00]第一句\n",
+        )
+        .expect("写歌词");
+        app.refresh_downloads();
+
+        app.nav.favorites.set_items(vec![song.clone()]);
+        app.switch_menu(Menu::Favorites);
+        app.apply(keys::Action::Enter);
+
+        assert_eq!(app.queue.index(), 0, "队列停在这一首");
+        assert!(
+            app.notice_text().is_none(),
+            "本地有那份就不该有「取流…」：{:?}",
+            app.notice_text()
+        );
+        assert!(
+            !app.lyric_loading,
+            "歌词从歌词目录拿了，不该还在等网上那份"
+        );
+        assert_eq!(
+            app.lyric.as_ref().map(|lyric| lyric.lines.len()),
+            Some(1),
+            "歌词来自磁盘上那份 `.lrc`"
+        );
+        assert_eq!(
+            app.history.entries().first().map(|entry| entry.mid.as_str()),
+            Some("abc123"),
+            "本地播放照样记历史"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// `[library] dirs = []`：首页只剩四格，本地两屏进不去，数字键也直跳不到。
