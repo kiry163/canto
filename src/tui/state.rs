@@ -765,6 +765,9 @@ pub(super) struct App {
     /// 并显示缓存档位（命中缓存时播放/下载用的就是它）；启动时扫一遍目录，播放中刚听完
     /// 转正的那首由音频线程回传（见 `Engine::take_cached`）。
     pub(super) cached: std::collections::HashMap<String, (crate::model::Quality, u64)>,
+    /// 下载目录里已有的文件：`文件名（不含扩展名） → (容器, 字节)`。列表里标 `↓`、并让
+    /// 「音质/体积」报磁盘上那份。启动扫一次，下载完成后与 `r` 重扫时更新（见 `refresh_downloads`）。
+    pub(super) downloads: std::collections::HashMap<String, (String, u64)>,
     /// `/` 的筛选框开着（输入即筛当前列表）。
     pub(super) filter_input: bool,
     /// 帮助浮层开着（`?`）。
@@ -815,6 +818,8 @@ impl App {
     ) -> Self {
         // 先读存储（下面 `playlists_path` 会被 move 进字段）。
         let playlists_store = playlists::Store::load(&playlists_path);
+        // 下载目录里的文件：`↓` 标记与「体积报磁盘那份」用它（配置还没被 move 进字段）。
+        let downloads = crate::download::scan_downloads(&config.download_dir);
         Self {
             handle,
             engine,
@@ -843,6 +848,7 @@ impl App {
             analyzer: crate::spectrum::Analyzer::new(),
             last_tick: std::time::Instant::now(),
             cached: crate::cache::cached_entries(),
+            downloads,
             filter_input: false,
             help_open: false,
             help_scroll: 0,
@@ -885,6 +891,14 @@ impl App {
         std::thread::spawn(move || {
             let _ = tx.send(scan_library(&dirs, &index_path));
         });
+    }
+
+    /// 重扫下载目录：`↓` 与「体积报磁盘那份」的数据源。
+    ///
+    /// 启动一次（`App::new` 里直接扫）；每次下载完成（`poll_transfer` 收到结果）一次；
+    /// `r` 重扫曲库时顺带一次——外部删掉 / 手工拷进来的文件靠这三处反映。
+    pub(super) fn refresh_downloads(&mut self) {
+        self.downloads = crate::download::scan_downloads(&self.config.download_dir);
     }
 
     /// 本地曲库（已按 歌手 → 专辑 → 标题 排好）。Task 5 的「本地曲库」屏接上就摘掉这个 allow。
@@ -1937,6 +1951,8 @@ impl App {
             keys::Action::LocalRescan => {
                 if self.nav.menu == Menu::LocalLibrary {
                     self.start_library_scan();
+                    // 手工删掉 / 拷进来的下载文件，按一下 `r` 就反映（曲库与下载目录一起刷）。
+                    self.refresh_downloads();
                 }
             }
             keys::Action::LyricsWindow => {
@@ -2173,6 +2189,9 @@ impl App {
                 at: history::now_secs(),
                 origin: self.queue.origin().to_string(),
                 local_path: song.path().map(std::path::Path::to_path_buf),
+                // 起播这一刻手里就有时长与各档位体积，落盘存下来（历史屏那几列要用）。
+                duration_secs: song.duration_secs,
+                sizes: song.sizes,
             },
             self.config.history_limit,
         );
@@ -2186,13 +2205,19 @@ impl App {
     pub(super) fn refresh_local_view(&mut self) {
         let previous = self.nav.local_view.state.selected();
         let songs = self.library.clone();
-        self.nav.local_view.set_items(songs);
-        self.nav.local_view.state.select(previous);
+        let view = &mut self.nav.local_view;
+        view.set_items(songs);
+        // 重建之后把高亮放回原来那一行；但**只在它还指得到人**的时候写回——
+        // 写回一个 `None`（冷启动第一次进这一屏）会把 `set_items` 刚设好的第一行抹掉，
+        // 于是整屏没有选中行、`Enter/a/x/d` 这些「作用于选中曲目」的键全不响应。
+        if let Some(index) = previous.filter(|index| *index < view.len()) {
+            view.state.select(Some(index));
+        }
     }
 
     /// 历史屏：新在前；每行右侧写「时间 · 来自《来源》」。
     ///
-    /// `history::Entry` 只有 mid / 标题 / 歌手，所以还原出来的 `Song` 没有时长与档位；
+    /// 时长/体积从记录里还原（本地条目优先取**当前曲库**那份，文件被换过就是新值）；
     /// 取流只认 mid（`qq::vkey::candidates` 用 mid 拼文件名，`media_mid` 缺失时回落到
     /// mid），因此能直接播——这一点由实测确认（见 README 的已知限制）。
     pub(super) fn refresh_history_view(&mut self) {
@@ -2205,23 +2230,29 @@ impl App {
             .filter(|entry| self.logged_in() || entry.local_path.is_some())
             .cloned()
             .collect();
+        let library = &self.library;
         let songs: Vec<Song> = entries
             .iter()
-            .map(|entry| Song {
-                mid: entry.mid.clone(),
-                song_id: None,
-                media_mid: None,
-                title: entry.title.clone(),
-                singers: entry.singers.clone(),
-                album_mid: String::new(),
-                album_name: String::new(),
-                duration_secs: 0,
-                sizes: crate::model::FileSizes::default(),
-                // 本地条目带得回自己的路径（重播不再经过 vkey）；QQ 老条目照旧。
-                source: match &entry.local_path {
-                    Some(path) => crate::model::Source::Local(path.clone()),
-                    None => crate::model::Source::Qq,
-                },
+            .map(|entry| {
+                // 本地条目以**当前曲库**为准（文件可能被换过 / 重新扫过）；查不到就用记录里那份。
+                let fresh = library.iter().find(|song| song.mid == entry.mid);
+                Song {
+                    mid: entry.mid.clone(),
+                    song_id: None,
+                    media_mid: None,
+                    title: entry.title.clone(),
+                    singers: entry.singers.clone(),
+                    album_mid: String::new(),
+                    album_name: String::new(),
+                    duration_secs: fresh.map_or(entry.duration_secs, |song| song.duration_secs),
+                    sizes: entry.sizes,
+                    local_bytes: fresh.map_or(0, |song| song.local_bytes),
+                    // 本地条目带得回自己的路径（重播不再经过 vkey）；QQ 老条目照旧。
+                    source: match &entry.local_path {
+                        Some(path) => crate::model::Source::Local(path.clone()),
+                        None => crate::model::Source::Qq,
+                    },
+                }
             })
             .collect();
         let labels: Vec<String> = entries
@@ -2481,6 +2512,8 @@ impl App {
             drop(state);
             self.transfer = None;
             self.clear_progress();
+            // 下载完成（成功或失败）之后重扫一次下载目录：成功的这次会多出一个 `↓`。
+            self.refresh_downloads();
             self.notify(outcome);
             return;
         }
@@ -3262,6 +3295,8 @@ mod tests {
                 at: 2,
                 origin: "本地曲库".to_string(),
                 local_path: Some(std::path::PathBuf::from("C:/Music/canto/曲终人散.wav")),
+                duration_secs: 0,
+                sizes: crate::model::FileSizes::default(),
             },
             10,
         );
@@ -3273,6 +3308,8 @@ mod tests {
                 at: 1,
                 origin: "我的收藏".to_string(),
                 local_path: None,
+                duration_secs: 0,
+                sizes: crate::model::FileSizes::default(),
             },
             10,
         );
@@ -4130,5 +4167,137 @@ mod tests {
             Some("已插队：晴天"),
             "一次性消息不该被收工清掉"
         );
+    }
+
+    /// 下载完了列表里的 `↓` 要立刻出现：`poll_transfer` 收到结果就重扫下载目录。
+    #[test]
+    fn a_finished_download_refreshes_the_downloaded_index() {
+        let (mut app, _runtime) = test_app();
+        let dir = std::env::temp_dir().join(format!("canto-dl-state-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("建目录");
+        app.config.download_dir = dir.clone();
+        app.refresh_downloads();
+        assert!(app.downloads.is_empty(), "空目录就是空表");
+
+        // 假装那一下下载落了盘，然后走一遍「下载完成」的收尾。
+        let song = crate::tui::test_support::test_song("a");
+        std::fs::write(
+            dir.join(format!("{}.mp3", crate::download::file_stem(&song))),
+            vec![0_u8; 1024],
+        )
+        .expect("写文件");
+        app.transfer = Some(std::sync::Arc::new(std::sync::Mutex::new(Transfer {
+            title: song.title.clone(),
+            received: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            total: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            outcome: Some("已下载：歌 a".to_string()),
+        })));
+        app.poll_transfer();
+
+        assert!(
+            app.downloads.contains_key(&crate::download::file_stem(&song)),
+            "下载完成后 `↓` 该出现：{:?}",
+            app.downloads
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 冷启动第一次进「本地曲库」（这一屏还没选过）也要有选中行：`Enter/a/x/d` 全按「选中那首」
+    /// 办事，选中是 `None` 的话那批键一个都不响。
+    ///
+    /// 回归：`refresh_local_view` 原来把刷新前的选中**无条件**写回，而它可能是 `None`
+    /// （`ListState::default()`），于是把 `set_items` 刚设好的第一行又抹掉了。
+    #[test]
+    fn entering_the_local_library_selects_the_first_row() {
+        let (mut app, _runtime) = test_app();
+        app.library = vec![
+            crate::tui::test_support::local_song("C:/m/a.wav"),
+            crate::tui::test_support::local_song("C:/m/b.wav"),
+        ];
+        assert_eq!(
+            app.nav.local_view.state.selected(),
+            None,
+            "前提：这一屏还没选过"
+        );
+
+        app.switch_menu(Menu::LocalLibrary);
+
+        assert_eq!(
+            app.nav.local_view.state.selected(),
+            Some(0),
+            "第一行要选中，否则 Enter 这些键全不响应"
+        );
+    }
+
+    /// 重扫之后：还在范围内的选中留着（不打断使用者），缩到范围外就退回第一行。
+    #[test]
+    fn a_rescan_keeps_the_selection_when_it_still_fits() {
+        let (mut app, _runtime) = test_app();
+        app.library = vec![
+            crate::tui::test_support::local_song("C:/m/a.wav"),
+            crate::tui::test_support::local_song("C:/m/b.wav"),
+            crate::tui::test_support::local_song("C:/m/c.wav"),
+        ];
+        app.refresh_local_view();
+        app.nav.local_view.state.select(Some(2));
+
+        app.refresh_local_view();
+        assert_eq!(
+            app.nav.local_view.state.selected(),
+            Some(2),
+            "还在范围内就留着"
+        );
+
+        app.library.truncate(1);
+        app.refresh_local_view();
+        assert_eq!(
+            app.nav.local_view.state.selected(),
+            Some(0),
+            "缩到范围外要退回第一行（不能留一个指不到人的下标）"
+        );
+    }
+
+    /// `r`（本地曲库重扫）也顺手重扫下载目录：手工删掉文件之后按一下就该消失。
+    #[test]
+    fn rescanning_the_library_also_refreshes_downloads() {
+        let (mut app, _runtime) = test_app();
+        let dir = std::env::temp_dir().join(format!("canto-dl-rescan-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("建目录");
+        app.config.download_dir = dir.clone();
+        let file = dir.join("刘若英 - 成全.mp3");
+        std::fs::write(&file, vec![0_u8; 8]).expect("写文件");
+        app.refresh_downloads();
+        assert_eq!(app.downloads.len(), 1);
+
+        std::fs::remove_file(&file).expect("删文件");
+        app.switch_menu(Menu::LocalLibrary);
+        app.apply(crate::tui::keys::Action::LocalRescan);
+        assert!(app.downloads.is_empty(), "重扫之后删掉的那份不该还在");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 历史重播：还原出来的 Song 带着时长/体积，所以新记录照样完整（不会越播越空）。
+    #[test]
+    fn replaying_from_history_keeps_the_duration_and_sizes() {
+        let (mut app, _runtime) = test_app();
+        let mut song = crate::tui::test_support::titled_song("a", "成全", "刘若英");
+        song.duration_secs = 276;
+        song.sizes.mp3_128 = 4_400_000;
+        app.record_history(&song);
+
+        // 从历史屏拿到的那份 Song（`refresh_history_view` 还原）再记一次。
+        app.refresh_history_view();
+        let replayed = app.nav.history_view.items()[0].clone();
+        assert_eq!(replayed.duration_secs, 276, "还原要带时长");
+        assert_eq!(replayed.sizes.mp3_128, 4_400_000, "还原要带体积");
+        app.record_history(&replayed);
+
+        let latest = &app.history.entries()[0];
+        assert_eq!(latest.duration_secs, 276);
+        assert_eq!(latest.sizes.mp3_128, 4_400_000);
     }
 }

@@ -3,18 +3,21 @@
 //! 骨架（内容区 / 歌词 / 播放条 / 状态行）、断点与共用的小工具都在这里；
 //! 各面板自己的画法在子模块里。状态与按键在 [`super::state`]。
 
+use std::borrow::Cow;
 use std::time::Duration as StdDuration;
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::Block;
+use ratatui::widgets::{Block, Paragraph};
+use unicode_width::UnicodeWidthStr;
 
 pub mod content;
 pub mod home;
 pub mod lyric;
 pub mod overlay;
 pub mod player;
+pub mod rows;
 pub mod spectrum;
 pub mod status;
 
@@ -217,6 +220,21 @@ fn panel_block(title: &str) -> Block<'static> {
     Block::bordered().title(title.to_string())
 }
 
+/// 歌单行：`{:>5}  {名字}`。四处（QQ/本地歌单列表、两个选择框）共用这一份，缩进口径只有一处。
+///
+/// `count` 给 `None` 就是选择框里那行「新建…」——计数那 5 列留白，跟歌单行同一列起名字。
+pub(super) fn playlist_row(count: Option<u64>, name: &str) -> String {
+    format!("{:>5}  {name}", count.map_or_else(String::new, |count| count.to_string()))
+}
+
+/// 空态占位：`DarkGray` 居中 + 带标题的框（空本地歌单 / 空歌单 / 空历史三处共用）。
+fn empty_panel(text: &str, title: &str) -> Paragraph<'static> {
+    Paragraph::new(text.to_string())
+        .style(Style::new().fg(Color::DarkGray))
+        .alignment(Alignment::Center)
+        .block(panel_block(title))
+}
+
 fn highlight() -> Style {
     Style::new()
         .bg(Color::Indexed(236))
@@ -241,6 +259,30 @@ fn format_duration(duration: StdDuration) -> String {
     } else {
         format!("{minutes:02}:{seconds:02}")
     }
+}
+
+/// 按**显示宽度**截断（中文、书名号都是双宽），超出就用省略号收尾。
+///
+/// 固定列宽下必须截：整条画不完时至少让人看出「被裁了」，而不是话说到一半。
+/// 状态行的通知位（`status.rs`）与曲目列表的列模型（`rows.rs`）都用它。
+pub(super) fn truncate_to_cols(text: &str, cols: u16) -> Cow<'_, str> {
+    let cols = cols as usize;
+    if text.width() <= cols {
+        return Cow::Borrowed(text);
+    }
+    let mut kept = String::new();
+    let mut used = 0;
+    for character in text.chars() {
+        // 留一列给省略号本身。
+        let width = unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
+        if used + width > cols.saturating_sub(1) {
+            break;
+        }
+        kept.push(character);
+        used += width;
+    }
+    kept.push('…');
+    Cow::Owned(kept)
 }
 
 /// 频谱区没数据可画时那句话。缓冲与「没在播」要分开报——前者等一会儿就有了。
@@ -382,8 +424,12 @@ mod tests {
     }
 
     /// 帮助浮层那几行（含上下框线）：判「浮层里有什么 / 状态行里有什么」用。
+    ///
+    /// 按**标题**找顶边，不按 `┌ 帮助`：浮层左上角那一格可能正好落在下面某行的中文字
+    /// 后半格上——ratatui 的缓冲约定是「宽字符后面那一格不再重画」（见 `Buffer::diff` 的
+    /// 「double width symbol at index 0 - skip index 1」），那时候角就画不出来。
     fn help_box_rows(rows: &[String]) -> Vec<String> {
-        let top = rows.iter().position(|row| row.contains("┌ 帮助")).expect("帮助浮层");
+        let top = rows.iter().position(|row| row.contains("帮助")).expect("帮助浮层");
         let bottom = rows[top + 1..]
             .iter()
             .position(|row| row.contains('└'))
@@ -1268,5 +1314,272 @@ mod tests {
         let text = frame_flat(&mut app, 120, 30);
         assert!(text.contains("筛选「非酋」1/2"), "{text}");
         assert!(!text.contains("2首"), "筛过之后不该再挂一个总数：{text}");
+    }
+
+    /// 历史屏也有表头与那些列；备注列写「时间 · 来源」。
+    #[test]
+    fn the_history_screen_has_a_header_and_a_note_column() {
+        let (mut app, _runtime) = test_app();
+        // 独立的下载目录：默认那个是 `~/Music/canto`，开发机上真躺着「刘若英 - 成全.mp3」，
+        // 这一行就会走「下载里已有」（容器 `MP3`）而不是记录里那份。列口径是 缓存 > 下载 > 记录。
+        app.config.download_dir = std::env::temp_dir()
+            .join(format!("canto-draw-hist-{}", std::process::id()));
+        std::fs::remove_dir_all(&app.config.download_dir).ok();
+        std::fs::create_dir_all(&app.config.download_dir).expect("建下载目录");
+        app.refresh_downloads();
+
+        // 一条「刚听完 QQ 歌」的记录：时长/体积是 Task 8 存进去的那份。
+        // （不真按 Enter 播：QQ 歌要等 vkey 拿到才落历史，测试里没有网络。）
+        app.history.push(
+            crate::history::Entry {
+                mid: "a".to_string(),
+                title: "成全".to_string(),
+                singers: "刘若英".to_string(),
+                at: crate::history::now_secs(),
+                origin: "我的收藏".to_string(),
+                local_path: None,
+                duration_secs: 276,
+                sizes: crate::model::FileSizes { mp3_128: 4_400_000, ..Default::default() },
+            },
+            50,
+        );
+        app.refresh_history_view();
+        app.switch_menu(Menu::History);
+
+        let rows = frame_raw(&mut app, 140, 30);
+        let header = rows
+            .iter()
+            .find(|row| row.contains("时长") && row.contains("备注"))
+            .expect("历史屏有表头");
+        let data = rows.iter().find(|row| row.contains("成全")).expect("有数据行");
+        // 时长右对齐：比右端（表头「时长」4 列、数据 `04:36` 5 列，起点天然差一列）。
+        let width = unicode_width::UnicodeWidthStr::width;
+        assert_eq!(
+            column_of(header, "时长") + width("时长"),
+            column_of(data, "04:36") + width("04:36"),
+            "时长列右端对齐"
+        );
+        assert_eq!(column_of(header, "备注"), column_of(data, "刚刚"), "备注列对齐");
+        assert!(data.contains("MP3 128k"), "历史也报音质：{data}");
+        assert!(data.contains("4.2MB"), "历史也报体积：{data}");
+        assert!(data.contains("刚刚 · 来自《我的收藏》"), "备注列写时间与来源：{data}");
+        assert!(!data.contains("成全 — 刘若英"), "不该再拼「标题 — 歌手」：{data}");
+
+        std::fs::remove_dir_all(&app.config.download_dir).ok();
+    }
+
+    /// 老条目（记录里没有时长/体积）显示占位符，不写假的 0。
+    #[test]
+    fn an_old_history_entry_shows_placeholders() {
+        let (mut app, _runtime) = test_app();
+        app.history.push(
+            crate::history::Entry {
+                mid: "a".to_string(),
+                title: "老条目".to_string(),
+                singers: "某人".to_string(),
+                at: crate::history::now_secs(),
+                origin: "我的收藏".to_string(),
+                local_path: None,
+                duration_secs: 0,
+                sizes: crate::model::FileSizes::default(),
+            },
+            50,
+        );
+        app.refresh_history_view();
+        app.switch_menu(Menu::History);
+        let rows = frame_raw(&mut app, 140, 30);
+        let data = rows.iter().find(|row| row.contains("老条目")).expect("有数据行");
+        assert!(data.contains("--:--"), "老记录写占位符：{data}");
+        // 状态栏那行本来就写引擎位置（`00:00/--:--`），这里只看数据行。
+        assert!(!data.contains("00:00"), "不许写假的 00:00：{data}");
+    }
+
+    /// 历史屏的空态照旧（不是表头的空壳）。
+    #[test]
+    fn the_history_screen_keeps_its_empty_state() {
+        let (mut app, _runtime) = test_app();
+        app.switch_menu(Menu::History);
+        let text = frame_text(&mut app, 100, 30);
+        assert!(text.contains("暂无播放历史"), "{text}");
+        assert!(!text.contains("标题"), "空态不画表头：{text}");
+    }
+
+    /// 60 列（最小窗口）下「备注」被撤掉、`缓存`/`下载` 还在；矮屏把表头那一行还给数据。
+    #[test]
+    fn a_sixty_column_history_drops_the_note_and_a_short_list_drops_the_header() {
+        let (mut app, _runtime) = test_app();
+        app.history.push(
+            crate::history::Entry {
+                mid: "a".to_string(),
+                title: "成全".to_string(),
+                singers: "刘若英".to_string(),
+                at: crate::history::now_secs(),
+                origin: "我的收藏".to_string(),
+                local_path: None,
+                duration_secs: 276,
+                sizes: crate::model::FileSizes::default(),
+            },
+            50,
+        );
+        app.refresh_history_view();
+        app.switch_menu(Menu::History);
+
+        let rows = frame_raw(&mut app, 60, 15);
+        let header = rows
+            .iter()
+            .find(|row| row.contains("缓存"))
+            .expect("60 列下也有表头");
+        assert!(header.contains("下载"), "两个标记列都在：{header:?}");
+        assert!(!header.contains("备注"), "60 列撤掉「备注」：{header:?}");
+        assert!(rows.iter().any(|row| row.contains("成全")), "数据行还在");
+        // 最小的合法窗口（60×15 → 内容区 10 行）仍然画表头：这一档是 spec 尺寸矩阵里最紧的
+        // 一档。「内容区 < 6 行不画表头」那条走 `group` 的单元测试（`rows::tests`）——它要
+        // 内容区真的矮到 6 行以下才触发，而窗口下限（60×15）与歌词栏下限（高 ≥ 20 才占位）
+        // 一起把这条路堵住了：最紧也只是 10 行。
+    }
+
+    /// 歌单行的缩进口径只有一处：选择框的「新建…」跟普通行同一列起名字。
+    #[test]
+    fn the_playlist_row_indent_has_one_source() {
+        let normal = crate::tui::draw::playlist_row(Some(3), "嗯");
+        let blank = crate::tui::draw::playlist_row(None, "新建…");
+        assert_eq!(normal, "    3  嗯");
+        assert_eq!(blank, "       新建…", "计数那一列留白");
+        assert_eq!(column_of(&blank, "新建"), column_of(&normal, "嗯"), "名字同一列起");
+
+        // 列表真的走这份口径（不是各写各的）。
+        let (mut app, _runtime) = test_app();
+        app.switch_menu(Menu::Playlists);
+        app.nav
+            .playlists
+            .set_items(vec![crate::tui::test_support::test_playlist("1", "嗯")]);
+        let rows = frame_raw(&mut app, 100, 30);
+        let data = rows.iter().find(|row| row.contains("嗯")).expect("有歌单行");
+        assert!(data.contains(&normal), "列表行就是 playlist_row 那一份：{data:?}");
+    }
+
+    /// 队列浮层也有表头（高度跟着 +1），缓存/下载两列在。
+    #[test]
+    fn the_queue_overlay_has_a_header() {
+        let (mut app, _runtime) = test_app();
+        app.config.download_dir =
+            std::env::temp_dir().join(format!("canto-draw-queue-{}", std::process::id()));
+        std::fs::remove_dir_all(&app.config.download_dir).ok();
+        std::fs::create_dir_all(&app.config.download_dir).expect("建下载目录");
+        app.refresh_downloads();
+        app.queue = crate::tui::queue::Queue::new(
+            vec![
+                crate::tui::test_support::titled_song("a", "成全", "刘若英"),
+                crate::tui::test_support::titled_song("b", "后来", "刘若英"),
+            ],
+            0,
+            "嗯",
+        );
+        app.apply(crate::tui::keys::Action::QueueOverlay);
+
+        let rows = frame_raw(&mut app, 160, 40);
+        let at = rows
+            .iter()
+            .position(|row| row.contains("队列 1/2"))
+            .expect("浮层标题还在");
+        // 标题挂在框线上，表头是它下面那一行。
+        let header = &rows[at + 1];
+        assert!(
+            header.contains("缓存") && header.contains("下载") && header.contains("标题"),
+            "表头紧跟在框线下面：{header:?}"
+        );
+        let data = rows
+            .iter()
+            .find(|row| row.contains("成全") && row.contains("刘若英"))
+            .expect("有数据行");
+        assert_eq!(
+            column_of(header, "时长") + unicode_width::UnicodeWidthStr::width("时长"),
+            column_of(data, "03:20") + unicode_width::UnicodeWidthStr::width("03:20"),
+            "时长列右端对齐：\n{header:?}\n{data:?}"
+        );
+        assert!(
+            !data.contains("成全 — 刘若英"),
+            "不该再拼「标题 — 歌手」：{data:?}"
+        );
+
+        app.apply(crate::tui::keys::Action::QueueOverlay);
+        std::fs::remove_dir_all(&app.config.download_dir).ok();
+    }
+
+    /// 曲目列表有表头，且与数据同列；缓存/下载两个标记按数据落在正确的列上。
+    #[test]
+    fn song_lists_have_a_header_aligned_with_the_rows() {
+        let (mut app, _runtime) = test_app();
+        let mut song = crate::tui::test_support::titled_song("a", "成全", "刘若英");
+        song.sizes.mp3_128 = 4_400_000;
+        app.nav.favorites.set_items(vec![song]);
+        app.cached
+            .insert("a".to_string(), (crate::model::Quality::High320, 9_800_000));
+        app.config.download_dir =
+            std::env::temp_dir().join(format!("canto-draw-dl-{}", std::process::id()));
+        std::fs::remove_dir_all(&app.config.download_dir).ok();
+        std::fs::create_dir_all(&app.config.download_dir).expect("建下载目录");
+        std::fs::write(
+            app.config.download_dir.join("刘若英 - 成全.mp3"),
+            vec![0_u8; 1_024],
+        )
+        .expect("写下载文件");
+        app.refresh_downloads();
+        app.switch_menu(Menu::Favorites);
+
+        let rows = frame_raw(&mut app, 100, 30);
+        let header = rows
+            .iter()
+            .find(|row| row.contains("标题") && row.contains("缓存"))
+            .expect("有表头");
+        let data = rows.iter().find(|row| row.contains("成全")).expect("有数据行");
+        // 对齐规则跟 `rows` 的单元测试一致：左对齐比起点、右对齐比终点、居中允许差 1 列
+        // （表头「缓存」占满 4 列，数据 `●` 居中，居中余数可以差一格）。
+        let width = unicode_width::UnicodeWidthStr::width;
+        for (needle, value, align) in [
+            ("标题", "成全", "left"),
+            ("歌手", "刘若英", "left"),
+            ("时长", "03:20", "right"),
+            ("音质", "MP3 320k", "left"),
+            ("体积", "9.3MB", "right"),
+            ("缓存", "●", "center"),
+            ("下载", "↓", "center"),
+        ] {
+            let (head_at, value_at) = (column_of(header, needle), column_of(data, value));
+            match align {
+                "left" => assert_eq!(
+                    head_at, value_at,
+                    "「{needle}」列没对齐：\n表头 {header:?}\n数据 {data:?}"
+                ),
+                "right" => assert_eq!(
+                    head_at + width(needle),
+                    value_at + width(value),
+                    "「{needle}」列的右端没对齐：\n表头 {header:?}\n数据 {data:?}"
+                ),
+                _ => assert!(
+                    head_at.abs_diff(value_at) <= 1,
+                    "「{needle}」列不该偏出 1 列：\n表头 {header:?}\n数据 {data:?}"
+                ),
+            }
+        }
+
+        std::fs::remove_dir_all(&app.config.download_dir).ok();
+    }
+
+    /// 本地曲库屏：容器（扩展名）与真实大小，不再显示配置档位。
+    #[test]
+    fn a_local_row_reports_its_own_container_and_size() {
+        let (mut app, _runtime) = test_app();
+        let mut song = crate::tui::test_support::local_song("C:/Music/canto/曲终人散.flac");
+        song.local_bytes = 31_457_280;
+        song.duration_secs = 270;
+        app.library = vec![song];
+        app.refresh_local_view();
+        app.switch_menu(Menu::LocalLibrary);
+
+        let text = frame_text(&mut app, 140, 40);
+        assert!(text.contains("FLAC"), "本地歌报容器：{text}");
+        assert!(text.contains("30.0MB"), "本地歌报真实大小：{text}");
+        assert!(!text.contains("MP3 128k"), "不该再显示配置档位：{text}");
     }
 }

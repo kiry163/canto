@@ -1,17 +1,18 @@
 //! 内容区：按当前屏渲染。
 
+use std::collections::HashMap;
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, Paragraph};
 
-use std::time::Duration as StdDuration;
-
+use crate::model::{Quality, Song};
 use crate::player::Phase;
 
 use super::super::state::{App, Menu};
-use super::{format_duration, format_size, highlight, panel_block};
+use super::{highlight, panel_block, rows};
 
 impl App {
     pub(super) fn draw_content(&mut self, frame: &mut Frame, area: Rect) {
@@ -39,7 +40,7 @@ impl App {
                     .playlists
                     .visible_rows()
                     .map(|(playlist, _)| {
-                        ListItem::new(format!("{:>5}  {}", playlist.song_count, playlist.name))
+                        ListItem::new(super::playlist_row(Some(playlist.song_count), &playlist.name))
                     })
                     .collect();
                 let list = List::new(items)
@@ -50,20 +51,14 @@ impl App {
             }
             Menu::LocalPlaylists if self.nav.local_shown.is_none() => {
                 if self.nav.local_playlists.items().is_empty() {
-                    frame.render_widget(
-                        Paragraph::new("还没有本地歌单 · N 新建一张")
-                            .style(Style::new().fg(Color::DarkGray))
-                            .alignment(ratatui::layout::Alignment::Center)
-                            .block(panel_block(&title)),
-                        area,
-                    );
+                    frame.render_widget(super::empty_panel("还没有本地歌单 · N 新建一张", &title), area);
                 } else {
                     let items: Vec<ListItem> = self
                         .nav
                         .local_playlists
                         .visible_rows()
                         .map(|(playlist, _)| {
-                            ListItem::new(format!("{:>5}  {}", playlist.songs.len(), playlist.name))
+                            ListItem::new(super::playlist_row(Some(playlist.songs.len() as u64), &playlist.name))
                         })
                         .collect();
                     let list = List::new(items)
@@ -77,13 +72,7 @@ impl App {
             Menu::LocalPlaylists
                 if self.nav.local_shown.is_some() && self.nav.local_tracks.items().is_empty() =>
             {
-                frame.render_widget(
-                    Paragraph::new("空歌单 · 曲库里按 P 把歌加进来")
-                        .style(Style::new().fg(Color::DarkGray))
-                        .alignment(ratatui::layout::Alignment::Center)
-                        .block(panel_block(&title)),
-                    area,
-                );
+                frame.render_widget(super::empty_panel("空歌单 · 曲库里按 P 把歌加进来", &title), area);
             }
             Menu::Search => {
                 // 输入行占第一行（Task 7 把它做成常驻），结果在下面。
@@ -202,46 +191,44 @@ impl App {
         frame.render_widget(Paragraph::new(line), area);
     }
 
-    /// 历史屏：行是「标题 — 歌手」，右侧写「时间 · 来自《来源》」。
+    /// 历史屏：跟别的曲目列表同一副表；备注列写「时间 · 来自《来源》」。
     ///
-    /// 不画时长 / 档位 / 体积那三列——历史里只有 mid / 标题 / 歌手，
-    /// 画出来会是假的 00:00。
+    /// 时长/体积来自记录里存的那份（Task 8），所以这一屏也是有话可说才画；
+    /// 老记录没有就是 `--:--` / `—`，不写假的 0。
     fn draw_history(&mut self, frame: &mut Frame, area: Rect, title: &str) {
         let block = panel_block(title);
         if self.history.is_empty() {
-            frame.render_widget(
-                Paragraph::new("暂无播放历史")
-                    .style(Style::new().fg(Color::DarkGray))
-                    .alignment(ratatui::layout::Alignment::Center)
-                    .block(block),
-                area,
-            );
+            frame.render_widget(super::empty_panel("暂无播放历史", title), area);
             return;
         }
+        let want = self.config.quality;
         let playing = self.now_playing_mid();
+        let library: HashMap<&str, &Song> =
+            self.library.iter().map(|song| (song.mid.as_str(), song)).collect();
+
+        let inner = block.inner(area);
+        let (head, list_area) = rows::group(inner, rows::MIN_FOR_HEADER);
+        let columns = rows::fit(&rows::history_columns(), rows::row_width(list_area.width));
+
         let items: Vec<ListItem> = self
             .nav
             .song_view()
             .visible_rows()
             .map(|(song, label)| {
-                let marker = if playing.as_deref() == Some(song.mid.as_str()) {
-                    "♪"
-                } else {
-                    " "
-                };
-                ListItem::new(Line::from(vec![
-                    Span::raw(format!("{marker} {} — {}", song.title, song.singers)),
-                    Span::raw("  "),
-                    Span::styled(label.to_string(), Style::new().fg(Color::DarkGray)),
-                ]))
+                let row = self.song_row(song, &library, playing.as_deref(), want);
+                // 历史自己的备注：`visible_rows()` 的第二项就是拼好的「时间 · 来自《来源》」。
+                let row = rows::Row { note: Some(label), ..row };
+                ListItem::new(rows::line(&columns, &row))
             })
             .collect();
+
+        frame.render_widget(block, area);
+        if let Some(head) = head {
+            frame.render_widget(Paragraph::new(rows::header(&columns)), head);
+        }
         let mut state = std::mem::take(&mut self.nav.song_view_mut().state);
-        let list = List::new(items)
-            .block(block)
-            .highlight_style(highlight())
-            .highlight_symbol("▶ ");
-        frame.render_stateful_widget(list, area, &mut state);
+        let list = List::new(items).highlight_style(highlight()).highlight_symbol("▶ ");
+        frame.render_stateful_widget(list, list_area, &mut state);
         self.nav.song_view_mut().state = state;
     }
 
@@ -254,68 +241,82 @@ impl App {
         frame.render_widget(Paragraph::new(text).block(panel_block(" 本地曲库 ")), area);
     }
 
-    /// 曲目列表：所有「装着一堆歌」的屏共用（收藏 / 歌单曲目 / 搜索）。
+    /// 曲目列表：所有「装着一堆歌」的屏共用（收藏 / 歌单曲目 / 搜索 / 本地曲库 / 本地歌单曲目）。
+    ///
+    /// 列集按屏声明（本地曲库没有缓存/下载两列），宽度按窗口让位（见 `rows::fit`）。表头画在
+    /// 列表块**内部**（先 `Block::inner` 再 `rows::group`），所以 `draw::layout` 不用动。
     pub(super) fn draw_songs(&mut self, frame: &mut Frame, area: Rect, title: &str) {
-        let playing = self.now_playing_mid();
-        // 档位列按**配置的下限**算：配置成 320 就不该再列 `FLAC 31MB`——那会让人
-        // 以为它要下无损。真正取到的那一档仍以播放条为准。
+        let columns = match self.nav.menu {
+            Menu::LocalLibrary => rows::local_columns(),
+            Menu::LocalPlaylists if self.nav.local_shown.is_some() => rows::local_playlist_columns(),
+            _ => rows::track_columns(),
+        };
         let want = self.config.quality;
+        let playing = self.now_playing_mid();
+        // 本地条目要按 mid 查当前曲库：补齐时长/容器/大小，顺带判「已丢失」。每行
+        // `iter().any()` 是 O(行×曲库)，这里一次建表。
+        let library: HashMap<&str, &Song> =
+            self.library.iter().map(|song| (song.mid.as_str(), song)).collect();
+
+        let block = panel_block(title);
+        let inner = block.inner(area);
+        let (head, list_area) = rows::group(inner, rows::MIN_FOR_HEADER);
+        let columns = rows::fit(&columns, rows::row_width(list_area.width));
+
         let items: Vec<ListItem> = self
             .nav
             .song_view()
             .visible_rows()
             .map(|(song, _)| {
-                let marker = if Some(song.mid.as_str()) == playing.as_deref() {
-                    "♪"
-                } else {
-                    " "
-                };
-                // 已缓存的歌：播放/下载用的就是缓存那份，所以显示它的档位与真实大小；
-                // 没缓存才按配置的下限算「新取流会取哪一档」。
-                let (quality, size) = match self.cached.get(&song.mid) {
-                    Some((cached, bytes)) => (*cached, Some(*bytes)),
-                    None => song.sizes.at_or_below(want),
-                };
-                // 本地曲目读不出时长时写 `--:--`（`00:00` 会让人以为它真是零秒）。
-                let duration = if song.is_local() && song.duration_secs == 0 {
-                    "--:--".to_string()
-                } else {
-                    format_duration(StdDuration::from_secs(song.duration_secs))
-                };
-                let mut line = vec![Span::raw(format!(
-                    "{marker} {duration:>5}  {:<9} {:>7}  ",
-                    quality.label(),
-                    size.map_or_else(|| "—".to_string(), format_size),
-                ))];
-                // 已缓存：本地有完整的一份，重听 0 网络。占位宽度固定，行间才不会错位。
-                line.push(Span::styled(
-                    if self.cached.contains_key(&song.mid) {
-                        "已缓存 "
-                    } else {
-                        "       "
-                    },
-                    Style::new().fg(Color::Green),
-                ));
-                line.push(Span::raw(format!("{} — {}", song.title, song.singers)));
-                // 本地歌单里的条目：文件被移走 / 改名之后也留着（不然歌单会被一次扫描清空），
-                // 认不出来就标一句，免得让人以为还能播。扫描途中曲库还是空的，这时候别标
-                // ——不然满屏「（已丢失）」，扫完又全好了。
-                if self.nav.menu == Menu::LocalPlaylists
-                    && !self.library_scanning
-                    && !self.library.iter().any(|kept| kept.mid == song.mid)
-                {
-                    line.push(Span::styled("（已丢失）", Style::new().fg(Color::DarkGray)));
-                }
-                ListItem::new(Line::from(line))
+                let row = self.song_row(song, &library, playing.as_deref(), want);
+                ListItem::new(rows::line(&columns, &row))
             })
             .collect();
+
+        frame.render_widget(block, area);
+        if let Some(head) = head {
+            frame.render_widget(Paragraph::new(rows::header(&columns)), head);
+        }
         let mut state = std::mem::take(&mut self.nav.song_view_mut().state);
-        let list = List::new(items)
-            .block(panel_block(title))
-            .highlight_style(highlight())
-            .highlight_symbol("▶ ");
-        frame.render_stateful_widget(list, area, &mut state);
+        let list = List::new(items).highlight_style(highlight()).highlight_symbol("▶ ");
+        frame.render_stateful_widget(list, list_area, &mut state);
         self.nav.song_view_mut().state = state;
+    }
+
+    /// 组一行：三处列表（`draw_songs` / `draw_history` / `draw_queue`）共用同一份口径。
+    ///
+    /// `library` 是「按 mid 查当前曲库」的表（本地条目用得上，查不到就是已丢失）。
+    /// 备注那一列按屏分岔（本地歌单写「已丢失」；历史写「时间 · 来源」，由调用方覆盖）。
+    pub(super) fn song_row<'a>(
+        &'a self,
+        song: &'a Song,
+        library: &HashMap<&'a str, &'a Song>,
+        playing: Option<&str>,
+        want: Quality,
+    ) -> rows::Row<'a> {
+        // 本地条目（本地曲库 / 本地歌单 / 历史里的本地条目）：曲库那份比快照新，优先用它。
+        let fresh = library.get(song.mid.as_str()).copied();
+        let source = fresh.unwrap_or(song);
+        let copy = rows::copy_of(source, &self.cached, &self.downloads, want);
+        let note = match self.nav.menu {
+            Menu::LocalPlaylists
+                if self.nav.local_shown.is_some() && !self.library_scanning && fresh.is_none() =>
+            {
+                Some("（已丢失）")
+            }
+            _ => None,
+        };
+        rows::Row {
+            playing: playing == Some(song.mid.as_str()),
+            title: &song.title,
+            singers: &song.singers,
+            duration: (source.duration_secs > 0).then_some(source.duration_secs),
+            tier: Some(copy.tier),
+            size: copy.size,
+            cached: copy.cached,
+            downloaded: copy.downloaded,
+            note,
+        }
     }
 
     /// 正在播的那首的 mid（没在播/播完就是 `None`）。

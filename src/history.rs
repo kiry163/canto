@@ -24,6 +24,14 @@ pub struct Entry {
     /// `serde(default)`：这个字段是后加的，老 `history.json` 没有它，读回来是 `None`。
     #[serde(default)]
     pub local_path: Option<std::path::PathBuf>,
+    /// 时长（秒）。后加的字段：老记录没有 → 0 → 列表里写 `--:--`。
+    #[serde(default)]
+    pub duration_secs: u64,
+    /// 起播那一刻接口报的各档位体积。后加的字段：老记录没有 → 全 0 → 体积 `—`。
+    ///
+    /// 存**原始档位表**而不是算好的那一档：配置改了之后列表会按新下限重算（跟别的屏一致）。
+    #[serde(default)]
+    pub sizes: crate::model::FileSizes,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -219,7 +227,38 @@ mod tests {
             at,
             origin: "嗯".to_string(),
             local_path: None,
+            duration_secs: 0,
+            sizes: crate::model::FileSizes::default(),
         }
+    }
+
+    /// 新写的记录带着时长与各档位体积；读回来还在。
+    #[test]
+    fn an_entry_keeps_the_duration_and_sizes() {
+        let sizes = crate::model::FileSizes { mp3_128: 4_400_000, ..Default::default() };
+        let entry = Entry {
+            mid: "a".to_string(),
+            title: "成全".to_string(),
+            singers: "刘若英".to_string(),
+            at: 1,
+            origin: "我的收藏".to_string(),
+            local_path: None,
+            duration_secs: 276,
+            sizes,
+        };
+        let text = serde_json::to_string(&entry).expect("序列化");
+        let back: Entry = serde_json::from_str(&text).expect("反序列化");
+        assert_eq!(back.duration_secs, 276);
+        assert_eq!(back.sizes.mp3_128, 4_400_000);
+    }
+
+    /// 升级前的老文件（没有这两个字段）照样读得出来：默认 0，列表里写 `--:--`/`—`。
+    #[test]
+    fn an_old_history_file_still_loads() {
+        let old = r#"[{"mid":"a","title":"成全","singers":"刘若英","at":1,"origin":"我的收藏"}]"#;
+        let entries: Vec<Entry> = serde_json::from_str(old).expect("老文件要读得出来");
+        assert_eq!(entries[0].duration_secs, 0);
+        assert_eq!(entries[0].sizes.mp3_128, 0);
     }
 
     fn temp_path(tag: &str) -> std::path::PathBuf {

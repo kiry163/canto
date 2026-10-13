@@ -9,39 +9,16 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
-use unicode_width::UnicodeWidthStr;
 
 use super::super::state::App;
 use super::hints;
+use super::truncate_to_cols;
 
 /// 通知位的列宽。
 ///
 /// **固定**而不是随内容伸缩：右边一伸缩，左边那半行键位提示就会忽长忽短地跳。
 /// 代价是超过这些列的通知要截断，所以往这里写的东西必须短（长错误链进日志）。
 const NOTICE_COLS: u16 = 32;
-
-/// 按**显示宽度**截断（中文、书名号都是双宽），超出就用省略号收尾。
-///
-/// 固定列宽下必须截：整条画不完时至少让人看出「被裁了」，而不是话说到一半。
-fn truncate_to_cols(text: &str, cols: u16) -> Cow<'_, str> {
-    let cols = cols as usize;
-    if text.width() <= cols {
-        return Cow::Borrowed(text);
-    }
-    let mut kept = String::new();
-    let mut used = 0;
-    for character in text.chars() {
-        // 留一列给省略号本身。
-        let width = unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
-        if used + width > cols.saturating_sub(1) {
-            break;
-        }
-        kept.push(character);
-        used += width;
-    }
-    kept.push('…');
-    Cow::Owned(kept)
-}
 
 impl App {
     pub(super) fn draw_status(&self, frame: &mut Frame, area: Rect) {

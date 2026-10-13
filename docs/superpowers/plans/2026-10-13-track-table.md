@@ -175,7 +175,9 @@ Run: `cargo test --locked rows::tests` —— 预期编译失败（没有 `rows`
 
 - [ ] **Step 3: 写实现**
 
-`src/tui/draw/rows.rs` 头部（真源在 spec §1）：
+`src/tui/draw/rows.rs` 头部（真源在 spec §1）。**实施记录（2026-10-13）**：`rows.rs` 的两批类型
+要到 Task 7/9/10 才有生产消费者，在此之前只有单测在用，所以模块顶部加了一行
+`#![allow(dead_code)]`（带注释指明来由，与 `paths.rs:108` 同一套口径）——**Task 10 落地时摘掉**：
 
 ```rust
 //! 曲目列表的列模型：一处声明列，一处画表头，一处画行。
@@ -521,6 +523,12 @@ git commit -m "feat(tui): 曲目列表的列模型骨架(列集 + 按宽度让�
     }
 ```
 
+> **实施记录（2026-10-13）**：上面 `the_header_lines_up_with_the_row` 里「表头与数据落在同一列」
+> 那句，实施时改成了**按对齐方式分别断言**——`左对齐比起点、右对齐比终点、居中允许差 1 列`，
+> 并先钉住「两行显示宽度相同且 = `INDENT + total(columns)`」。原因：右对齐列的标题（「时长」占 4 列）
+> 与数据（`04:36` 占 5 列）本来就不该从同一列起，比起点必然差 1 列；第一版断言就是这么写错的，
+> 而它恰好证明了这条断言有效。
+
 - [ ] **Step 2: 跑测试确认失败**
 
 Run: `cargo test --locked rows::tests` —— 预期编译失败（`header` / `line` / `group` / `Row` 都不存在）。
@@ -720,12 +728,16 @@ git commit -m "feat(tui): 表头与行的绘制(列宽补齐/显示宽度截断/
         assert!(song.is_local());
     }
 
-    /// QQ 歌（接口来的）没有本地文件，是 0。
-    #[test]
-    fn a_network_song_has_no_local_size() {
-        assert_eq!(crate::tui::test_support::test_song("a").local_bytes, 0);
-    }
+    /// QQ 歌（接口来的）没有本地文件，是 0——这条钉在 `qq/parse.rs` 的
+    /// `parsed_songs_are_qq_sourced` 里（见实施记录）。
 ```
+
+> **实施记录（2026-10-13）**：`test_support::test_song` 对 `library::tests` 是私有的，所以
+> 「QQ 歌是 0」那条断言没有写成独立测试，而是**加进了 `src/qq/parse.rs::parsed_songs_are_qq_sourced`**
+> 的现有断言里（`assert_eq!(song.local_bytes, 0, "接口来的歌没有本地文件")`）——钉在真正产出
+> QQ `Song` 的地方比钉在测试辅助上更有意义。
+> 另外 `src/qq/parse.rs:42` / `:76` 两处生产构造点补的是 `local_bytes: 0,`（带一行注释「接口来的歌
+> 没有本地文件」），`src/tui/state.rs:2210` 那处也填 0 并留了注释（Task 8 会一起补上真实值）。
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -831,6 +843,16 @@ git commit -m "feat(model): Song 带上本地文件字节数(曲库扫描本来�
 ```
 
 （`song(title, singers)` 是 `download.rs` 测试里现成的辅助，见 `src/download.rs:204`。）
+
+> **实施记录（2026-10-13）**：四处按实情调整——
+> ① 临时目录名从 `canto-dl-{pid}` 改成 `canto-dl-scan-{pid}`：**既有的**
+>    `lyrics_land_in_their_own_directory`（`download.rs:297`）已经占了 `canto-dl-{pid}`，
+>    并行跑会互相清目录（第一次跑就红了，正是这个原因）；
+> ② 假文件用 44 KB / 314 KB，不写 4.4 MB / 31 MB——排序只看「容器 > 体积」，没必要每次测试
+>    往临时目录写 35 MB；
+> ③ `"半截".as_bytes()` 而不是 `b"半截"`（字节串字面量只能放 ASCII）；
+> ④ `scan_downloads` 挂了一行 `#[allow(dead_code)]` + 「Task 5 接上就摘掉」的注释（与
+>    `paths.rs:108` 同一套口径）——CI 的门槛是 `-D warnings`，没有消费者时这一行是必须的。
 
 - [ ] **Step 2: 跑测试确认失败**
 
@@ -1120,6 +1142,9 @@ git commit -m "feat(tui): App 维护下载目录索引(启动/下载完成/r 三
     }
 ```
 
+> **实施记录（2026-10-13）**：② 与 ③ 里的空索引要先绑成变量（`nothing_cached` / `nothing_downloaded`）
+> 再传——`copy` 借着它们，`&cached_index(&[])` 这种临时值活不到断言那里（E0716）。
+
 - [ ] **Step 2: 跑测试确认失败**
 
 Run: `cargo test --locked rows::tests::the_tier_and_size_report_whatever_is_already_on_disk`
@@ -1360,6 +1385,20 @@ Run: `cargo test --locked draw::tests::song_lists_have_a_header_aligned_with_the
 
 > `note` 的判定按 `Menu` 分岔（与今天 `content.rs:303-307` 等价）；Task 9 里历史屏覆盖它
 > （`rows::Row { note: Some(label), ..row }`），不用改签名。
+
+> **实施记录（2026-10-13）**：三处按实测调整，都是这一层才暴露的——
+> ① **缩进不能加两次**：`List` 渲染数据行时**自己**会留出 `highlight_symbol` 那 2 列，而
+>    `header` 是普通 `Paragraph`、不会。所以 `rows::line(columns, row)` **不带缩进参数**、
+>    `rows::header(columns)` 自带 `INDENT`；谁要再补一次就会整体右移 2 列（第一次实现就这么错了，
+>    draw 层那条对齐断言当场抓住）。
+> ② **列宽要扣掉那 2 列**：`fit` 必须拿「列表区宽 − `INDENT`」，所以新增
+>    `rows::row_width(list_area_width)` 专职这件事；少扣的后果是整行超宽、被 ratatui 裁掉尾巴
+>    （表现为表头的「体积」少一个字、数据的 `30.0MB` 少 `MB`）。
+> ③ **浮层左上角那一格可能画不出来**：表头的中文字（`标题`）占 cells 5–8，而 60 列时帮助浮层的
+>    `┌` 正好落在 cell 8——**宽字符后面那一格永远不会被重画**（ratatui `Buffer::diff` 的约定：
+>    `double width symbol at index 0 - skip index 1`，缓冲必须满足「宽字符后面没有非空白格」）。
+>    于是 `help_box_rows` 改成按标题 `帮助` 定位浮层（不再找 `┌ 帮助`）。这是 CJK + 覆盖层的固有
+>    交互（今天的列表行也可能撞上，只是列位不同），记进 `docs/design.md` 的已知限制。
 
 - [ ] **Step 4: 跑测试确认通过**
 
@@ -1720,6 +1759,17 @@ Run: `cargo test --locked draw::tests::the_queue_overlay_has_a_header`
 Run: `cargo test --locked draw::tests` —— 预期全过；`the_queue_overlay_draws_the_highlight_on_the_selected_row`
 （`draw/mod.rs:1173-1191`）会因为多了一行而需要重算期望，按原判据（`▶` 落在两行之间）核对后调整。
 
+> **实施记录（2026-10-13）**：`group` 多收一个 `min_height`——spec 的「可用高 ≥ 6 才画表头」
+> 是针对**全屏**列表的（矮屏里一行数据比一行表头值钱）；队列浮层的高度是照着内容算的，
+> 表头那一行不多占谁的位置，所以它传 `1`（等于总是画）。另外队列浮层的「同一首出现两次」
+> 那条顾虑落实成：`Row.playing` 直接按队列下标赋，不经过 mid 比对。既有那条
+> `the_queue_overlay_draws_the_highlight_on_the_selected_row` 不用改（它比的是同一行里的字符位置）。
+
+- [ ] **Step 4b: 摘掉 `rows.rs` 顶部那行 `#![allow(dead_code)]`**
+
+到这一步 `rows.rs` 的东西全都有生产消费者了（`fit`/`header`/`line`/`group`/各列集都在三处绘制里用上）。
+删掉那两行注释 + 属性，跑 `cargo clippy --all-targets --locked -- -D warnings` 确认没有 dead_code 残留。
+
 - [ ] **Step 5: Commit**
 
 ```bash
@@ -1786,16 +1836,15 @@ pub(super) fn empty_panel(text: &str, title: &str) -> Paragraph<'static> {
 三处空态改用 `empty_panel`：`content.rs:53-58`、`content.rs:80-85`、`content.rs:211-217`
 （`draw_empty_library` 是**别的**配方——左对齐带黄色强调，不动）。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**（376 项全过）
 
-Run: `cargo test --locked draw::tests` —— 预期全过。
+> **实施记录（2026-10-13）**：`playlist_row` 的计数收 `Option<u64>`——QQ 歌单的
+> `song_count` 本来就是 `u64`，本地歌单是 `songs.len()`（一次 `as u64` 拓宽），
+> `None` 就是选择框那行「新建…」（计数那 5 列留白）。断言改成「两行名字同一列起」+
+> 「列表行就是 `playlist_row` 那一份」（原来那条 `column_of(data,"3") == 2` 是按内容区
+> 起算的，实测渲染行里 `▶ ` 那两列也算进去了）。
 
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/tui/draw/content.rs src/tui/draw/overlay.rs src/tui/draw/mod.rs
-git commit -m "refactor(tui): 歌单行与空态各收成一处(缩进口径不再硬编码)"
-```
+- [x] **Step 5: Commit**
 
 ---
 
@@ -1839,7 +1888,32 @@ tuios wait-for window-exit -s canto-dev -w canto-table --timeout 10000
 tuios close-window -s canto-dev canto-table
 ```
 
-- [ ] **Step 4: 跑完整验证并提交**
+- [x] **Step 4: 跑完整验证并提交**（`cargo test --locked` 378 项、clippy 干净）
+
+> **实施记录（2026-10-13，真机 macOS 208×55，未登录）**
+>
+> 验到的（真二进制 + `capture-pane`，日志 `~/.config/canto/canto.log`）：
+> ① 表头逐列对齐——拿显示宽度数过，本地曲库屏 5 列全对（左对齐比起点、右对齐比右端）；
+> ② 本地曲库两首 mp3 报 `MP3` + 真实大小（4.2MB / 3.4MB，与磁盘一致），不再显示配置档位；
+> ③ 临时放一个 3 秒 FLAC 进 `~/Music/canto`，`r` 之后那行是 `FLAC` + `53KB`（54360 字节 ÷ 1024），
+>    删掉文件再 `r` 那行消失（收尾已复原，机器上仍只有原来那两个 mp3）；
+> ④ 播一首本地歌：历史最上面两条（`刚刚`）带真时长/容器/体积，老条目同屏并排；自动续播也落记录；
+> ⑤ 队列浮层与历史屏表头都在（`capture-pane` 是数格子）。
+>
+> 没验到的（这台机器**未登录**：`~/.config/canto` 里没有 `session.json`，源码里 `history.json`
+> 109 条但历史屏只列本地条目、收藏 0 首）：`●`/`↓` 的真机表现、`d` 下载后 `↓` 立刻出现、
+> 删文件 + `r` 后 `↓` 消失、历史老条目的占位符。这几条要扫码登录后补；眼下由第一层代偿
+> （`rows.rs` 的行取值四态 + `draw/mod.rs` 的老条目 `--:--`）。
+>
+> 另外两处实测修正：
+> ① spec §6 里「内容区高 < 6 不画表头」**在真窗口里够不着**——窗口下限 60×15 给内容区 10 行，
+>    歌词栏要 `高 ≥ 20` 才占位（最紧一档仍是 10 行），所以这条只在 `rows::tests` 的 `group`
+>    单测里钉，draw 层改成钉「最小的合法窗口仍然画表头」（就是 spec 说的「最紧那一档仍然画」）。
+> ② 顺手发现一个**既有**缺陷，已在本分支收尾 commit 修掉：`refresh_local_view`（`state.rs:2205`）
+>    把 `previous` 无条件写回 `state.select(previous)`，冷启动第一次进 `5` 时 `previous` 是 `None`
+>    → 那一屏一行都没高亮、`Enter/a/x/d` 全无反应，按一下 `j`/`k` 才恢复。改成照
+>    `refresh_history_view` 那样只在 `previous` 还指得到人时写回；两条回归测试（冷启动选中第一行 /
+>    重扫保留仍有效的选中）。
 
 ```bash
 cargo test --locked

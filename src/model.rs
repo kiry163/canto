@@ -114,6 +114,11 @@ pub struct Song {
     pub duration_secs: u64,
     /// 各档位文件大小（字节）。0 = 该档位没有。
     pub sizes: FileSizes,
+    /// 本地文件的字节数；`0` = 非本地或读不出。
+    ///
+    /// 曲库扫描本来就 stat 过（`library::Entry.size`，用来做增量判断），这里只是把它带到
+    /// 列表那一列——本地歌的体积报**磁盘上那份**，不是接口的档位体积。
+    pub local_bytes: u64,
     /// 这首歌从哪来。本地曲目 [各档位大小](FileSizes) 全 0（没有接口报体积）。
     pub source: Source,
 }
@@ -134,7 +139,9 @@ impl Song {
 }
 
 /// 各档位文件大小；同时用来判断最高可用音质。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+///
+/// 带 serde：历史记录把它一起落盘（`history::Entry.sizes`），列表据此按当前配置下限重算。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FileSizes {
     pub mp3_128: u64,
     pub mp3_320: u64,
@@ -375,6 +382,7 @@ mod tests {
             album_name: "叶惠美".to_string(),
             duration_secs: 269,
             sizes: FileSizes::default(),
+            local_bytes: 0,
         }
     }
 
