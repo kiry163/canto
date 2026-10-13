@@ -182,13 +182,16 @@ fn help_rows(screen: Option<Menu>, hotkeys: &HotkeyConfig) -> Vec<Row> {
                 ],
             ),
             Menu::Search => (
-                "搜索",
+                Menu::Search.title(),
                 vec![
                     Row::Keys { keys: "Enter", help: "搜索" },
                     Row::Keys { keys: "Esc", help: "取消输入" },
                 ],
             ),
-            Menu::History => ("历史", vec![Row::Keys { keys: "Enter", help: "从那首重播" }]),
+            Menu::History => (
+                Menu::History.title(),
+                vec![Row::Keys { keys: "Enter", help: "从那首重播" }],
+            ),
         };
         if !section.is_empty() {
             rows.push(Row::Section(title));
@@ -204,10 +207,10 @@ fn help_rows(screen: Option<Menu>, hotkeys: &HotkeyConfig) -> Vec<Row> {
     rows.extend([
         Row::Section("切屏"),
         Row::Keys { keys: "0", help: "首页" },
-        Row::Keys { keys: "1", help: "我的收藏" },
-        Row::Keys { keys: "2", help: "我的歌单" },
-        Row::Keys { keys: "3", help: "搜索" },
-        Row::Keys { keys: "4", help: "历史" },
+        Row::Keys { keys: "1", help: Menu::Favorites.title() },
+        Row::Keys { keys: "2", help: Menu::Playlists.title() },
+        Row::Keys { keys: "3", help: Menu::Search.title() },
+        Row::Keys { keys: "4", help: Menu::History.title() },
         Row::Section("全局"),
     ]);
     // `/` 筛的是列表：首页上没有列表。
@@ -428,7 +431,7 @@ mod tests {
     fn the_table_pairs_every_key_with_a_description() {
         let rows = help_rows(Some(Menu::Favorites), &HotkeyConfig::default());
         let cells: Vec<(&str, &str)> = rows.iter().filter_map(Row::cells).collect();
-        assert!(cells.contains(&("1", "我的收藏")), "{cells:?}");
+        assert!(cells.contains(&("1", "在线收藏")), "{cells:?}");
         assert!(cells.contains(&("0", "首页")), "首页入口要在「切屏」段里：{cells:?}");
         assert!(cells.contains(&("?", "帮助")), "{cells:?}");
         assert!(cells.contains(&("Space", "播放 / 暂停")), "{cells:?}");
@@ -486,7 +489,7 @@ mod tests {
         assert_eq!(sections(Some(Menu::Playlists))[0], "歌单");
         assert!(helps(Some(Menu::Playlists)).contains(&"进入该歌单的曲目"));
         assert!(!helps(Some(Menu::Favorites)).contains(&"进入该歌单的曲目"), "切屏换了那一节就该换");
-        assert_eq!(sections(Some(Menu::History))[0], "历史");
+        assert_eq!(sections(Some(Menu::History))[0], "播放历史");
 
         // 首页单开一段只为 `Tab`（挪格那一套只在首页成立）；`Enter` 到处都一样，不进表。
         assert_eq!(sections(None)[0], "首页", "{:?}", sections(None));
@@ -591,9 +594,9 @@ mod tests {
     #[test]
     fn the_columns_are_padded_to_the_widest_key() {
         assert_eq!(Row::Section("切屏").line(10).to_string(), "切屏");
-        let row = Row::Keys { keys: "1", help: "我的收藏" };
+        let row = Row::Keys { keys: "1", help: "在线收藏" };
         // 键列 10、键 1 个字 → 补 9 格，再空 2 格。
-        assert_eq!(row.line(10).to_string(), format!("1{}我的收藏", " ".repeat(11)));
+        assert_eq!(row.line(10).to_string(), format!("1{}在线收藏", " ".repeat(11)));
         // 键本身比键列宽时也不许少空格（宁可挤一格，也不能把两列粘一起）。
         let narrow = Row::Keys { keys: "Space", help: "播放 / 暂停" };
         assert_eq!(narrow.line(1).to_string(), "Space  播放 / 暂停");

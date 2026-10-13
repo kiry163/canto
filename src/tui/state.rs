@@ -167,10 +167,10 @@ impl Menu {
 
     pub fn title(self) -> &'static str {
         match self {
-            Menu::Favorites => "我的收藏",
-            Menu::Playlists => "我的歌单",
-            Menu::Search => "搜索",
-            Menu::History => "历史",
+            Menu::Favorites => "在线收藏",
+            Menu::Playlists => "在线歌单",
+            Menu::Search => "在线搜索",
+            Menu::History => "播放历史",
             Menu::LocalLibrary => "本地曲库",
             Menu::LocalPlaylists => "本地歌单",
         }
@@ -373,7 +373,7 @@ pub(super) struct Nav {
     pub menu: Menu,
     pub favorites: ListView<Song>,
     pub playlists: ListView<Playlist>,
-    /// 「我的歌单 › 某歌单」这一层的曲目。
+    /// 「在线歌单 › 某歌单」这一层的曲目。
     pub tracks: ListView<Song>,
     /// 搜索结果单独一份：跟 `tracks` 共用会把正在看的歌单曲目冲掉。
     pub search_results: ListView<Song>,
@@ -425,10 +425,12 @@ impl Nav {
     /// 数字键切屏是**回到上次的位置**，退层交给 `Esc`。
     pub fn title_chain(&self) -> Vec<String> {
         match (self.menu, &self.shown) {
-            (Menu::Playlists, Some((_, name))) => vec!["我的歌单".to_string(), name.clone()],
+            (Menu::Playlists, Some((_, name))) => {
+                vec![Menu::Playlists.title().to_string(), name.clone()]
+            }
             (Menu::LocalPlaylists, _) => match &self.local_shown {
-                Some((_, name)) => vec!["本地歌单".to_string(), name.clone()],
-                None => vec!["本地歌单".to_string()],
+                Some((_, name)) => vec![Menu::LocalPlaylists.title().to_string(), name.clone()],
+                None => vec![Menu::LocalPlaylists.title().to_string()],
             },
             (menu, _) => vec![menu.title().to_string()],
         }
@@ -465,7 +467,7 @@ impl Nav {
             || (self.menu == Menu::LocalPlaylists && self.local_shown.is_none())
     }
 
-    /// 进入「我的歌单 › 嗯」这一层：清掉旧曲目、记住在哪个歌单里（标题由 `shown` 派生）。
+    /// 进入「在线歌单 › 嗯」这一层：清掉旧曲目、记住在哪个歌单里（标题由 `shown` 派生）。
     pub fn push_tracks(&mut self, id: &str, name: &str, songs: Vec<Song>) {
         self.shown = Some((id.to_string(), name.to_string()));
         self.tracks = ListView::songs();
@@ -488,7 +490,7 @@ impl Nav {
     ///
     /// 两层是**各屏各自**的（`shown` 管 QQ 歌单、`local_shown` 管本地歌单），所以退哪一层
     /// 看当前屏：在别的屏（收藏 / 搜索 / 本地曲库 / 历史）上按 `Esc` 时，那两层一层都不该动
-    /// ——以前这里不看屏，于是「我的歌单 › 某歌单」那一层会被那些屏的 `Esc` 悄悄吃掉、
+    /// ——以前这里不看屏，于是「在线歌单 › 某歌单」那一层会被那些屏的 `Esc` 悄悄吃掉、
     /// 画面一动不动（连「回首页」这一步也被顶掉），同一个坑的镜像版本见本地歌单那条。
     pub fn pop_tracks(&mut self) -> bool {
         match self.menu {
@@ -987,7 +989,7 @@ impl App {
         });
     }
 
-    /// 启动：落在**首页**（原来停在「我的收藏」，并顺手把它拉下来）。
+    /// 启动：落在**首页**（原来停在「在线收藏」，并顺手把它拉下来）。
     pub(super) fn load_initial(&mut self) {
         self.go_home();
     }
@@ -1620,7 +1622,7 @@ impl App {
                 self.nav.favorites_loaded = true;
                 match result {
                     Ok(songs) => {
-                        // 条数由内容块标题报（`我的收藏 489 首`），这里不再重复一遍。
+                        // 条数由内容块标题报（`在线收藏 489 首`），这里不再重复一遍。
                         self.nav.favorites.set_items(songs);
                     }
                     Err(error) => {
@@ -1634,7 +1636,7 @@ impl App {
                 self.nav.playlists_loaded = true;
                 match result {
                     Ok(mut playlists) => {
-                        // 「我喜欢」在菜单里是单独一项，不在「我的歌单」里重复出现。
+                        // 「我喜欢」在菜单里是单独一项，不在「在线歌单」里重复出现。
                         playlists.retain(|playlist| !playlist.is_favorites);
                         self.nav.playlists.set_items(playlists);
                     }
@@ -2574,7 +2576,7 @@ mod tests {
         assert_eq!(nav.favorites.selected().map(|s| s.mid.as_str()), Some("c"));
 
         nav.switch_menu(Menu::Playlists);
-        assert_eq!(nav.title_chain(), ["我的歌单"]);
+        assert_eq!(nav.title_chain(), ["在线歌单"]);
         nav.switch_menu(Menu::Favorites);
         assert_eq!(
             nav.favorites.selected().map(|s| s.mid.as_str()),
@@ -2594,13 +2596,13 @@ mod tests {
         let target = nav.playlists.selected().cloned().expect("选中了歌单");
         assert_eq!(target.id, "1");
         nav.begin_tracks(&target.id, &target.name);
-        assert_eq!(nav.title_chain(), ["我的歌单", "嗯"]);
+        assert_eq!(nav.title_chain(), ["在线歌单", "嗯"]);
         assert!(!nav.can_enter_depth(), "已经在曲目层里了");
 
         nav.push_tracks("1", "嗯", vec![test_song("a")]);
         assert_eq!(nav.tracks.items().len(), 1);
         assert!(nav.pop_tracks(), "Esc 该返回歌单列表");
-        assert_eq!(nav.title_chain(), ["我的歌单"]);
+        assert_eq!(nav.title_chain(), ["在线歌单"]);
         assert_eq!(nav.tracks.items().len(), 0, "退回上一层要清掉曲目");
         assert!(!nav.pop_tracks(), "已经在最上层，再返回没有动作");
     }
@@ -2764,12 +2766,12 @@ mod tests {
         assert_eq!(app.nav.filter_counts(), (2, 2), "第一次 Esc 清掉筛选");
         assert_eq!(
             app.nav.title_chain(),
-            ["我的歌单", "嗯"],
+            ["在线歌单", "嗯"],
             "第一次 Esc 不退层"
         );
 
         app.apply(keys::Action::Back);
-        assert_eq!(app.nav.title_chain(), ["我的歌单"], "第二次 Esc 才退上一层");
+        assert_eq!(app.nav.title_chain(), ["在线歌单"], "第二次 Esc 才退上一层");
     }
 
     #[test]
@@ -2876,7 +2878,7 @@ mod tests {
         app.apply(keys::Action::ToggleSpectrum);
         app.apply(keys::Action::Back);
         assert!(app.show_spectrum, "Esc 不退频谱");
-        assert_eq!(app.nav.title_chain(), ["我的歌单"], "一次 Esc 就退层");
+        assert_eq!(app.nav.title_chain(), ["在线歌单"], "一次 Esc 就退层");
         assert!(!app.quit, "Esc 不该顺手退出程序");
     }
 
@@ -2936,15 +2938,15 @@ mod tests {
             .tracks
             .set_items(vec![test_song("a"), test_song("b")]);
         app.nav.tracks.move_by(1);
-        assert_eq!(app.nav.title_chain(), ["我的歌单", "嗯"]);
+        assert_eq!(app.nav.title_chain(), ["在线歌单", "嗯"]);
 
         app.apply(keys::Action::Menu(3));
-        assert_eq!(app.nav.title_chain(), ["历史"]);
+        assert_eq!(app.nav.title_chain(), ["播放历史"]);
 
         app.apply(keys::Action::Menu(1));
         assert_eq!(
             app.nav.title_chain(),
-            ["我的歌单", "嗯"],
+            ["在线歌单", "嗯"],
             "回到这一屏要还原「还在哪个歌单里」，否则标题和内容对不上"
         );
         assert_eq!(
@@ -2958,7 +2960,7 @@ mod tests {
 
         // Esc 才是退层：退出歌单，回到歌单列表。
         app.apply(keys::Action::Back);
-        assert_eq!(app.nav.title_chain(), ["我的歌单"]);
+        assert_eq!(app.nav.title_chain(), ["在线歌单"]);
     }
 
     /// `j`/`k` 直接挪当前屏的列表（没有「菜单游标」这层中间态了）。
@@ -3641,7 +3643,7 @@ mod tests {
         assert_eq!(
             app.home_state.selected(),
             Some(1),
-            "高亮停在刚离开的那一屏（我的歌单）"
+            "高亮停在刚离开的那一屏（在线歌单）"
         );
         app.apply(keys::Action::Menu(3));
         assert!(matches!(app.screen, Screen::Main));
@@ -3813,7 +3815,7 @@ mod tests {
     }
 
     /// 别的屏记住的层级不许吃掉这一屏的 `Esc`：在「本地曲库」上按 `Esc` 就该回首页，
-    /// 「我的歌单 › 某歌单」那一层既不该被退掉、也不该把回首页这一步挡下来。
+    /// 「在线歌单 › 某歌单」那一层既不该被退掉、也不该把回首页这一步挡下来。
     ///
     /// （回首页保留其它屏层级是刻意的，见 `going_home_leaves_the_other_screens_levels_alone`；
     /// 「退一层」只退**当前屏**那一层。）
@@ -3842,7 +3844,7 @@ mod tests {
             );
             assert!(
                 app.nav.shown.is_some(),
-                "{menu:?} 上的 Esc 不该把「我的歌单›某歌单」那一层退掉"
+                "{menu:?} 上的 Esc 不该把「在线歌单›某歌单」那一层退掉"
             );
             app.screen = Screen::Main;
         }
@@ -3866,7 +3868,7 @@ mod tests {
         );
     }
 
-    /// 回首页**不许**动别的屏记住的层级：先进「我的歌单 › 某歌单」再回首页，
+    /// 回首页**不许**动别的屏记住的层级：先进「在线歌单 › 某歌单」再回首页，
     /// 那个屏仍是曲目那一层（`nav.shown` 留着）。
     #[test]
     fn going_home_leaves_the_other_screens_levels_alone() {
@@ -3876,7 +3878,7 @@ mod tests {
             .push_tracks("1", "嗯", vec![crate::tui::test_support::test_song("a")]);
         assert_eq!(
             app.nav.title_chain(),
-            vec!["我的歌单".to_string(), "嗯".to_string()]
+            vec!["在线歌单".to_string(), "嗯".to_string()]
         );
 
         app.apply(keys::Action::Home);
@@ -3886,7 +3888,7 @@ mod tests {
         app.apply(keys::Action::Menu(1));
         assert_eq!(
             app.nav.title_chain(),
-            vec!["我的歌单".to_string(), "嗯".to_string()],
+            vec!["在线歌单".to_string(), "嗯".to_string()],
             "回到歌单屏还在原来那一层"
         );
     }
@@ -4063,10 +4065,10 @@ mod tests {
         let (songs, index, origin) = app.queue_from_focus().expect("历史屏有内容");
         assert_eq!(songs.len(), 3);
         assert_eq!(songs[index].mid, "b");
-        assert_eq!(origin, "历史");
+        assert_eq!(origin, "播放历史");
         assert_eq!(
             app.nav.title_chain(),
-            ["历史"],
+            ["播放历史"],
             "导航链只报屏名，条数是绘制时现算的"
         );
     }
@@ -4094,7 +4096,7 @@ mod tests {
         assert_eq!(app.history.len(), 1);
     }
 
-    /// 「我喜欢」在菜单里是单独一项，不该在「我的歌单」里再出现一次。
+    /// 「我喜欢」在菜单里是单独一项，不该在「在线歌单」里再出现一次。
     #[test]
     fn the_playlist_list_drops_the_favorites_pseudo_playlist() {
         let (mut app, _runtime) = crate::tui::test_support::test_app();

@@ -279,7 +279,7 @@ fn common(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('/') => Some(Action::Filter),
         // `r` 在「本地曲库」屏是重扫曲库（别的屏按了没反应，见 `state.rs` 的分岔）。
         KeyCode::Char('r') => Some(Action::LocalRescan),
-        // 可能有上一层（「我的歌单 › 某歌单」）：Esc 一层层退。
+        // 可能有上一层（「在线歌单 › 某歌单」）：Esc 一层层退。
         KeyCode::Esc | KeyCode::Backspace => Some(Action::Back),
         _ => None,
     }

@@ -366,8 +366,8 @@ mod tests {
         app.config.library.dirs = Some(Vec::new());
         app.go_home();
         let text = frame_rows(&mut app, 120, 40).join("\n");
-        assert!(text.contains("1我的收藏"), "{text:?}");
-        assert!(text.contains("4历史"), "{text:?}");
+        assert!(text.contains("1在线收藏"), "{text:?}");
+        assert!(text.contains("4播放历史"), "{text:?}");
         assert!(!text.contains("本地曲库"), "第 5 格不该画：{text:?}");
         assert!(!text.contains("本地歌单"), "第 6 格不该画：{text:?}");
         assert!(text.contains("1-4直跳"), "{text:?}");
@@ -510,9 +510,9 @@ mod tests {
         app.nav.push_tracks("1", "嗯", vec![test_song("a")]);
         app.notify("已加载《嗯》");
         let text = frame_flat(&mut app, 160, 40);
-        assert!(text.contains("我的歌单›嗯"), "面包屑要带层级：{text}");
+        assert!(text.contains("在线歌单›嗯"), "面包屑要带层级：{text}");
         // 菜单栏没了：整帧里不该再出现菜单那几行。
-        assert!(!text.contains("♥我的收藏"), "菜单项不该再画出来：{text}");
+        assert!(!text.contains("♥在线收藏"), "菜单项不该再画出来：{text}");
         assert!(text.contains("已加载《嗯》"), "状态行右侧：{text}");
         assert!(text.contains("Enter播放"), "状态行左侧的键位提示不能被状态顶掉：{text}");
         assert!(text.contains("已停止"), "空闲时播放条也要在：{text}");
@@ -523,8 +523,8 @@ mod tests {
     fn a_narrow_window_has_no_tab_row_any_more() {
         let (mut app, _runtime) = test_app();
         let text = frame_flat(&mut app, 90, 24);
-        assert!(!text.contains("♥我的收藏"), "窄屏也不该有页签行：{text}");
-        assert!(text.contains("我的收藏"), "当前屏写在内容块标题里：{text}");
+        assert!(!text.contains("♥在线收藏"), "窄屏也不该有页签行：{text}");
+        assert!(text.contains("在线收藏"), "当前屏写在内容块标题里：{text}");
     }
 
     /// 歌词栏只在「要它 + 屏幕够高」时占位，否则主区吃满。
@@ -618,7 +618,7 @@ mod tests {
         let (mut app, _runtime) = test_app();
         app.apply(crate::tui::keys::Action::Help);
         let rows = frame_raw(&mut app, 160, 40);
-        // 只取浮层里的行：这样就不会被浮层外面的内容（面包屑里也有「我的收藏」）误导。
+        // 只取浮层里的行：这样就不会被浮层外面的内容（面包屑里也有「在线收藏」）误导。
         let table = help_box_rows(&rows);
         let column = |needle: &str| -> usize {
             table
@@ -627,7 +627,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("{needle} 没画在浮层里：{table:?}"))
         };
         // 只用**首屏可见**的行：浮层视口 18 行，「播放」段已在视口外。
-        let columns: Vec<usize> = ["选曲目", "我的收藏", "筛选当前列表", "登出（清空本地会话）"]
+        let columns: Vec<usize> = ["选曲目", "在线收藏", "筛选当前列表", "登出（清空本地会话）"]
             .iter()
             .map(|help| column(help))
             .collect();
@@ -696,7 +696,7 @@ mod tests {
                 rows.last().expect("状态行").contains("关闭"),
                 "{width}x{height} 状态行缺提示"
             );
-            let columns: Vec<usize> = ["选曲目", "我的收藏"]
+            let columns: Vec<usize> = ["选曲目", "在线收藏"]
                 .iter()
                 .filter_map(|help| {
                     popup_rows.iter().find_map(|row| row.contains(help).then(|| column_of(row, help)))
@@ -720,13 +720,13 @@ mod tests {
         app.go_home();
         let rows = frame_rows(&mut app, 120, 30);
         assert!(rows.iter().any(|row| row.contains("┌首页")), "标题：{rows:?}");
-        for (number, title) in [(1, "我的收藏"), (2, "我的歌单"), (3, "搜索"), (4, "历史")] {
+        for (number, title) in [(1, "在线收藏"), (2, "在线歌单"), (3, "在线搜索"), (4, "播放历史")] {
             assert!(
                 rows.iter().any(|row| row.contains(&format!("{number}{title}"))),
                 "{number} {title} 那一行没画出来"
             );
         }
-        assert!(rows.iter().any(|row| row.contains("▶1我的收藏")), "高亮在第一项：{rows:?}");
+        assert!(rows.iter().any(|row| row.contains("▶1在线收藏")), "高亮在第一项：{rows:?}");
     }
 
     /// 首页的状态行是首页那条提示，不是主界面的。
@@ -749,9 +749,9 @@ mod tests {
         let row_of = |needle: &str| {
             rows.iter().position(|row| row.contains(needle)).expect("该画出来")
         };
-        assert_eq!(row_of("1我的收藏"), row_of("2我的歌单"), "前两格同一行");
-        assert_eq!(row_of("2我的歌单"), row_of("3搜索"), "一行三格");
-        assert!(row_of("4历史") > row_of("3搜索"), "第 4 格换到下一行");
+        assert_eq!(row_of("1在线收藏"), row_of("2在线歌单"), "前两格同一行");
+        assert_eq!(row_of("2在线歌单"), row_of("3在线搜索"), "一行三格");
+        assert!(row_of("4播放历史") > row_of("3在线搜索"), "第 4 格换到下一行");
     }
 
     /// 列距一致、换行那一格对齐第 1 列。
@@ -812,7 +812,7 @@ mod tests {
             .collect();
         assert!(painted.is_empty(), "首页不该有底色，{painted:?} 这些格子涂了");
         let text = frame_flat(&mut app, width, height);
-        assert!(text.contains("▶1我的收藏"), "选中还是靠 `▶`：{text}");
+        assert!(text.contains("▶1在线收藏"), "选中还是靠 `▶`：{text}");
     }
 
     /// 选中那格带 `▶`；`j` 挪一格，`▶` 跟着走、只在一格上。
@@ -821,12 +821,12 @@ mod tests {
         let (mut app, _runtime) = test_app();
         app.go_home();
         let text = frame_flat(&mut app, 120, 40);
-        assert!(text.contains("▶1我的收藏"), "{text}");
+        assert!(text.contains("▶1在线收藏"), "{text}");
         // 首页挪格是 `Tab`（`NextMenuItem`）；`j`/`k` 与上下方向键在首页已经没绑定。
         app.apply(crate::tui::keys::Action::NextMenuItem);
         let text = frame_flat(&mut app, 120, 40);
-        assert!(text.contains("▶2我的歌单"), "高亮该挪到第 2 格：{text}");
-        assert!(!text.contains("▶1我的收藏"), "`▶` 只该在选中那格：{text}");
+        assert!(text.contains("▶2在线歌单"), "高亮该挪到第 2 格：{text}");
+        assert!(!text.contains("▶1在线收藏"), "`▶` 只该在选中那格：{text}");
     }
 
     /// 从「本地曲库」回首页，画出来的**必须是首页那排格子**。
@@ -848,7 +848,7 @@ mod tests {
 
         let text = frame_flat(&mut app, 120, 40);
         assert!(matches!(app.screen, Screen::Home), "状态上该回首页");
-        assert!(text.contains("1我的收藏"), "画出来的得是首页那排格子：{text}");
+        assert!(text.contains("1在线收藏"), "画出来的得是首页那排格子：{text}");
         // 高亮落在「本地曲库」那一格（`go_home()` 记住的就是它）——曲库那屏自己没有这串。
         assert!(text.contains("▶5本地曲库"), "高亮该在曲库那一格：{text}");
         // 曲库那屏的标题带条数（`本地曲库 · 1 首`），首页格子不带。
@@ -862,7 +862,7 @@ mod tests {
         app.go_home();
         for (width, height) in [(60, 15), (80, 24)] {
             let rows = frame_rows(&mut app, width, height);
-            for label in ["1我的收藏", "2我的歌单", "3搜索", "4历史"] {
+            for label in ["1在线收藏", "2在线歌单", "3在线搜索", "4播放历史"] {
                 assert!(
                     rows.iter().any(|row| row.contains(label)),
                     "{width}×{height} 缺 `{label}`：{rows:?}"
@@ -1145,14 +1145,14 @@ mod tests {
         }
         app.switch_menu(Menu::History);
         let history = frame_flat(&mut app, 120, 30);
-        assert!(history.contains("历史2条"), "历史标题带条数：{history}");
+        assert!(history.contains("播放历史2条"), "历史标题带条数：{history}");
 
         app.switch_menu(Menu::Favorites);
         app.nav.favorites.set_items(vec![test_song("a")]);
         let favorites = frame_flat(&mut app, 120, 30);
-        assert!(favorites.contains("我的收藏"), "{favorites}");
+        assert!(favorites.contains("在线收藏"), "{favorites}");
         assert!(
-            !favorites.contains("历史2条"),
+            !favorites.contains("播放历史2条"),
             "切走之后不该还挂着历史标题：{favorites}"
         );
     }
@@ -1165,13 +1165,13 @@ mod tests {
         let (mut app, _runtime) = test_app();
         app.switch_menu(Menu::Favorites);
         app.nav.favorites.set_items(vec![test_song("a")]);
-        assert!(frame_flat(&mut app, 120, 30).contains("我的收藏"));
+        assert!(frame_flat(&mut app, 120, 30).contains("在线收藏"));
 
         // 正好是播放一首歌之后走的那条路：记一笔历史 + 重建历史屏。
         app.record_history(&test_song("b"));
         let text = frame_flat(&mut app, 120, 30);
-        assert!(text.contains("我的收藏"), "标题还是当前屏：{text}");
-        assert!(!text.contains("历史1条"), "不该出现历史标题：{text}");
+        assert!(text.contains("在线收藏"), "标题还是当前屏：{text}");
+        assert!(!text.contains("播放历史1条"), "不该出现历史标题：{text}");
     }
 
     /// 队列浮层只盖内容区：播放条还在下面，标题也不写「来自某歌单」。
@@ -1306,7 +1306,7 @@ mod tests {
         app.switch_menu(Menu::Favorites);
         app.nav.favorites.set_items(vec![test_song("a"), test_song("b")]);
         let favorites = frame_flat(&mut app, 120, 30);
-        assert!(favorites.contains("我的收藏2首"), "{favorites}");
+        assert!(favorites.contains("在线收藏2首"), "{favorites}");
 
         app.switch_menu(Menu::Playlists);
         app.nav.playlists.set_items(vec![
@@ -1314,20 +1314,20 @@ mod tests {
             crate::tui::test_support::test_playlist("2", "循环"),
         ]);
         let playlists = frame_flat(&mut app, 120, 30);
-        assert!(playlists.contains("我的歌单2个"), "{playlists}");
+        assert!(playlists.contains("在线歌单2个"), "{playlists}");
 
         app.nav.push_tracks("1", "嗯", vec![test_song("a")]);
         let tracks = frame_flat(&mut app, 120, 30);
-        assert!(tracks.contains("我的歌单›嗯1首"), "{tracks}");
+        assert!(tracks.contains("在线歌单›嗯1首"), "{tracks}");
 
         app.switch_menu(Menu::Search);
         app.nav.search_results.set_items(vec![test_song("a")]);
         let search = frame_flat(&mut app, 120, 30);
-        assert!(search.contains("搜索1首"), "{search}");
+        assert!(search.contains("在线搜索1首"), "{search}");
 
         app.switch_menu(Menu::History);
         let history = frame_flat(&mut app, 120, 30);
-        assert!(history.contains("历史0条"), "{history}");
+        assert!(history.contains("播放历史0条"), "{history}");
     }
 
     /// 筛过之后标题只报「命中/总数」——别变成「2 首 筛选「非酋」1/2」那种重复。
@@ -1366,7 +1366,7 @@ mod tests {
                 title: "成全".to_string(),
                 singers: "刘若英".to_string(),
                 at: crate::history::now_secs(),
-                origin: "我的收藏".to_string(),
+                origin: "在线收藏".to_string(),
                 local_path: None,
                 duration_secs: 276,
                 sizes: crate::model::FileSizes { mp3_128: 4_400_000, ..Default::default() },
@@ -1395,7 +1395,7 @@ mod tests {
         assert!(data.contains("4.2MB"), "历史也报体积：{data}");
         assert!(data.contains("年华"), "历史也有专辑列：{data}");
         assert_eq!(column_of(header, "专辑"), column_of(data, "年华"), "专辑列对齐");
-        assert!(data.contains("刚刚 · 来自《我的收藏》"), "备注列写时间与来源：{data}");
+        assert!(data.contains("刚刚 · 来自《在线收藏》"), "备注列写时间与来源：{data}");
         assert!(!data.contains("成全 — 刘若英"), "不该再拼「标题 — 歌手」：{data}");
 
         std::fs::remove_dir_all(&app.config.download_dir).ok();
@@ -1411,7 +1411,7 @@ mod tests {
                 title: "老条目".to_string(),
                 singers: "某人".to_string(),
                 at: crate::history::now_secs(),
-                origin: "我的收藏".to_string(),
+                origin: "在线收藏".to_string(),
                 local_path: None,
                 duration_secs: 0,
                 sizes: crate::model::FileSizes::default(),
@@ -1449,7 +1449,7 @@ mod tests {
                 title: "成全".to_string(),
                 singers: "刘若英".to_string(),
                 at: crate::history::now_secs(),
-                origin: "我的收藏".to_string(),
+                origin: "在线收藏".to_string(),
                 local_path: None,
                 duration_secs: 276,
                 sizes: crate::model::FileSizes::default(),
