@@ -765,6 +765,9 @@ pub(super) struct App {
     /// 并显示缓存档位（命中缓存时播放/下载用的就是它）；启动时扫一遍目录，播放中刚听完
     /// 转正的那首由音频线程回传（见 `Engine::take_cached`）。
     pub(super) cached: std::collections::HashMap<String, (crate::model::Quality, u64)>,
+    /// 下载目录里已有的文件：`文件名（不含扩展名） → (容器, 字节)`。列表里标 `↓`、并让
+    /// 「音质/体积」报磁盘上那份。启动扫一次，下载完成后与 `r` 重扫时更新（见 `refresh_downloads`）。
+    pub(super) downloads: std::collections::HashMap<String, (String, u64)>,
     /// `/` 的筛选框开着（输入即筛当前列表）。
     pub(super) filter_input: bool,
     /// 帮助浮层开着（`?`）。
@@ -815,6 +818,8 @@ impl App {
     ) -> Self {
         // 先读存储（下面 `playlists_path` 会被 move 进字段）。
         let playlists_store = playlists::Store::load(&playlists_path);
+        // 下载目录里的文件：`↓` 标记与「体积报磁盘那份」用它（配置还没被 move 进字段）。
+        let downloads = crate::download::scan_downloads(&config.download_dir);
         Self {
             handle,
             engine,
@@ -843,6 +848,7 @@ impl App {
             analyzer: crate::spectrum::Analyzer::new(),
             last_tick: std::time::Instant::now(),
             cached: crate::cache::cached_entries(),
+            downloads,
             filter_input: false,
             help_open: false,
             help_scroll: 0,
@@ -885,6 +891,14 @@ impl App {
         std::thread::spawn(move || {
             let _ = tx.send(scan_library(&dirs, &index_path));
         });
+    }
+
+    /// 重扫下载目录：`↓` 与「体积报磁盘那份」的数据源。
+    ///
+    /// 启动一次（`App::new` 里直接扫）；每次下载完成（`poll_transfer` 收到结果）一次；
+    /// `r` 重扫曲库时顺带一次——外部删掉 / 手工拷进来的文件靠这三处反映。
+    pub(super) fn refresh_downloads(&mut self) {
+        self.downloads = crate::download::scan_downloads(&self.config.download_dir);
     }
 
     /// 本地曲库（已按 歌手 → 专辑 → 标题 排好）。Task 5 的「本地曲库」屏接上就摘掉这个 allow。
@@ -1937,6 +1951,8 @@ impl App {
             keys::Action::LocalRescan => {
                 if self.nav.menu == Menu::LocalLibrary {
                     self.start_library_scan();
+                    // 手工删掉 / 拷进来的下载文件，按一下 `r` 就反映（曲库与下载目录一起刷）。
+                    self.refresh_downloads();
                 }
             }
             keys::Action::LyricsWindow => {
@@ -2483,6 +2499,8 @@ impl App {
             drop(state);
             self.transfer = None;
             self.clear_progress();
+            // 下载完成（成功或失败）之后重扫一次下载目录：成功的这次会多出一个 `↓`。
+            self.refresh_downloads();
             self.notify(outcome);
             return;
         }
@@ -4132,5 +4150,61 @@ mod tests {
             Some("已插队：晴天"),
             "一次性消息不该被收工清掉"
         );
+    }
+
+    /// 下载完了列表里的 `↓` 要立刻出现：`poll_transfer` 收到结果就重扫下载目录。
+    #[test]
+    fn a_finished_download_refreshes_the_downloaded_index() {
+        let (mut app, _runtime) = test_app();
+        let dir = std::env::temp_dir().join(format!("canto-dl-state-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("建目录");
+        app.config.download_dir = dir.clone();
+        app.refresh_downloads();
+        assert!(app.downloads.is_empty(), "空目录就是空表");
+
+        // 假装那一下下载落了盘，然后走一遍「下载完成」的收尾。
+        let song = crate::tui::test_support::test_song("a");
+        std::fs::write(
+            dir.join(format!("{}.mp3", crate::download::file_stem(&song))),
+            vec![0_u8; 1024],
+        )
+        .expect("写文件");
+        app.transfer = Some(std::sync::Arc::new(std::sync::Mutex::new(Transfer {
+            title: song.title.clone(),
+            received: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            total: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            outcome: Some("已下载：歌 a".to_string()),
+        })));
+        app.poll_transfer();
+
+        assert!(
+            app.downloads.contains_key(&crate::download::file_stem(&song)),
+            "下载完成后 `↓` 该出现：{:?}",
+            app.downloads
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `r`（本地曲库重扫）也顺手重扫下载目录：手工删掉文件之后按一下就该消失。
+    #[test]
+    fn rescanning_the_library_also_refreshes_downloads() {
+        let (mut app, _runtime) = test_app();
+        let dir = std::env::temp_dir().join(format!("canto-dl-rescan-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("建目录");
+        app.config.download_dir = dir.clone();
+        let file = dir.join("刘若英 - 成全.mp3");
+        std::fs::write(&file, vec![0_u8; 8]).expect("写文件");
+        app.refresh_downloads();
+        assert_eq!(app.downloads.len(), 1);
+
+        std::fs::remove_file(&file).expect("删文件");
+        app.switch_menu(Menu::LocalLibrary);
+        app.apply(crate::tui::keys::Action::LocalRescan);
+        assert!(app.downloads.is_empty(), "重扫之后删掉的那份不该还在");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

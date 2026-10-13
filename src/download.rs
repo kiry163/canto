@@ -173,8 +173,6 @@ pub(crate) fn container_label(extension: &str) -> String {
 /// 可选**的口径：文件里没有 mid。同一个 stem 有多份时（mp3 + flac）按容器排
 /// `flac/wav > m4a/ogg > 其它`，同级取体积大的——体积是文件本身唯一读得出的「档位高低」信号。
 /// 目录不存在 / 没权限一律给空表（下载目录可能还没建）。
-// Task 5 的 `App.downloads`（启动/下载完成/`r` 三处刷新）接上就摘掉。
-#[allow(dead_code)]
 pub(crate) fn scan_downloads(dir: &Path) -> HashMap<String, (String, u64)> {
     let mut found: HashMap<String, (String, u64)> = HashMap::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
