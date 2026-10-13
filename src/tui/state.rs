@@ -584,10 +584,10 @@ pub(super) struct App {
     /// 当前这首歌的歌词（`None` = 还没拿到或确实没有）。
     pub(super) lyric: Option<Lyric>,
     pub(super) lyric_loading: bool,
-    /// 歌词面板是否展开。
+    /// 歌词栏是否展开。
     pub(super) show_lyric: bool,
-    /// `Y`：全屏视图（内容区整块让给它，播放条与状态行照旧）。
-    pub(super) now_playing_full: bool,
+    /// `v`：频谱区（与列表互斥；歌词栏不在时吃满内容区）。
+    pub(super) show_spectrum: bool,
     /// 频谱：采样窗口的副本（复用缓冲，逐帧零分配）。
     pub(super) spectrum_scratch: Vec<f32>,
     /// 原始频段能量（0.0~1.0），由 FFT 分频得到。
@@ -654,7 +654,7 @@ impl App {
             lyric: None,
             lyric_loading: false,
             show_lyric: true,
-            now_playing_full: false,
+            show_spectrum: false,
             spectrum_scratch: Vec::new(),
             spectrum_raw: Vec::new(),
             spectrum_smooth: Vec::new(),
@@ -761,10 +761,10 @@ impl App {
     /// （`0` 在首页上 = 无操作，别把刚挪好的高亮弹回默认那一行）。
     ///
     /// 只动这两样——别的屏记住的层级（`nav.shown`）、筛选、选中位置都不碰：首页是最外
-    /// 一层，不该顺手改动谁。全屏视图例外：它盖在屏上，回首页得收起来（不然在全屏里按
+    /// 一层，不该顺手改动谁。频谱区例外：它盖在列表上，回首页得收起来（不然在频谱区里按
     /// `0`，屏已经在首页了画面却一动不动）。
     pub(super) fn go_home(&mut self) {
-        self.now_playing_full = false;
+        self.show_spectrum = false;
         if matches!(self.screen, Screen::Home) {
             return;
         }
@@ -776,8 +776,8 @@ impl App {
     /// 切屏。这一屏没拉过数据就顺手拉一次——每屏的选中位置由 `Nav` 留着，
     /// 所以来回切不会丢上下文。
     pub(super) fn switch_menu(&mut self, menu: Menu) {
-        // 切屏就是离开这一屏：全屏视图跟着收起来。
-        self.now_playing_full = false;
+        // 切屏就是离开这一屏：频谱区跟着收起来。
+        self.show_spectrum = false;
         self.nav.switch_menu(menu);
         match menu {
             Menu::Favorites if !self.nav.favorites_loaded => self.reload_favorites(),
@@ -1316,11 +1316,7 @@ impl App {
         if self.picker.is_some() {
             return keys::Context::PlaylistPicker;
         }
-        // 全屏视图盖住内容区：列表看不见，就别让列表类按键生效。
-        if self.now_playing_full {
-            return keys::Context::NowPlaying;
-        }
-        // 首页在模态与全屏之后：首页上开 `u` / `?` / `Y` 时上下文仍归它们。
+        // 首页在模态之后：首页上开 `u` / `?` / `v` 时上下文仍归它们。
         if matches!(self.screen, Screen::Home) {
             return keys::Context::Home;
         }
@@ -1419,7 +1415,7 @@ impl App {
             keys::Action::AddToPlaylist => self.open_picker(),
             keys::Action::RemoveFromPlaylist => self.remove_selected(),
             keys::Action::ToggleLyric => self.show_lyric = !self.show_lyric,
-            keys::Action::ToggleNowPlaying => self.now_playing_full = !self.now_playing_full,
+            keys::Action::ToggleSpectrum => self.show_spectrum = !self.show_spectrum,
             keys::Action::LyricsLock => self.overlay.toggle_lock(),
             keys::Action::LyricsWindow => {
                 // 起不来只报一句（状态文件不动：它记的是「你想开着」，再按一次就是重试）。
@@ -1468,9 +1464,6 @@ impl App {
                     self.picker = None;
                 } else if self.nav.search_input {
                     self.nav.end_search_input();
-                } else if self.now_playing_full {
-                    // 全屏视图是一层「盖在内容区上的视图」，Esc 先退出它。
-                    self.now_playing_full = false;
                 } else if !self.nav.filter_text().is_empty() {
                     // 筛选也算一层：Esc 先清掉它，再按才退上一层视图。
                     self.nav.set_filter("");
@@ -1788,9 +1781,9 @@ impl App {
         };
     }
 
-    /// 频谱是不是该动（全屏视图开着 + 正在播）。关着的时候不取、不算、不画。
+    /// 频谱是不是该动（频谱区开着 + 正在播）。关着的时候不取、不算、不画。
     pub(super) fn spectrum_wanted(&self) -> bool {
-        self.now_playing_full && self.engine.snapshot().phase == crate::player::Phase::Playing
+        self.show_spectrum && self.engine.snapshot().phase == crate::player::Phase::Playing
     }
 
     /// 频谱是不是正在动——界面刷新据此把间隔提到 ~30fps。
@@ -2136,26 +2129,26 @@ mod tests {
     }
 
     #[test]
-    fn only_a_playing_fullscreen_view_raises_the_frame_rate() {
+    fn only_a_playing_spectrum_raises_the_frame_rate() {
         let (mut app, _runtime) = test_app();
-        assert!(!app.spectrum_animating(), "默认（没开视图）不提速");
+        assert!(!app.spectrum_animating(), "默认（没开频谱区）不提速");
 
-        app.now_playing_full = true;
+        app.show_spectrum = true;
         // 哑引擎：没播过，phase 还是 Idle
         assert!(!app.spectrum_animating(), "没在播不提速");
     }
 
-    /// 全屏视图能盖在主界面哪儿，刷新就在哪儿提速：首页也算主界面（不提速的话频谱
+    /// 频谱区能开在主界面哪儿，刷新就在哪儿提速：首页也算主界面（不提速的话频谱
     /// ~6.7fps，一格一跳）；登录屏不算——那个 `matches!` 拦的就是它。
     #[test]
-    fn a_fullscreen_view_over_the_home_raises_the_frame_rate_too() {
+    fn the_spectrum_over_the_home_raises_the_frame_rate_too() {
         let (mut app, _runtime) = test_app();
         app.engine.force_phase(crate::player::Phase::Playing);
-        app.now_playing_full = true;
-        assert!(app.spectrum_animating(), "四屏上开全屏、正在播：提速");
+        app.show_spectrum = true;
+        assert!(app.spectrum_animating(), "四屏上开频谱区、正在播：提速");
 
         app.screen = Screen::Home;
-        assert!(app.spectrum_animating(), "首页上开全屏：同样提速");
+        assert!(app.spectrum_animating(), "首页上开频谱区：同样提速");
 
         app.screen = Screen::Login(LoginState::default());
         assert!(!app.spectrum_animating(), "登录屏不算数");
@@ -2193,43 +2186,45 @@ mod tests {
         );
     }
 
-    /// `Y` 开关全屏视图；`Esc` / 数字切屏都会退出它。
+    /// 两个开关正交：`v` 只动频谱区，`y` 只动歌词栏。
     #[test]
-    fn fullscreen_lyric_toggles_and_is_left_by_esc_or_switching() {
+    fn the_spectrum_and_the_lyric_bar_are_independent() {
         let (mut app, _runtime) = test_app();
-        assert!(!app.now_playing_full);
-        app.apply(keys::Action::ToggleNowPlaying);
-        assert!(app.now_playing_full);
-        assert_eq!(app.context(), keys::Context::NowPlaying, "全屏时上下文跟着变");
-
-        // 全屏里再按 Y = 退出；底部那块歌词的开关（y）不受影响。
-        app.apply(keys::Action::ToggleNowPlaying);
-        assert!(!app.now_playing_full);
-        assert_eq!(app.context(), keys::Context::Content);
-
-        app.apply(keys::Action::ToggleNowPlaying);
-        app.apply(keys::Action::Back);
-        assert!(!app.now_playing_full, "Esc 退出全屏");
-        assert!(!app.quit, "Esc 不该顺手退出程序");
-
-        app.apply(keys::Action::ToggleNowPlaying);
-        app.apply(keys::Action::Menu(3));
-        assert!(!app.now_playing_full, "切屏就是离开这一屏");
-        assert_eq!(app.nav.menu, Menu::History);
+        app.apply(keys::Action::ToggleSpectrum);
+        assert!(app.show_spectrum);
+        assert!(app.show_lyric, "v 不该动歌词栏");
+        app.apply(keys::Action::ToggleLyric);
+        assert!(!app.show_lyric);
+        assert!(app.show_spectrum, "y 不该动频谱区");
     }
 
-    /// Esc 的层级：全屏视图在「退一层视图」之前，退完层才轮到歌单。
+    /// 换屏（数字键 / Enter 进屏 / 0 回首页）收掉频谱区；退层不算换屏，不收。
     #[test]
-    fn esc_leaves_the_fullscreen_before_popping_a_level() {
+    fn switching_screens_closes_the_spectrum_but_popping_a_level_does_not() {
+        let (mut app, _runtime) = test_app();
+        app.nav.switch_menu(Menu::Playlists);
+        app.nav.push_tracks("1", "嗯", vec![crate::tui::test_support::test_song("a")]);
+        app.apply(keys::Action::ToggleSpectrum);
+        app.apply(keys::Action::Back); // 退层
+        assert!(app.show_spectrum, "退层不是换屏");
+        app.apply(keys::Action::Menu(3));
+        assert!(!app.show_spectrum, "切屏要收");
+        app.apply(keys::Action::ToggleSpectrum);
+        app.apply(keys::Action::Home);
+        assert!(!app.show_spectrum, "回首页也要收");
+    }
+
+    /// `Esc` 退层，但**不**动频谱区（频谱区不是一层，要退按 `v`）。
+    #[test]
+    fn esc_pops_a_level_and_does_not_touch_the_spectrum() {
         let (mut app, _runtime) = test_app();
         app.apply(keys::Action::Menu(1));
         app.nav.begin_tracks("1", "嗯");
-        app.apply(keys::Action::ToggleNowPlaying);
+        app.apply(keys::Action::ToggleSpectrum);
         app.apply(keys::Action::Back);
-        assert!(!app.now_playing_full, "第一次 Esc 退全屏");
-        assert_eq!(app.nav.title_chain(), ["我的歌单", "嗯"], "还留在这一层");
-        app.apply(keys::Action::Back);
-        assert_eq!(app.nav.title_chain(), ["我的歌单"], "第二次 Esc 才退层");
+        assert!(app.show_spectrum, "Esc 不退频谱");
+        assert_eq!(app.nav.title_chain(), ["我的歌单"], "一次 Esc 就退层");
+        assert!(!app.quit, "Esc 不该顺手退出程序");
     }
 
     /// 搜完看别的屏、再切回搜索：关键词与结果都还在。
@@ -2466,35 +2461,33 @@ mod tests {
         assert!(app.help_open, "首页也算主界面");
     }
 
-    /// 首页上按 `Y` 之后是「全屏视图」的上下文（列表看不见那条规则不能破）。
+    /// 首页上开频谱区，上下文**不变**（还是首页那套键；没有第二个上下文了）。
     #[test]
-    fn the_home_fullscreen_view_uses_the_now_playing_context() {
+    fn the_spectrum_keeps_the_normal_context() {
         let (mut app, _runtime) = crate::tui::test_support::test_app();
-        app.screen = Screen::Home;
+        app.go_home();
         assert_eq!(app.context(), keys::Context::Home);
-        app.apply(keys::Action::ToggleNowPlaying);
-        assert_eq!(app.context(), keys::Context::NowPlaying);
-        app.apply(keys::Action::ToggleNowPlaying);
-        assert_eq!(app.context(), keys::Context::Home, "退回来还是首页");
+        app.apply(keys::Action::ToggleSpectrum);
+        assert_eq!(app.context(), keys::Context::Home, "没有第二个上下文了");
     }
 
-    /// 全屏视图里按 `0`：全屏那层要收起来——它是盖在屏上的一层，不收画面就一直不动
+    /// 回首页（`0`）要把频谱区收起来——它是盖在屏上的一块，不收画面就一直不动
     /// （`0` 在两处的上下文里都接着，却看着没反应）。
     #[test]
-    fn home_key_in_the_fullscreen_view_collapses_it() {
+    fn going_home_closes_the_spectrum() {
         let (mut app, _runtime) = crate::tui::test_support::test_app();
-        app.apply(keys::Action::ToggleNowPlaying);
-        assert!(app.now_playing_full, "先开全屏");
+        app.apply(keys::Action::ToggleSpectrum);
+        assert!(app.show_spectrum, "先开频谱区");
         app.apply(keys::Action::Home);
         assert!(matches!(app.screen, Screen::Home), "`0` 要回首页");
-        assert!(!app.now_playing_full, "回首页要把全屏收起来");
+        assert!(!app.show_spectrum, "回首页要把频谱区收起来");
 
-        // 首页上再开一次全屏、再按 `0`：钉的是 `go_home` 里「先收全屏、再对首页早返回」的
-        // 次序（次序倒了，这一下就成了「看着没反应」）。
-        app.apply(keys::Action::ToggleNowPlaying);
-        assert!(app.now_playing_full, "首页上也能开全屏");
+        // 首页上再开一次频谱区、再按 `0`：钉的是 `go_home` 里「先收频谱区、再对首页早返回」
+        // 的次序（次序倒了，这一下就成了「看着没反应」）。
+        app.apply(keys::Action::ToggleSpectrum);
+        assert!(app.show_spectrum, "首页上也能开频谱区");
         app.apply(keys::Action::Home);
-        assert!(!app.now_playing_full, "首页上的全屏同样得收起来");
+        assert!(!app.show_spectrum, "首页上的频谱区同样得收起来");
         assert_eq!(app.home_state.selected(), Some(0), "已经在首页：`0` 是高亮无操作");
     }
 

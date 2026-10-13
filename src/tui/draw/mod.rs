@@ -106,9 +106,9 @@ impl App {
         // 歌词块只在「正在放 + 有歌词 + 面板开着」时占位，不播放时不画空框。
         // 全屏视图时底部不再单开一块——同一份歌词没有画两遍的道理。
         let lyric_wanted =
-            self.show_lyric && self.lyric.is_some() && self.player_active() && !self.now_playing_full;
+            self.show_lyric && self.lyric.is_some() && self.player_active() && !self.show_spectrum;
         let areas = layout(area, lyric_wanted);
-        if self.now_playing_full {
+        if self.show_spectrum {
             self.draw_now_playing(frame, areas.content);
         } else if matches!(self.screen, Screen::Home) {
             self.draw_home(frame, areas.content);
@@ -196,9 +196,6 @@ pub fn hints(context: keys::Context) -> &'static str {
         // 首页没有「选中的歌」：提示里只给进屏 / 切屏与播放这几条。
         keys::Context::Home => {
             "Enter 进入 · 1-4 直跳 · Space 暂停 · n/b 切歌 · u 队列 · ? 帮助"
-        }
-        keys::Context::NowPlaying => {
-            "Y/Esc 退出 · Space 暂停 · n/b 切歌 · ←/→ 10 秒 · +/- 音量 · ? 帮助"
         }
         keys::Context::SearchInput => "输入关键词 · Enter 搜索 · Esc 退出输入",
         keys::Context::FilterInput => "输入即筛选 · Enter 确认 · Esc 清空",
@@ -732,7 +729,7 @@ mod tests {
         let (mut app, _runtime) = test_app();
         app.nav.favorites.set_items(vec![test_song("a")]);
         app.lyric = Some(crate::tui::test_support::test_lyric());
-        app.now_playing_full = true;
+        app.show_spectrum = true;
         let text = frame_flat(&mut app, 120, 30);
         // 空闲时没有歌名，标题就只有「歌词」——不写行数，也不写操作提示。
         assert!(text.contains("歌词"), "内容区标题变成歌词：{text}");
@@ -745,8 +742,9 @@ mod tests {
             .expect("歌词块标题");
         assert!(!title_row.contains("退出"), "标题不写操作提示：{title_row}");
         let status_row = rows.last().expect("状态行");
+        // 没有「全屏模式」之后上下文不变，状态行给的就是列表那套提示。
         assert!(
-            status_row.contains("Y/Esc退出"),
+            status_row.contains("Enter播放"),
             "操作提示该在状态行：{status_row}"
         );
         assert!(text.contains("第1句"), "歌词正文画出来了：{text}");
@@ -755,7 +753,7 @@ mod tests {
 
         // 关掉全屏就回到列表。底部那块歌词画不画是另一条规则（只在播放中开），
         // 这里引擎是空闲的，所以它本来就不出现。
-        app.now_playing_full = false;
+        app.show_spectrum = false;
         let back = frame_flat(&mut app, 120, 30);
         assert!(back.contains("歌a"), "回到列表：{back}");
         assert!(!back.contains("歌词"), "回到列表就没有歌词块了：{back}");
@@ -778,7 +776,7 @@ mod tests {
     fn the_now_playing_view_splits_into_spectrum_above_lyric() {
         let (mut app, _runtime) = test_app();
         app.lyric = Some(crate::tui::test_support::test_lyric());
-        app.now_playing_full = true;
+        app.show_spectrum = true;
         app.spectrum_smooth = vec![1.0; crate::spectrum::BANDS];
         app.spectrum_peak = vec![1.0; crate::spectrum::BANDS];
 
@@ -809,7 +807,7 @@ mod tests {
         let (mut app, _runtime) = test_app();
         app.lyric = None;
         app.lyric_loading = false;
-        app.now_playing_full = true;
+        app.show_spectrum = true;
         app.spectrum_smooth = vec![1.0; crate::spectrum::BANDS];
         app.spectrum_peak = vec![1.0; crate::spectrum::BANDS];
 
@@ -829,7 +827,7 @@ mod tests {
     fn an_idle_engine_shows_a_message_instead_of_stale_bars() {
         let (mut app, _runtime) = test_app();
         app.lyric = Some(crate::tui::test_support::test_lyric());
-        app.now_playing_full = true;
+        app.show_spectrum = true;
         // 故意塞一份「上一帧」的柱子：没在播时它不该被画出来
         app.spectrum_smooth = vec![1.0; crate::spectrum::BANDS];
         app.spectrum_peak = vec![1.0; crate::spectrum::BANDS];
@@ -862,7 +860,7 @@ mod tests {
     fn a_short_window_keeps_the_lyric_only_view() {
         let (mut app, _runtime) = test_app();
         app.lyric = Some(crate::tui::test_support::test_lyric());
-        app.now_playing_full = true;
+        app.show_spectrum = true;
 
         // 15 行的下限窗口：内容区 10 行 < SPLIT_MIN_HEIGHT
         let rows = frame_rows(&mut app, 100, 15);
@@ -881,7 +879,7 @@ mod tests {
     fn the_current_lyric_line_is_highlighted() {
         let (mut app, _runtime) = test_app();
         app.lyric = Some(crate::tui::test_support::test_lyric());
-        app.now_playing_full = true;
+        app.show_spectrum = true;
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).expect("测试终端");
         terminal.draw(|frame| app.draw(frame)).expect("绘制");
         let buffer = terminal.backend().buffer();
