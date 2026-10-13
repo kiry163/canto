@@ -127,17 +127,25 @@ pub(super) enum Msg {
     },
 }
 
-/// 四个主界面屏（原左栏菜单项）。顺序即数字键 `1`–`4` 的顺序。
+/// 主界面屏（原左栏菜单项）。顺序即数字键 `1`–`5` 的顺序。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Menu {
     Favorites,
     Playlists,
     Search,
     History,
+    /// 本地曲库：数据来自扫出来的索引（`library.rs`），**不发任何网络请求**。
+    LocalLibrary,
 }
 
 impl Menu {
-    pub const ALL: [Menu; 4] = [Menu::Favorites, Menu::Playlists, Menu::Search, Menu::History];
+    pub const ALL: [Menu; 5] = [
+        Menu::Favorites,
+        Menu::Playlists,
+        Menu::Search,
+        Menu::History,
+        Menu::LocalLibrary,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -145,6 +153,7 @@ impl Menu {
             Menu::Playlists => "我的歌单",
             Menu::Search => "搜索",
             Menu::History => "历史",
+            Menu::LocalLibrary => "本地曲库",
         }
     }
 }
@@ -337,6 +346,8 @@ pub(super) struct Nav {
     /// 搜索结果单独一份：跟 `tracks` 共用会把正在看的歌单曲目冲掉。
     pub search_results: ListView<Song>,
     pub history_view: ListView<Song>,
+    /// 本地曲库那一屏的列表（扫描结果灌进来，`refresh_local_view` 负责同步）。
+    pub local_view: ListView<Song>,
     /// 当前曲目层对应的歌单（`None` = 不在嵌套层里）。
     pub shown: Option<(String, String)>,
     /// 这两屏的数据拉过没有（空列表也可能是「真的没有」，不能靠 `is_empty` 判断）。
@@ -357,6 +368,7 @@ impl Nav {
             tracks: ListView::songs(),
             search_results: ListView::songs(),
             history_view: ListView::songs(),
+            local_view: ListView::songs(),
             shown: None,
             favorites_loaded: false,
             playlists_loaded: false,
@@ -461,6 +473,7 @@ impl Nav {
             Menu::Playlists => &self.tracks,
             Menu::Search => &self.search_results,
             Menu::History => &self.history_view,
+            Menu::LocalLibrary => &self.local_view,
         }
     }
 
@@ -471,6 +484,7 @@ impl Nav {
             Menu::Playlists => &mut self.tracks,
             Menu::Search => &mut self.search_results,
             Menu::History => &mut self.history_view,
+            Menu::LocalLibrary => &mut self.local_view,
         }
     }
 
@@ -483,6 +497,7 @@ impl Nav {
             Menu::Playlists => self.shown.as_ref().map(|_| &self.tracks),
             Menu::Search => Some(&self.search_results),
             Menu::History => Some(&self.history_view),
+            Menu::LocalLibrary => Some(&self.local_view),
         }
     }
 
@@ -493,6 +508,7 @@ impl Nav {
             Menu::Playlists => self.shown.as_ref().map(|_| &mut self.tracks),
             Menu::Search => Some(&mut self.search_results),
             Menu::History => Some(&mut self.history_view),
+            Menu::LocalLibrary => Some(&mut self.local_view),
         }
     }
 
@@ -727,6 +743,7 @@ impl App {
         }
         let index_path = crate::paths::library_index_path();
         self.library = crate::library::index_songs(&crate::library::load_index(&index_path, &dirs));
+        self.refresh_local_view();
         self.library_scanning = true;
         let tx = self.tx.clone();
         std::thread::spawn(move || {
@@ -848,6 +865,7 @@ impl App {
             Menu::Favorites if !self.nav.favorites_loaded => self.reload_favorites(),
             Menu::Playlists if !self.nav.playlists_loaded => self.reload_playlists(),
             Menu::History => self.refresh_history_view(),
+            Menu::LocalLibrary => self.refresh_local_view(),
             _ => {}
         }
     }
@@ -1181,6 +1199,7 @@ impl App {
                 missing_dirs,
             } => {
                 self.library = songs;
+                self.refresh_local_view();
                 self.library_scanning = false;
                 // 通知槽只有一个：坏路径最要紧，其次是有变化，再次是「跳过了 N 首」。
                 if let Some(dir) = missing_dirs.first() {
@@ -1500,6 +1519,12 @@ impl App {
             keys::Action::ToggleLyric => self.show_lyric = !self.show_lyric,
             keys::Action::ToggleSpectrum => self.show_spectrum = !self.show_spectrum,
             keys::Action::LyricsLock => self.overlay.toggle_lock(),
+            // `r` 只在「本地曲库」屏重扫：别的屏按 `r` 没有这个含义。
+            keys::Action::LocalRescan => {
+                if self.nav.menu == Menu::LocalLibrary {
+                    self.start_library_scan();
+                }
+            }
             keys::Action::LyricsWindow => {
                 // 起不来只报一句（状态文件不动：它记的是「你想开着」，再按一次就是重试）。
                 if let Some(error) = self.overlay.toggle(&self.config.desktop_lyrics).1 {
@@ -1722,6 +1747,14 @@ impl App {
             tracing::warn!("写历史失败：{error:#}");
         }
         self.refresh_history_view();
+    }
+
+    /// 把曲库灌进「本地曲库」屏的列表（选中位置留着，跟历史屏同一套做法）。
+    pub(super) fn refresh_local_view(&mut self) {
+        let previous = self.nav.local_view.state.selected();
+        let songs = self.library.clone();
+        self.nav.local_view.set_items(songs);
+        self.nav.local_view.state.select(previous);
     }
 
     /// 历史屏：新在前；每行右侧写「时间 · 来自《来源》」。
@@ -2405,6 +2438,40 @@ mod tests {
         assert_eq!(nav.favorites.state.selected(), Some(0));
         nav.move_selection(1);
         assert_eq!(nav.favorites.state.selected(), Some(1));
+    }
+
+    /// 本地曲库屏：数据来自曲库，切过去**一个请求都不发**；`r` 只在这一屏重扫。
+    #[test]
+    fn the_local_screen_uses_the_library_and_only_r_rescans_there() {
+        let (mut app, _runtime) = test_app();
+        app.library = vec![
+            crate::tui::test_support::local_song("C:/Music/canto/曲终人散.wav"),
+            crate::tui::test_support::local_song("C:/Music/canto/没时长的.wav"),
+        ];
+        app.switch_menu(Menu::LocalLibrary);
+        assert_eq!(app.nav.menu, Menu::LocalLibrary);
+        assert_eq!(app.nav.local_view.visible_rows().count(), 2, "屏里的列表就是曲库");
+        assert!(app.nav.favorites.error.is_none(), "没登录也不该去拉收藏");
+
+        app.config.library.dirs = Some(vec!["C:/不存在的曲库".to_string()]);
+        app.switch_menu(Menu::Favorites);
+        app.apply(keys::Action::LocalRescan);
+        assert!(!app.library_scanning, "别的屏按 `r` 不重扫（那是刷新列表的意思）");
+        app.switch_menu(Menu::LocalLibrary);
+        app.apply(keys::Action::LocalRescan);
+        assert!(app.library_scanning, "本地曲库屏才重扫");
+    }
+
+    /// 曲库扫完/进屏时，屏里那份列表要跟着曲库走。
+    #[test]
+    fn the_local_view_follows_the_library() {
+        let (mut app, _runtime) = test_app();
+        app.library = vec![crate::tui::test_support::local_song("C:/a.wav")];
+        app.refresh_local_view();
+        assert_eq!(app.nav.local_view.visible_rows().count(), 1);
+        app.library.push(crate::tui::test_support::local_song("C:/b.wav"));
+        app.refresh_local_view();
+        assert_eq!(app.nav.local_view.visible_rows().count(), 2);
     }
 
     /// 曲库扫描：有变化才通知、坏路径点名、同时只允许一次、没变化不打扰。

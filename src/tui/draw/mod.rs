@@ -21,7 +21,7 @@ pub mod status;
 use crate::player::Phase;
 
 use super::keys;
-use super::state::{App, Screen};
+use super::state::{App, Menu, Screen};
 
 /// 低于这个高度就不展开歌词栏（矮屏里歌词会把主区挤成一两行）。
 pub const MIN_LYRIC_HEIGHT: u16 = 20;
@@ -122,6 +122,18 @@ impl App {
                 areas.content
             };
             self.draw_spectrum_area(frame, area, &title);
+        } else if self.nav.menu == Menu::LocalLibrary {
+            // 本地曲库：列表来自索引，**不发任何请求**；空曲库给配置引导，扫描中带进度。
+            if self.library.is_empty() {
+                self.draw_empty_library(frame, areas.content);
+            } else {
+                let title = if self.library_scanning {
+                    format!(" 本地曲库 · 扫描中 {} 首 ", self.library.len())
+                } else {
+                    format!(" 本地曲库 · {} 首 ", self.library.len())
+                };
+                self.draw_songs(frame, areas.content, &title);
+            }
         } else if matches!(self.screen, Screen::Home) {
             self.draw_home(frame, areas.content);
         } else {
@@ -631,9 +643,9 @@ mod tests {
             .map(|row| columns_of(row, '┌'))
             .filter(|columns| !columns.is_empty())
             .collect();
-        assert_eq!(tops.len(), 2, "两行格子（4 项 = 3 + 1）：{tops:?}");
+        assert_eq!(tops.len(), 2, "两行格子（5 项 = 3 + 2）：{tops:?}");
         assert_eq!(tops[0].len(), 3, "第 1 行三格：{tops:?}");
-        assert_eq!(tops[1].len(), 1, "第 2 行一格：{tops:?}");
+        assert_eq!(tops[1].len(), 2, "第 2 行两格：{tops:?}");
         assert_eq!(tops[0][1] - tops[0][0], tops[0][2] - tops[0][1], "列距要一致：{tops:?}");
         assert_eq!(tops[1][0], tops[0][0], "换行那一格对齐第 1 列：{tops:?}");
     }
@@ -862,6 +874,34 @@ mod tests {
             rows.iter().any(|row| row.starts_with("┌频谱")),
             "频谱区拿到整个内容区：{rows:?}"
         );
+    }
+
+    /// 本地曲库屏：列曲目（体积 `—`、时长未知 `--:--`）、空曲库给配置引导、首页第五格。
+    #[test]
+    fn the_local_library_screen_lists_files_and_explains_an_empty_one() {
+        let (mut app, _runtime) = test_app();
+        app.engine.force_phase(crate::player::Phase::Playing);
+        app.library = vec![
+            crate::tui::test_support::local_song("C:/Music/canto/曲终人散.wav"),
+            crate::tui::test_support::local_song("C:/Music/canto/没时长的.wav"),
+        ];
+        app.refresh_local_view();
+        app.switch_menu(crate::tui::state::Menu::LocalLibrary);
+        let text = frame_text(&mut app, 140, 40);
+        assert!(text.contains("曲终人散") && text.contains("没时长的"), "{text}");
+        assert!(text.contains("--:--"), "读不出时长就是 --:--：{text}");
+        assert!(!text.contains("MB"), "本地曲目没有体积列：{text}");
+
+        app.library.clear();
+        app.refresh_local_view();
+        let empty = frame_text(&mut app, 140, 40);
+        assert!(
+            empty.contains("[library]") && empty.contains("dirs"),
+            "空曲库要说清去哪儿加目录：{empty}"
+        );
+
+        app.go_home();
+        assert!(frame_text(&mut app, 140, 40).contains("本地曲库"), "首页第五格");
     }
 
     /// 没有歌词也画歌词栏：还在拉写「歌词加载中…」，拉完没有写「暂无歌词」。

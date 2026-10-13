@@ -68,6 +68,8 @@ pub enum Action {
     InputBackspace,
     /// 全局热键 `lock`：切桌面歌词的锁定/解锁（界面上没有对应按键）。
     LyricsLock,
+    /// 本地曲库屏的 `r`：重扫曲库（把索引丢了重来）。
+    LocalRescan,
     /// 全局热键 `lyrics`：开 / 关桌面歌词窗口——关掉是把窗口**拆了**（不是藏起来），
     /// 状态记在 `desktop-lyrics.json`（界面上没有对应按键）。
     LyricsWindow,
@@ -165,7 +167,7 @@ pub fn resolve(context: Context, key: KeyEvent) -> Option<Action> {
             KeyCode::Char('G') | KeyCode::End => Some(Action::Last),
             KeyCode::Enter => Some(Action::Enter),
             KeyCode::Char('0') => Some(Action::Home),
-            KeyCode::Char(digit @ '1'..='4') => Some(Action::Menu(digit as usize - '1' as usize)),
+            KeyCode::Char(digit @ '1'..='5') => Some(Action::Menu(digit as usize - '1' as usize)),
             // 播放控制跟主界面同一套键（含 `h`/`l`、`.`/`,` 这两个拼法）。
             KeyCode::Char(' ') => Some(Action::PlayPause),
             KeyCode::Char('n') => Some(Action::Next),
@@ -192,7 +194,7 @@ fn common(key: KeyEvent) -> Option<Action> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         // 数字键切屏——菜单栏去掉后这是唯一的切屏入口，帮助浮层里有这张表。
-        KeyCode::Char(digit @ '1'..='4') => Some(Action::Menu(digit as usize - '1' as usize)),
+        KeyCode::Char(digit @ '1'..='5') => Some(Action::Menu(digit as usize - '1' as usize)),
         // `0` = 回首页（跟四屏同一套编号；首页自己也是 `0`）。
         KeyCode::Char('0') => Some(Action::Home),
         KeyCode::Char('q') => Some(Action::Quit),
@@ -229,6 +231,8 @@ fn common(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('v') => Some(Action::ToggleSpectrum),
         // `/` 筛当前列表；搜索屏有自己的入口（菜单第 3 项）。
         KeyCode::Char('/') => Some(Action::Filter),
+        // `r` 在「本地曲库」屏是重扫曲库（别的屏按了没反应，见 `state.rs` 的分岔）。
+        KeyCode::Char('r') => Some(Action::LocalRescan),
         // 可能有上一层（「我的歌单 › 某歌单」）：Esc 一层层退。
         KeyCode::Esc | KeyCode::Backspace => Some(Action::Back),
         _ => None,
@@ -390,6 +394,7 @@ mod tests {
             (KeyCode::Char('0'), Action::Home),
             (KeyCode::Char('1'), Action::Menu(0)),
             (KeyCode::Char('4'), Action::Menu(3)),
+            (KeyCode::Char('5'), Action::Menu(4)),
             (KeyCode::Char(' '), Action::PlayPause),
             (KeyCode::Char('n'), Action::Next),
             (KeyCode::Char('b'), Action::Prev),
@@ -484,7 +489,9 @@ mod tests {
         assert_eq!(press(Context::Content, KeyCode::Char('1')), Some(Action::Menu(0)));
         assert_eq!(press(Context::Content, KeyCode::Char('3')), Some(Action::Menu(2)));
         assert_eq!(press(Context::Content, KeyCode::Char('4')), Some(Action::Menu(3)));
-        assert_eq!(press(Context::Content, KeyCode::Char('5')), None, "只有四项");
+        assert_eq!(press(Context::Content, KeyCode::Char('5')), Some(Action::Menu(4)));
+        assert_eq!(press(Context::Content, KeyCode::Char('6')), None, "只有五项");
+        assert_eq!(press(Context::Content, KeyCode::Char('r')), Some(Action::LocalRescan));
     }
 
     #[test]

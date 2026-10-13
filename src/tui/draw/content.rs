@@ -92,6 +92,11 @@ impl App {
                 self.nav.tracks.items().len(),
                 "首",
             ),
+            (Menu::LocalLibrary, _) => (
+                self.nav.menu.title().to_string(),
+                self.nav.local_view.items().len(),
+                "首",
+            ),
             (Menu::Playlists, false) => (
                 self.nav.menu.title().to_string(),
                 self.nav.playlists.items().len(),
@@ -168,6 +173,15 @@ impl App {
         self.nav.song_view_mut().state = state;
     }
 
+    /// 空曲库：说清去哪儿加目录（不是一片空白）。
+    pub(super) fn draw_empty_library(&self, frame: &mut Frame, area: Rect) {
+        let text = Line::from(vec![
+            Span::styled("曲库是空的", Style::new().fg(Color::Yellow)),
+            Span::raw("：在 config.toml 的 [library] dirs 里加目录，再按 r 重扫"),
+        ]);
+        frame.render_widget(Paragraph::new(text).block(panel_block(" 本地曲库 ")), area);
+    }
+
     /// 曲目列表：所有「装着一堆歌」的屏共用（收藏 / 歌单曲目 / 搜索）。
     pub(super) fn draw_songs(&mut self, frame: &mut Frame, area: Rect, title: &str) {
         let playing = self.now_playing_mid();
@@ -190,9 +204,14 @@ impl App {
                     Some((cached, bytes)) => (*cached, Some(*bytes)),
                     None => song.sizes.at_or_below(want),
                 };
+                // 本地曲目读不出时长时写 `--:--`（`00:00` 会让人以为它真是零秒）。
+                let duration = if song.is_local() && song.duration_secs == 0 {
+                    "--:--".to_string()
+                } else {
+                    format_duration(StdDuration::from_secs(song.duration_secs))
+                };
                 let mut line = vec![Span::raw(format!(
-                    "{marker} {:>5}  {:<9} {:>7}  ",
-                    format_duration(StdDuration::from_secs(song.duration_secs)),
+                    "{marker} {duration:>5}  {:<9} {:>7}  ",
                     quality.label(),
                     size.map_or_else(|| "—".to_string(), format_size),
                 ))];

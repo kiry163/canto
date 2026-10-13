@@ -130,6 +130,8 @@ fn help_rows(screen: Option<Menu>, hotkeys: &HotkeyConfig) -> Vec<Row> {
         let (title, section): (&'static str, Vec<Row>) = match menu {
             // 收藏屏没有专属键：`j`/`k` 选曲目、`/` 筛选都是所有列表共有的。
             Menu::Favorites => ("", Vec::new()),
+            // 本地曲库也没有屏专属段：`Enter`/`a`/`A`/`r` 已经在下面「歌曲」那一段里。
+            Menu::LocalLibrary => ("", Vec::new()),
             Menu::Playlists => (
                 "歌单",
                 vec![
@@ -182,7 +184,15 @@ fn help_rows(screen: Option<Menu>, hotkeys: &HotkeyConfig) -> Vec<Row> {
         Row::Keys { keys: "← / →", help: "后退 / 前进 10 秒" },
         Row::Keys { keys: "+ / -", help: "音量 ±5%" },
     ]);
-    if list {
+    // 本地曲库屏：曲目那一套少一半——本地歌没有 QQ 身份，`d`/`p`/`x` 不绑，别许诺。
+    if matches!(screen, Some(Menu::LocalLibrary)) {
+        rows.extend([
+            Row::Section("歌曲"),
+            Row::Keys { keys: "Enter", help: "播放选中" },
+            Row::Keys { keys: "a / A", help: "追加到队尾 / 插到下一首" },
+            Row::Keys { keys: "r", help: "重扫曲库" },
+        ]);
+    } else if list {
         rows.extend([
             Row::Section("歌曲"),
             Row::Keys { keys: "Enter", help: "播放选中" },
@@ -332,6 +342,23 @@ mod tests {
         assert_eq!(pretty("cmd+q"), "Cmd+Q");
         assert_eq!(pretty("mediaplaypause"), "Mediaplaypause", "认不出的词只首字母大写，不丢信息");
         assert_eq!(pretty(""), "", "空串不该进表，但也不该炸");
+    }
+
+    /// 本地曲库屏的帮助：列 `r`，不列 QQ 专有的 `d`/`p`/`x`（本地歌没有 QQ 身份）。
+    #[test]
+    fn the_local_screen_help_omits_qq_only_keys() {
+        let rows = help_rows(
+            Some(crate::tui::state::Menu::LocalLibrary),
+            &HotkeyConfig::default(),
+        );
+        let cells: Vec<(&str, &str)> = rows.iter().filter_map(Row::cells).collect();
+        assert!(cells.iter().any(|(keys, _)| *keys == "r"), "{cells:?}");
+        for dead in ["d", "p", "x"] {
+            assert!(
+                !cells.iter().any(|(keys, _)| *keys == dead),
+                "本地屏不绑 `{dead}`：{cells:?}"
+            );
+        }
     }
 
     /// 表就是「左键右述」两列：分组标题没有键列，键行两边都有。

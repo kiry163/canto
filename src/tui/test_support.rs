@@ -81,6 +81,20 @@ pub(super) fn temp_library_tree(name: &str) -> std::path::PathBuf {
     root
 }
 
+/// 一首本地曲目（路径固定造，标题给得出来就行）。
+pub(super) fn local_song(path: &str) -> Song {
+    let mut song = test_song("");
+    song.source = crate::model::Source::Local(std::path::PathBuf::from(path));
+    song.mid = crate::model::local_mid(std::path::Path::new(path));
+    song.title = std::path::Path::new(path)
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    song.singers = "张宇".to_string();
+    song.sizes = FileSizes::default();
+    song
+}
+
 /// 指定标题与歌手的曲目：筛选要按这两个字段命中，`test_song` 那套固定文案测不出来。
 pub(super) fn titled_song(mid: &str, title: &str, singers: &str) -> Song {
     let mut song = test_song(mid);
