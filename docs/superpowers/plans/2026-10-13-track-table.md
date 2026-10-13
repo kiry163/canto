@@ -175,7 +175,9 @@ Run: `cargo test --locked rows::tests` —— 预期编译失败（没有 `rows`
 
 - [ ] **Step 3: 写实现**
 
-`src/tui/draw/rows.rs` 头部（真源在 spec §1）：
+`src/tui/draw/rows.rs` 头部（真源在 spec §1）。**实施记录（2026-10-13）**：`rows.rs` 的两批类型
+要到 Task 7/9/10 才有生产消费者，在此之前只有单测在用，所以模块顶部加了一行
+`#![allow(dead_code)]`（带注释指明来由，与 `paths.rs:108` 同一套口径）——**Task 10 落地时摘掉**：
 
 ```rust
 //! 曲目列表的列模型：一处声明列，一处画表头，一处画行。
@@ -1719,6 +1721,11 @@ Run: `cargo test --locked draw::tests::the_queue_overlay_has_a_header`
 
 Run: `cargo test --locked draw::tests` —— 预期全过；`the_queue_overlay_draws_the_highlight_on_the_selected_row`
 （`draw/mod.rs:1173-1191`）会因为多了一行而需要重算期望，按原判据（`▶` 落在两行之间）核对后调整。
+
+- [ ] **Step 4b: 摘掉 `rows.rs` 顶部那行 `#![allow(dead_code)]`**
+
+到这一步 `rows.rs` 的东西全都有生产消费者了（`fit`/`header`/`line`/`group`/各列集都在三处绘制里用上）。
+删掉那两行注释 + 属性，跑 `cargo clippy --all-targets --locked -- -D warnings` 确认没有 dead_code 残留。
 
 - [ ] **Step 5: Commit**
 

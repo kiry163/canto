@@ -15,6 +15,7 @@ pub mod home;
 pub mod lyric;
 pub mod overlay;
 pub mod player;
+pub mod rows;
 pub mod spectrum;
 pub mod status;
 
