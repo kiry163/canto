@@ -844,6 +844,16 @@ git commit -m "feat(model): Song 带上本地文件字节数(曲库扫描本来�
 
 （`song(title, singers)` 是 `download.rs` 测试里现成的辅助，见 `src/download.rs:204`。）
 
+> **实施记录（2026-10-13）**：四处按实情调整——
+> ① 临时目录名从 `canto-dl-{pid}` 改成 `canto-dl-scan-{pid}`：**既有的**
+>    `lyrics_land_in_their_own_directory`（`download.rs:297`）已经占了 `canto-dl-{pid}`，
+>    并行跑会互相清目录（第一次跑就红了，正是这个原因）；
+> ② 假文件用 44 KB / 314 KB，不写 4.4 MB / 31 MB——排序只看「容器 > 体积」，没必要每次测试
+>    往临时目录写 35 MB；
+> ③ `"半截".as_bytes()` 而不是 `b"半截"`（字节串字面量只能放 ASCII）；
+> ④ `scan_downloads` 挂了一行 `#[allow(dead_code)]` + 「Task 5 接上就摘掉」的注释（与
+>    `paths.rs:108` 同一套口径）——CI 的门槛是 `-D warnings`，没有消费者时这一行是必须的。
+
 - [ ] **Step 2: 跑测试确认失败**
 
 Run: `cargo test --locked download::tests::scan_downloads_keeps_the_highest_copy_and_skips_parts`
