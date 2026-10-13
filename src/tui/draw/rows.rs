@@ -10,6 +10,15 @@
 // 先压住 dead_code，Task 10 落地时摘掉这一行。
 #![allow(dead_code)]
 
+use std::borrow::Cow;
+
+use ratatui::layout::Rect;
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthStr;
+
+use super::truncate_to_cols;
+
 /// 一列读哪个字段。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Field {
@@ -177,6 +186,130 @@ pub(super) fn queue_columns() -> Vec<Column> {
     ]
 }
 
+/// 一行的全部可用数据：屏各自填能填的，填不出的留 `None`（那一格写占位符）。
+pub(super) struct Row<'a> {
+    pub playing: bool,
+    pub title: &'a str,
+    pub singers: &'a str,
+    /// 秒；`None` = 不知道 → `--:--`。
+    pub duration: Option<u64>,
+    /// 音质或容器；`None` → `—`。
+    pub tier: Option<Cow<'a, str>>,
+    /// 字节；`None` → `—`。
+    pub size: Option<u64>,
+    pub cached: bool,
+    pub downloaded: bool,
+    pub note: Option<&'a str>,
+}
+
+/// 表头那一行（`DarkGray`；对齐规则跟数据一致，所以「时长」这些标题也在它对的那一列上）。
+pub(super) fn header(columns: &[Column], indent: u16) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ".repeat(indent as usize))];
+    for (order, column) in columns.iter().enumerate() {
+        if order > 0 {
+            spans.push(Span::raw(" "));
+        }
+        spans.push(Span::raw(pad(column.title, cell_width(column), column.align)));
+    }
+    Line::from(spans).style(Style::new().fg(Color::DarkGray))
+}
+
+/// 一行数据。
+///
+/// 返回**拥有数据**的 `Line<'static>`：三处绘制函数是「建 items → `mem::take(&mut …state)`
+/// → 渲染」的顺序，行若借着 `self.nav` 里的歌单就会与 `&mut` 撞上。
+pub(super) fn line<'a>(columns: &[Column], row: &Row<'a>, indent: u16) -> Line<'static> {
+    let mut spans = vec![Span::raw(" ".repeat(indent as usize))];
+    for (order, column) in columns.iter().enumerate() {
+        if order > 0 {
+            spans.push(Span::raw(" "));
+        }
+        spans.push(cell(column, row, cell_width(column)));
+    }
+    Line::from(spans)
+}
+
+/// 一格：取值 → 截断/补齐 → 上色。每格自己拥有那几个字符（就几列宽，拷贝很便宜）。
+fn cell(column: &Column, row: &Row<'_>, width: usize) -> Span<'static> {
+    match column.field {
+        Field::Marker => Span::raw(if row.playing { "♪" } else { " " }.to_string()),
+        Field::Title => Span::raw(clip(row.title, width)),
+        Field::Singers => Span::raw(clip(row.singers, width)),
+        Field::Duration => {
+            let text = row.duration.map_or_else(
+                || "--:--".to_string(),
+                |secs| super::format_duration(std::time::Duration::from_secs(secs)),
+            );
+            Span::raw(pad_owned(text, width, Align::Right))
+        }
+        Field::Tier => Span::raw(
+            row.tier
+                .as_deref()
+                .map_or_else(|| "—".to_string(), |tier| clip(tier, width)),
+        ),
+        Field::Size => {
+            let text = row.size.map_or_else(|| "—".to_string(), super::format_size);
+            Span::raw(pad_owned(text, width, Align::Right))
+        }
+        Field::Cached => Span::styled(
+            pad(if row.cached { "●" } else { " " }, width, Align::Center),
+            Style::new().fg(Color::Green),
+        ),
+        Field::Downloaded => Span::styled(
+            pad(if row.downloaded { "↓" } else { " " }, width, Align::Center),
+            Style::new().fg(Color::Cyan),
+        ),
+        Field::Note => Span::styled(
+            row.note.map_or_else(String::new, |note| clip(note, width)),
+            Style::new().fg(Color::DarkGray),
+        ),
+    }
+}
+
+/// 一列在 `fit` 之后是多宽（`Fill` 已经变成 `Fixed`，这里兜住还没 fit 的调用）。
+fn cell_width(column: &Column) -> usize {
+    let width = match column.width {
+        Width::Fixed(width) => width,
+        Width::Fill { min } => min,
+    };
+    width as usize
+}
+
+/// 截断到 `width` 个显示列（超长补 `…`），再补齐到 `width`。
+fn clip(text: &str, width: usize) -> String {
+    pad_owned(truncate_to_cols(text, width as u16).into_owned(), width, Align::Left)
+}
+
+/// 补齐到 `width` 个显示列（中文双宽）。超宽先用 `…` 截断。
+fn pad(text: &str, width: usize, align: Align) -> String {
+    pad_owned(truncate_to_cols(text, width as u16).into_owned(), width, align)
+}
+
+/// 按显示宽度补齐（左边/右边补空格）。
+fn pad_owned(text: String, width: usize, align: Align) -> String {
+    let used = text.width();
+    let slack = width.saturating_sub(used);
+    let (left, right) = match align {
+        Align::Left => (0, slack),
+        Align::Right => (slack, 0),
+        Align::Center => (slack / 2, slack - slack / 2),
+    };
+    format!("{}{}{}", " ".repeat(left), text, " ".repeat(right))
+}
+
+/// 在列表块**内部**切出表头那一行。够高才切（见 [`MIN_FOR_HEADER`]）。
+///
+/// 块的边框由调用方先画（拿 `Block::inner(area)` 之后再调这里），所以表头落在框里、不是框外。
+pub(super) fn group(inner: Rect) -> (Option<Rect>, Rect) {
+    if inner.height >= MIN_FOR_HEADER {
+        let head = Rect { height: 1, ..inner };
+        let list = Rect { y: inner.y + 1, height: inner.height - 1, ..inner };
+        (Some(head), list)
+    } else {
+        (None, inner)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,5 +454,152 @@ mod tests {
                 Field::Downloaded
             ]
         );
+    }
+
+    /// 把一行拼成字符串（这些断言只看内容与列位，不看样式）。
+    fn render(line: &Line<'_>) -> String {
+        line.spans.iter().map(|span| span.content.as_ref()).collect()
+    }
+
+    /// 拼好的一行里，`needle` 从第几**显示列**开始（宽字符按两列算）。
+    ///
+    /// 不能拿 `str::find` 的字节偏移直接比两行：中文一个字三字节，两行前缀宽度不同时
+    /// 字节偏移会骗人，而显示列才是眼睛看到的那个。
+    fn at_column(text: &str, needle: &str) -> usize {
+        let at = text.find(needle).expect("这一格应该在");
+        UnicodeWidthStr::width(&text[..at])
+    }
+
+    /// 表头与数据落在同一批列区间里：两行显示宽度一样，左对齐比起点、右对齐比终点、
+    /// 居中允许一个字符的居中余数差。
+    #[test]
+    fn the_header_lines_up_with_the_row() {
+        let columns = fit(&history_columns(), 60);
+        let head = render(&header(&columns, INDENT));
+        let row = render(&line(
+            &columns,
+            &Row {
+                playing: true,
+                title: "成全",
+                singers: "刘若英",
+                duration: Some(276),
+                tier: Some("MP3 128k".into()),
+                size: Some(4_400_000),
+                cached: true,
+                downloaded: true,
+                note: None,
+            },
+            INDENT,
+        ));
+        // 两行一样宽，且正好是「缩进 + 这批列要占的列数」。
+        let expected = INDENT as usize + total(&columns) as usize;
+        assert_eq!(UnicodeWidthStr::width(head.as_str()), expected, "{head:?}");
+        assert_eq!(UnicodeWidthStr::width(row.as_str()), expected, "{row:?}");
+
+        let width_of_text = |text: &str| UnicodeWidthStr::width(text);
+        for (field, needle, value) in [
+            (Field::Title, "标题", "成全"),
+            (Field::Singers, "歌手", "刘若英"),
+            (Field::Duration, "时长", "04:36"),
+            (Field::Tier, "音质", "MP3 128k"),
+            (Field::Size, "体积", "4.2MB"),
+            (Field::Cached, "缓存", "●"),
+            (Field::Downloaded, "下载", "↓"),
+        ] {
+            let column = *columns
+                .iter()
+                .find(|column| column.field == field)
+                .expect("这一列应该在");
+            let (head_at, value_at) = (at_column(&head, needle), at_column(&row, value));
+            match column.align {
+                Align::Left => assert_eq!(
+                    head_at, value_at,
+                    "左对齐的列起点要一样（{needle}）：\n{head:?}\n{row:?}"
+                ),
+                Align::Right => assert_eq!(
+                    head_at + width_of_text(needle),
+                    value_at + width_of_text(value),
+                    "右对齐的列终点要一样（{needle}）：\n{head:?}\n{row:?}"
+                ),
+                // 居中：表头是两字标题、数据是一个符号，居中余数可以差 1 列。
+                Align::Center => assert!(
+                    head_at.abs_diff(value_at) <= 1,
+                    "居中列不该偏出 1 列（{needle}）：\n{head:?}\n{row:?}"
+                ),
+            }
+        }
+    }
+
+    /// 超长按**显示宽度**截断 + `…`：标题长短不许把后面的列挤动。
+    #[test]
+    fn a_long_title_is_cut_by_display_width() {
+        let columns = fit(&track_columns(), 60);
+        let build = |title: &str| {
+            render(&line(
+                &columns,
+                &Row {
+                    playing: false,
+                    title,
+                    singers: "周杰伦",
+                    duration: Some(61),
+                    tier: Some("FLAC".into()),
+                    size: None,
+                    cached: false,
+                    downloaded: false,
+                    note: None,
+                },
+                INDENT,
+            ))
+        };
+        let long = build("一二三四五六七八九十十一十二十三");
+        let short = build("短");
+        assert!(long.contains('…'), "超长要补省略号：{long:?}");
+        assert_eq!(
+            at_column(&long, "01:01"),
+            at_column(&short, "01:01"),
+            "标题长短不许把后面的列挤动：\n{long:?}\n{short:?}"
+        );
+        assert_eq!(
+            UnicodeWidthStr::width(long.as_str()),
+            UnicodeWidthStr::width(short.as_str()),
+            "两行的显示宽度要一样"
+        );
+        assert!(short.contains('—'), "体积未知写 `—`");
+    }
+
+    /// 不知道的字段写占位符，不写假的 0。
+    #[test]
+    fn unknown_values_use_placeholders() {
+        let columns = fit(&local_columns(), 80);
+        let text = render(&line(
+            &columns,
+            &Row {
+                playing: false,
+                title: "没时长的",
+                singers: "",
+                duration: None,
+                tier: None,
+                size: None,
+                cached: false,
+                downloaded: false,
+                note: None,
+            },
+            INDENT,
+        ));
+        assert!(text.contains("--:--"), "时长未知：{text:?}");
+        assert!(text.contains('—'), "音质/体积未知：{text:?}");
+        assert!(!text.contains("00:00"), "不许写假的 00:00：{text:?}");
+    }
+
+    /// 矮屏不切表头，够高才切一行。
+    #[test]
+    fn the_header_is_only_cut_when_there_is_room() {
+        let tall = Rect::new(0, 0, 60, 10);
+        let (head, list) = group(tall);
+        assert_eq!(head, Some(Rect::new(0, 0, 60, 1)));
+        assert_eq!(list, Rect::new(0, 1, 60, 9));
+
+        let short = Rect::new(0, 0, 60, MIN_FOR_HEADER - 1);
+        assert_eq!(group(short), (None, short), "矮屏把那一行还给数据");
     }
 }

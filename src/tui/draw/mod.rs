@@ -3,12 +3,14 @@
 //! 骨架（内容区 / 歌词 / 播放条 / 状态行）、断点与共用的小工具都在这里；
 //! 各面板自己的画法在子模块里。状态与按键在 [`super::state`]。
 
+use std::borrow::Cow;
 use std::time::Duration as StdDuration;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::Block;
+use unicode_width::UnicodeWidthStr;
 
 pub mod content;
 pub mod home;
@@ -242,6 +244,30 @@ fn format_duration(duration: StdDuration) -> String {
     } else {
         format!("{minutes:02}:{seconds:02}")
     }
+}
+
+/// 按**显示宽度**截断（中文、书名号都是双宽），超出就用省略号收尾。
+///
+/// 固定列宽下必须截：整条画不完时至少让人看出「被裁了」，而不是话说到一半。
+/// 状态行的通知位（`status.rs`）与曲目列表的列模型（`rows.rs`）都用它。
+pub(super) fn truncate_to_cols(text: &str, cols: u16) -> Cow<'_, str> {
+    let cols = cols as usize;
+    if text.width() <= cols {
+        return Cow::Borrowed(text);
+    }
+    let mut kept = String::new();
+    let mut used = 0;
+    for character in text.chars() {
+        // 留一列给省略号本身。
+        let width = unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
+        if used + width > cols.saturating_sub(1) {
+            break;
+        }
+        kept.push(character);
+        used += width;
+    }
+    kept.push('…');
+    Cow::Owned(kept)
 }
 
 /// 频谱区没数据可画时那句话。缓冲与「没在播」要分开报——前者等一会儿就有了。
