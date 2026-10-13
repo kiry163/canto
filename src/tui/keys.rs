@@ -196,7 +196,7 @@ fn common(key: KeyEvent) -> Option<Action> {
         // `0` = 回首页（跟四屏同一套编号；首页自己也是 `0`）。
         KeyCode::Char('0') => Some(Action::Home),
         KeyCode::Char('q') => Some(Action::Quit),
-        // 登出：从帮助浮层里挪出来，主界面（含全屏视图）也能按。模态浮层另算——
+        // 登出：从帮助浮层里挪出来，主界面（含频谱区开着时）也能按。模态浮层另算——
         // 它们开着时是「一个小编辑器」，仍然吞键（见各自的 match）。
         KeyCode::Char('L') => Some(Action::Logout),
         KeyCode::Char('?') | KeyCode::F(1) => Some(Action::Help),

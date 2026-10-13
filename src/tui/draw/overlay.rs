@@ -171,7 +171,8 @@ fn help_rows(screen: Option<Menu>, hotkeys: &HotkeyConfig) -> Vec<Row> {
         rows.push(Row::Keys { keys: "/", help: "筛选当前列表" });
     }
     rows.extend([
-        Row::Keys { keys: "Y", help: "全屏：歌词 + 频谱" },
+        Row::Keys { keys: "y", help: "歌词栏开 / 关" },
+        Row::Keys { keys: "v", help: "频谱区开 / 关" },
         Row::Keys { keys: "?", help: "帮助" },
         Row::Keys { keys: "L", help: "登出（清空本地会话）" },
         Row::Keys { keys: "q", help: "退出" },
@@ -343,6 +344,12 @@ mod tests {
         assert!(cells.contains(&("?", "帮助")), "{cells:?}");
         assert!(cells.contains(&("Space", "播放 / 暂停")), "{cells:?}");
         assert!(cells.contains(&("L", "登出（清空本地会话）")), "登出是全局键：{cells:?}");
+        assert!(cells.contains(&("y", "歌词栏开 / 关")), "{cells:?}");
+        assert!(cells.contains(&("v", "频谱区开 / 关")), "{cells:?}");
+        assert!(
+            !cells.iter().any(|(_, help)| help.contains("全屏")),
+            "「全屏」这个模式没了：{cells:?}"
+        );
         // 方向键也在表里（它们跟 `j`/`k` 是同一件事的两种按法）。
         assert!(cells.contains(&("j / k、↑ / ↓", "选曲目")), "{cells:?}");
         assert!(cells.contains(&("PgUp / PgDn", "翻页（Ctrl+U / Ctrl+D）")), "{cells:?}");

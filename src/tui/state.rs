@@ -1788,8 +1788,8 @@ impl App {
 
     /// 频谱是不是正在动——界面刷新据此把间隔提到 ~30fps。
     ///
-    /// 只在全屏视图开着**且**正在播时为真：别的屏不显示频谱（不提速），暂停时那几格
-    /// 不会动（也不需要重绘）。全屏视图能从首页或四屏开出来（登录屏不算：那儿的
+    /// 只在频谱区开着**且**正在播时为真：别的屏不显示频谱（不提速），暂停时那几格
+    /// 不会动（也不需要重绘）。频谱区能从首页或四屏开出来（登录屏不算：那儿的
     /// `screen` 不是这两个，正好被挡掉）。
     pub(super) fn spectrum_animating(&self) -> bool {
         self.spectrum_wanted() && matches!(self.screen, Screen::Main | Screen::Home)
@@ -1858,7 +1858,7 @@ impl App {
         {
             tracing::warn!("写歌词窗口状态失败：{error:#}");
         }
-        // 频谱：只在全屏视图开着且正在播时取，别的屏不付这份算力。
+        // 频谱：只在频谱区开着且正在播时取，别的屏不付这份算力。
         let now = std::time::Instant::now();
         // 通知到点自己消失（`notice_seconds = 0` 表示不消失）。
         self.expire(now);

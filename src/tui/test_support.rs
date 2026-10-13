@@ -38,7 +38,7 @@ pub(super) fn test_app() -> (App, tokio::runtime::Runtime) {
     (app, runtime)
 }
 
-/// 三句歌词，各隔 10 秒（绘制歌词面板 / 全屏用得上）。
+/// 三句歌词，各隔 10 秒（绘制歌词栏 / 频谱区分栏用得上）。
 pub(super) fn test_lyric() -> crate::model::Lyric {
     crate::model::Lyric {
         lines: (0..3)

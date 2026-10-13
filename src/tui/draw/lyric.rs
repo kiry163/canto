@@ -1,6 +1,6 @@
 //! 歌词：当前行**居中**高亮，翻译跟在本行下面。
 //!
-//! 两种画法共用这一份：底部那一块（`y`）与全屏（`Y`，占满内容区，播放条与状态行不动）。
+//! 只有一种画法：内容区底部那一条**歌词栏**（`y` 开 / 关）。
 //!
 //! 滚动位置是自己算的（见 [`lyric_rows`] / [`centered_scroll`]），没交给 `List` 的
 //! 「自动保可见」——那个只在选中行撞到边缘时才滚，当前行永远贴在下沿，不是居中。
@@ -41,7 +41,7 @@ fn centered_scroll(rows_before: usize, span: usize, total_rows: usize, height: u
     rows_before.saturating_sub(half).min(total_rows - height)
 }
 
-/// 歌词块左上角的标题：底部那块与全屏**完全同一句**「歌词 · 歌名」。
+/// 歌词栏左上角的标题：**只有一句**「歌词 · 歌名」。
 ///
 /// 不写歌词行数（只有调试才关心的数字），也不写「按什么键退出」之类的操作提示
 /// ——操作提示统一放底部状态行，标题只报「这是什么」。
@@ -92,7 +92,7 @@ fn lyric_rows(lyric: &Lyric, position: Duration, height: usize) -> (Vec<LyricRow
 }
 
 impl App {
-    /// 画歌词：底部那一块与全屏（占满内容区）用的是同一份渲染，只是地方不同。
+    /// 画歌词栏：内容区最下面那一条。
     pub(super) fn draw_lyric(&self, frame: &mut Frame, area: Rect) {
         let title = lyric_title(self.engine.snapshot().title.as_deref());
         let block = Block::bordered().title(title);

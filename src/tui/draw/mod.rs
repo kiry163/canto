@@ -23,12 +23,12 @@ use crate::player::Phase;
 use super::keys;
 use super::state::{App, Screen};
 
-/// 低于这个高度就不展开歌词块（矮屏里歌词会把主区挤成一两行）。
+/// 低于这个高度就不展开歌词栏（矮屏里歌词会把主区挤成一两行）。
 pub const MIN_LYRIC_HEIGHT: u16 = 20;
 /// 窗口小于这个尺寸就只画一行提示。
 pub const MIN_WIDTH: u16 = 60;
 pub const MIN_HEIGHT: u16 = 15;
-/// 歌词块高度上限（行）。
+/// 歌词栏高度上限（行）。
 pub const MAX_LYRIC_HEIGHT: u16 = 12;
 
 /// 骨架切出来的几块。
@@ -39,9 +39,9 @@ pub struct Areas {
     pub status: Rect,
 }
 
-/// 切骨架。`lyric_wanted` 由调用方判断（有没有在放 + 歌词拿没拿到 + 面板开没开）。
+/// 切骨架。`lyric_wanted` 由调用方判断（有没有在放 + 歌词栏开没开）。
 ///
-/// 菜单栏去掉后左右只有一列，宽度不再是变量：内容区吃满全宽，歌词块在最下面。
+/// 菜单栏去掉后左右只有一列，宽度不再是变量：内容区吃满全宽，歌词栏在最下面。
 pub fn layout(area: Rect, lyric_wanted: bool) -> Areas {
     let rows = Layout::vertical([
         Constraint::Min(3),
@@ -213,7 +213,7 @@ fn format_duration(duration: StdDuration) -> String {
     }
 }
 
-/// 频谱块没数据可画时那句话。缓冲与「没在播」要分开报——前者等一会儿就有了。
+/// 频谱区没数据可画时那句话。缓冲与「没在播」要分开报——前者等一会儿就有了。
 fn spectrum_message(phase: &Phase) -> &'static str {
     match phase {
         Phase::Buffering => "缓冲中…",
@@ -222,11 +222,11 @@ fn spectrum_message(phase: &Phase) -> &'static str {
     }
 }
 
-/// 拆两半时频谱块的标题：歌名在下方的「歌词 · 歌名」里已经出现一次，这里只报
+/// 拆两半时频谱区的标题：歌名在下方的「歌词 · 歌名」里已经出现一次，这里只报
 /// 「频谱」——标题只报「这是什么」。
 const SPLIT_TITLE: &str = " 频谱 ";
 
-/// 整块归频谱时的标题：歌名得带上，因为下方没有歌词块了。
+/// 整块归频谱时的标题：歌名得带上，因为下方没有歌词栏了。
 fn spectrum_title(song: Option<&str>) -> String {
     match song.filter(|song| !song.is_empty()) {
         Some(song) => format!(" 频谱 · {song} "),
@@ -382,27 +382,27 @@ mod tests {
         assert!(text.contains("我的收藏"), "当前屏写在内容块标题里：{text}");
     }
 
-    /// 歌词块只在「要它 + 屏幕够高」时占位，否则主区吃满。
+    /// 歌词栏只在「要它 + 屏幕够高」时占位，否则主区吃满。
     #[test]
     fn lyric_block_takes_space_only_when_asked_and_tall_enough() {
         let wide = layout(Rect::new(0, 0, 160, 40), true);
-        let lyric = wide.lyric.expect("宽屏且要歌词时该有歌词块");
+        let lyric = wide.lyric.expect("宽屏且要歌词时该有歌词栏");
         assert!(
             (5..=MAX_LYRIC_HEIGHT).contains(&lyric.height),
-            "歌词块高度 {} 越界",
+            "歌词栏高度 {} 越界",
             lyric.height
         );
         assert!(layout(Rect::new(0, 0, 160, 40), false).lyric.is_none(), "不要就不占");
         assert!(
             layout(Rect::new(0, 0, 160, 18), true).lyric.is_none(),
-            "矮屏不展开歌词块"
+            "矮屏不展开歌词栏"
         );
         let without = layout(Rect::new(0, 0, 160, 40), false);
         assert!(
             wide.content.height < without.content.height,
-            "歌词块是从主区下方拿走高度（不是并排），主区该变矮"
+            "歌词栏是从主区下方拿走高度（不是并排），主区该变矮"
         );
-        assert_eq!(wide.content.width, without.content.width, "宽度不受歌词块影响");
+        assert_eq!(wide.content.width, without.content.width, "宽度不受歌词栏影响");
     }
 
     /// 菜单栏去掉后布局与宽度无关：任何宽度下内容区都吃满全宽。
@@ -426,7 +426,10 @@ mod tests {
         assert!(text.contains("列表"), "分组标题");
         assert!(text.contains("j/k、↑/↓选曲目"), "方向键要跟 `j`/`k` 写在一起：{text}");
         assert!(text.contains("Enter进入该歌单的曲目"), "当前屏那一节要跟着菜单变：{text}");
-        assert!(text.contains("L登出"), "登出是全局键，写在「全局」里：{text}");
+        // 「登出」那一行现在落在 18 行视口之外（表多了一行），
+        // 它属于「全局」段这点由 `the_table_pairs_every_key_with_a_description` 钉。
+        assert!(text.contains("y歌词栏开/关"), "视图开关写在「全局」里：{text}");
+        assert!(text.contains("v频谱区开/关"), "视图开关写在「全局」里：{text}");
     }
 
     /// 首页不是列表屏：`?` 里只该列**首页上真按得出来**的键，而通用的挪 / `Enter`
@@ -478,7 +481,8 @@ mod tests {
                 .find_map(|row| row.contains(needle).then(|| column_of(row, needle)))
                 .unwrap_or_else(|| panic!("{needle} 没画在浮层里：{table:?}"))
         };
-        let columns: Vec<usize> = ["选曲目", "我的收藏", "筛选当前列表", "播放 / 暂停"]
+        // 只用**首屏可见**的行：浮层视口 18 行，「播放」段已在视口外。
+        let columns: Vec<usize> = ["选曲目", "我的收藏", "筛选当前列表", "登出（清空本地会话）"]
             .iter()
             .map(|help| column(help))
             .collect();
@@ -487,7 +491,7 @@ mod tests {
             "说明该从同一列开始：{columns:?}"
         );
         let key_columns: Vec<usize> =
-            ["j / k、", "1 ", "Y ", "Space "].iter().map(|key| column(key)).collect();
+            ["j / k、", "1 ", "y ", "L "].iter().map(|key| column(key)).collect();
         assert!(
             key_columns.windows(2).all(|pair| pair[0] == pair[1]),
             "键列该从同一列开始：{key_columns:?}"
@@ -695,7 +699,7 @@ mod tests {
         }
     }
 
-    /// 频谱区替掉列表：内容区里只剩频谱块（歌词栏关着）。
+    /// 频谱区替掉列表：内容区里只剩频谱区（歌词栏关着）。
     #[test]
     fn the_spectrum_takes_over_the_content_area() {
         let (mut app, _runtime) = test_app();
@@ -705,7 +709,7 @@ mod tests {
         let text = frame_flat(&mut app, 120, 30);
         assert!(text.contains("频谱"), "内容区变成频谱区：{text}");
         assert!(!text.contains("歌a"), "列表让位给频谱区：{text}");
-        assert!(!text.contains("歌词"), "歌词栏关着就没有歌词块：{text}");
+        assert!(!text.contains("歌词"), "歌词栏关着就没有歌词栏：{text}");
 
         // 操作提示统一在底部状态行：没有「模式」之后给的就是列表那套。
         let rows = frame_rows(&mut app, 120, 30);
@@ -721,7 +725,7 @@ mod tests {
         assert!(back.contains("歌a"), "回到列表：{back}");
     }
 
-    /// 频谱块的提示文案按播放态选：缓冲中与「没在播」不是一回事（纯函数，所以
+    /// 频谱区的提示文案按播放态选：缓冲中与「没在播」不是一回事（纯函数，所以
     /// 哑引擎走不到的那些状态也能钉住）。
     #[test]
     fn the_spectrum_message_follows_the_playback_phase() {
@@ -747,13 +751,13 @@ mod tests {
         let spectrum = rows
             .iter()
             .position(|row| row.starts_with("┌频谱"))
-            .expect("频谱块");
+            .expect("频谱区");
         let lyric = rows
             .iter()
             .position(|row| row.starts_with("┌歌词"))
             .expect("歌词栏");
         assert!(spectrum < lyric, "频谱区该在歌词栏上面：{spectrum} vs {lyric}");
-        assert!(rows[spectrum + 1].contains('█'), "频谱块里该有柱子");
+        assert!(rows[spectrum + 1].contains('█'), "频谱区里该有柱子");
         assert!(
             rows[lyric + 1..].iter().any(|row| row.contains("第1句")),
             "歌词栏里该有歌词"
@@ -766,9 +770,9 @@ mod tests {
             + 1;
         assert_eq!(height, 8, "歌词栏高度该是内容区的三分之一：{rows:?}");
 
-        // 歌名只在歌词块上出现一次（频谱块整块归它时才带歌名）。
+        // 歌名只在歌词栏上出现一次（频谱区整块归它时才带歌名）。
         let text = frame_flat(&mut app, 120, 30);
-        assert_eq!(text.matches("频谱").count(), 1, "频谱块只有一块：{text}");
+        assert_eq!(text.matches("频谱").count(), 1, "频谱区只有一块：{text}");
     }
 
     /// 歌词栏关着时，频谱区吃满整个内容区（不留空框、也不留歌词栏）。
@@ -785,7 +789,7 @@ mod tests {
         let rows = frame_rows(&mut app, 120, 30);
         assert!(
             rows.iter().any(|row| row.starts_with("┌频谱")),
-            "频谱块：{rows:?}"
+            "频谱区：{rows:?}"
         );
         assert!(
             !rows.iter().any(|row| row.starts_with("┌歌词")),
@@ -810,11 +814,11 @@ mod tests {
         let spectrum = rows
             .iter()
             .position(|row| row.starts_with("┌频谱"))
-            .expect("频谱块");
+            .expect("频谱区");
         let height = rows[spectrum..]
             .iter()
             .position(|row| row.starts_with("└"))
-            .expect("频谱块下边框");
+            .expect("频谱区下边框");
         let inside = &rows[spectrum..spectrum + height];
         assert!(
             inside.iter().any(|row| row.contains("未在播放")),
