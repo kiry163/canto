@@ -32,7 +32,7 @@
 
 ```sh
 tuios new-window -s canto-dev canto-x --cwd <仓库根目录> --no-focus -- <二进制> --log debug
-tuios wait-for window-output -s canto-dev -w canto-x --pattern '我的收藏' --timeout 20000
+tuios wait-for window-output -s canto-dev -w canto-x --pattern '在线收藏' --timeout 20000
 tuios capture-pane         -s canto-dev -w canto-x          # 全屏程序不加 --lines
 tuios send-keys            -s canto-dev -w canto-x '?'
 tuios capture-pane         -s canto-dev -w canto-x
@@ -43,8 +43,8 @@ tuios close-window         -s canto-dev canto-x              # 程序退出后�
 ```
 
 `<仓库根目录>` 与 `<二进制>` 按上面那张表替换（写绝对路径，别写 `~`）。
-第二条是「等界面起来」的写法：`我的收藏` 那一栏的标题出来 = 列表拉完了（没登录时不会出现，
-那就换个一定会出现的字符串）。**别用 `wait-for window-idle`**，见「坑」。
+第二条是「等界面起来」的写法：`在线收藏`（首页第一格）那串出来 = 界面画起来了——登录与否都会出现，
+所以它只证「起来了」，要等真拉完列表得换别的字符串。**别用 `wait-for window-idle`**，见「坑」。
 
 命令类工作用 `tuios run -s canto-dev -w <窗口> -- cargo test`（等它跑完并拿退出码）——前提是那个 pane 的
 shell 会发 OSC 133 标记：fish 4+ 自带，zsh / bash 4.4+ 要在启动文件里加几行（`tuios doctor shell` 把
