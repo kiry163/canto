@@ -62,6 +62,7 @@ pub(super) fn test_song(mid: &str) -> Song {
         album_name: String::new(),
         duration_secs: 200,
         sizes: FileSizes::default(),
+        source: crate::model::Source::Qq,
     }
 }
 

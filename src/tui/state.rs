@@ -1662,6 +1662,7 @@ impl App {
                 album_name: String::new(),
                 duration_secs: 0,
                 sizes: crate::model::FileSizes::default(),
+                source: crate::model::Source::Qq,
             })
             .collect();
         let labels: Vec<String> = self

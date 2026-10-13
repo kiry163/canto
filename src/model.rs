@@ -3,6 +3,7 @@
 //! 只保留列表展示与播放取流要用的字段：接口里其它字段一律不落地，
 //! 免得变成"看起来有用、实际没人读"的包袱。
 
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// 音质档位。声明顺序就是高低顺序，便于比较（`want >= Quality::Flac`）。
@@ -68,6 +69,39 @@ impl Quality {
     }
 }
 
+/// 一首歌的来源。
+///
+/// QQ 那边走接口（`mid` 是接口主键）；本地那边就是一个文件路径，`mid` 用
+/// [`local_mid`] 合成。加这一维是为了让队列、历史、`♪` 标记那些「按 mid 比对」的
+/// 地方**不用**为本地歌开第二条路。
+// Task 2 的 `library.rs` 一接上就摘掉这几个 `allow(dead_code)`
+// （现在是「接口先落地、消费者还没来」的中间态）。
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Source {
+    /// 接口来的（默认）。
+    #[default]
+    Qq,
+    /// 本地文件。
+    Local(PathBuf),
+}
+
+/// 本地曲目的键：`local:<路径>`。
+///
+/// 前缀是刻意的：QQ 的 mid 是 14 位 base62，永远撞不上它。
+#[allow(dead_code)]
+pub fn local_mid(path: &Path) -> String {
+    format!("local:{}", path.to_string_lossy())
+}
+
+/// [`local_mid`] 的反向：不是本地键（或路径为空）就是 `None`。
+#[allow(dead_code)]
+pub fn local_path(mid: &str) -> Option<PathBuf> {
+    mid.strip_prefix("local:")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
 /// 一首歌。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Song {
@@ -85,6 +119,24 @@ pub struct Song {
     pub duration_secs: u64,
     /// 各档位文件大小（字节）。0 = 该档位没有。
     pub sizes: FileSizes,
+    /// 这首歌从哪来。本地曲目 [各档位大小](FileSizes) 全 0（没有接口报体积）。
+    pub source: Source,
+}
+
+#[allow(dead_code)]
+impl Song {
+    /// 本地文件来的？播放、歌词、体积列都按它分岔。
+    pub fn is_local(&self) -> bool {
+        matches!(self.source, Source::Local(_))
+    }
+
+    /// 本地文件的路径（QQ 歌没有）。
+    pub fn path(&self) -> Option<&Path> {
+        match &self.source {
+            Source::Local(path) => Some(path),
+            Source::Qq => None,
+        }
+    }
 }
 
 /// 各档位文件大小；同时用来判断最高可用音质。
@@ -315,6 +367,64 @@ impl Playlist {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 一首普通的 QQ 歌（除了来源，字段值都不重要）。
+    fn qq_song(source: Source) -> Song {
+        Song {
+            source,
+            mid: "0039MnYb0qxYhV".to_string(),
+            song_id: Some(1050326),
+            media_mid: Some("0039MnYb0qxYhV".to_string()),
+            title: "晴天".to_string(),
+            singers: "周杰伦".to_string(),
+            album_mid: "000MkMni19ClKG".to_string(),
+            album_name: "叶惠美".to_string(),
+            duration_secs: 269,
+            sizes: FileSizes::default(),
+        }
+    }
+
+    /// 一首本地曲目：`mid` 由路径合成（跟生产代码里 `library.rs` 的造法一致）。
+    fn local_song(path: &Path) -> Song {
+        Song {
+            mid: local_mid(path),
+            source: Source::Local(path.to_path_buf()),
+            ..qq_song(Source::Qq)
+        }
+    }
+
+    /// 本地曲目的键就是路径：`local:<路径>`，往返要一模一样（中文、空格、emoji 都不能丢）。
+    #[test]
+    fn local_mid_round_trips() {
+        let path = Path::new(r"C:\Users\28269\Music\canto\张宇 - 曲终人散.mp3");
+        assert_eq!(local_path(&local_mid(path)).as_deref(), Some(path));
+        let emoji = Path::new("/music/雨 ☔ 了.flac");
+        assert_eq!(local_path(&local_mid(emoji)).as_deref(), Some(emoji));
+    }
+
+    /// QQ 的 mid 是 14 位 base62，永远撞不上这个前缀；空路径也不算本地曲目。
+    #[test]
+    fn a_non_local_mid_has_no_path() {
+        assert_eq!(local_path("000DhFOL1o15dn"), None);
+        assert_eq!(local_path("local:"), None, "空路径不算");
+    }
+
+    /// 默认来源是 QQ：接口那条构造路径不做额外声明。
+    #[test]
+    fn the_default_source_is_qq() {
+        assert_eq!(Source::default(), Source::Qq);
+        assert!(!qq_song(Source::Qq).is_local());
+    }
+
+    /// 本地曲目把自己的路径报出来（播放那一侧要用）。
+    #[test]
+    fn a_local_song_reports_its_path() {
+        let path = PathBuf::from(r"C:\Music\canto\曲终人散.mp3");
+        let song = local_song(&path);
+        assert!(song.is_local());
+        assert_eq!(song.path(), Some(path.as_path()));
+        assert_eq!(song.mid, local_mid(&path), "mid 由构造方写成合成键");
+    }
 
     /// 列表那一列：跟着配置的下限走，标签与体积必须同一档。
     #[test]

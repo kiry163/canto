@@ -6,7 +6,7 @@
 
 use serde_json::Value;
 
-use crate::model::{FileSizes, Playlist, Song};
+use crate::model::{FileSizes, Playlist, Song, Source};
 
 /// 数字字段：可能是 number，也可能是数字字符串。
 fn value_u64(value: &Value) -> u64 {
@@ -54,6 +54,7 @@ pub fn parse_song(item: &Value) -> Option<Song> {
             flac: value_u64(&file["size_flac"]),
             hires: value_u64(&file["size_hires"]),
         },
+        source: Source::Qq,
     })
 }
 
@@ -87,6 +88,7 @@ pub fn parse_search_song(item: &Value) -> Option<Song> {
             flac: value_u64(&item["sizeflac"]),
             hires: 0,
         },
+        source: Source::Qq,
     })
 }
 
@@ -153,6 +155,13 @@ mod tests {
                 "size_hires": 0
             }
         })
+    }
+
+    #[test]
+    fn parsed_songs_are_qq_sourced() {
+        let song = parse_song(&song_item()).expect("有效条目要解析出来");
+        assert_eq!(song.source, crate::model::Source::Qq);
+        assert!(!song.is_local());
     }
 
     #[test]

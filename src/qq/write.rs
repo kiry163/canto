@@ -91,6 +91,7 @@ mod tests {
             album_name: String::new(),
             duration_secs: 236,
             sizes: FileSizes::default(),
+            source: crate::model::Source::Qq,
         }
     }
 
