@@ -140,7 +140,7 @@ macOS 是主线程 `NSPanel` + 每帧手动泵 AppKit）只管把 payload 画出
 | 透明与鼠标 | `opaque=false` + `clearColor` + `hasShadow=false`；**锁定 = `ignoresMouseEvents=true`**，解锁 = `false` + `isMovableByWindowBackground` | 锁定态「点不着」；解锁后让系统自己拖窗口（探针验过合成拖动跟手、且不激活自己） |
 | 文字 | 三个透明 `NSTextField` + `NSAttributedString`，描边用**负 `strokeWidth`** | 负值 = 填充 + 描边一次画完（Windows 那边是八方向各画一遍再合成）；中文 shaping 交给系统 |
 | 尺寸与位置 | 每次 `push` 按文本实测尺寸重摆；中心点仍存**左上原点**，进 AppKit 按主屏高换算 | 与 Windows 同一套算法、同一个 `desktop-lyrics.json` |
-| 拖动回传 | 每帧读一次窗口矩形，跟上次报过的比，变了才回传 | 与 Windows「逐 draw 采纳窗口自身矩形」同一口径，不指望「拖动结束」事件 |
+| 拖动回传 | **解锁态**每帧读一次窗口矩形，跟记着的中心点比、**差过 1 点**才回传；锁定态连矩形都不量 | 拖动只发生在解锁态；`setFrame` 把原点**吸附到整点**，量回来的中心天生带 ±0.5 的舍入，拿它当「挪了」回写会累积成「每开关一次窗口往下飘一点」（见「开关两次才发现的三个坑」） |
 | 字体 | 配置里的字体面认不出来（模板里那串是 Windows 字体）就回退系统字体 | 实测 `Microsoft YaHei UI` → `.AppleSystemUIFont` |
 | 主屏尺寸 | `NSScreen.mainScreen` 的 frame（逻辑点） | 原来非 Windows 分支是给空实现占位的硬编码 1920×1080，拿它算默认位置会偏（实测 (960,918) vs 真实 (896,952)） |
 | 失败降级 | 拿不到主线程标记 / 激活策略失败 / 建窗口失败 → 一句话 + 日志，句柄是空的 | 与 Windows 同口径：播放与界面照常 |
@@ -151,7 +151,8 @@ macOS 是主线程 `NSPanel` + 每帧手动泵 AppKit）只管把 payload 画出
 
 真机验收跑在实施计划的清单里（Windows：「点不着」「拖完重启回到原位」「压在全屏 tuios 之上」
 「热键关掉后窗口没了、日志里连『就绪』都没有」「状态文件写成屏外会被夹回」；macOS：另加
-「窗口中心 = 主屏底部居中」「暂停按 `hide_when_paused` 藏/回」「热键开关真拆真建」）。
+「窗口中心 = 主屏底部居中」「暂停按 `hide_when_paused` 藏/回」「热键开关真拆真建」
+「**关掉再开连按 8 轮：窗口真下屏、再建成功、位置一点不飘**」）。
 
 ### 开关：热键真拆真建（2026-10-13）
 
@@ -161,7 +162,7 @@ macOS 是主线程 `NSPanel` + 每帧手动泵 AppKit）只管把 payload 画出
 
 | | 做法 | 为什么 |
 |---|---|---|
-| 建 / 拆 | `toggle` → `imp::install`，或 `imp = Imp::none()`（`Drop` 收尾） | 两端本来就已经是建/拆对称的形状：Windows 的 `Drop` 投 `WM_CLOSE` 再 `join`（**同步**收回，所以再建时上一份已经彻底没了），macOS 放掉 `Retained` 就完事 |
+| 建 / 拆 | `toggle` → `imp::install`，或 `imp = Imp::none()`（`Drop` 收尾） | 两端本来就已经是建/拆对称的形状：Windows 的 `Drop` 投 `WM_CLOSE` 再 `join`（**同步**收回，所以再建时上一份已经彻底没了），macOS 的 `Drop` 里显式 `close()` 面板（只 release 不下屏，见下） |
 | Windows 窗口类 | `RegisterClassW` 返回 0 且 `GetLastError() == ERROR_CLASS_ALREADY_EXISTS(1410)` 当成功 | 类名在进程里注册一次就够；只有真拆真建才会第二次走到这儿（以前只建一次，所以看不出来） |
 | 「开没开」 | `imp::Imp::running()`：Windows 看 `hwnd != 0`、macOS 看 `inner.is_some()`、其它平台恒 `false` | 一处判断同时管住「谁算开着」和「`sync` 要不要干活」（`sync` 开头就早退，连 payload 都不造） |
 | `State` 重置 | 重建时 `state = State::default()` | `State.last` 记着上一份窗口的 payload；不清的话新窗口第一帧 `advance()` 判定「没变化」→ **窗口永远空着**。顺带把锁定态带回默认（拆了再建是锁定的、点不着） |
@@ -171,6 +172,25 @@ macOS 是主线程 `NSPanel` + 每帧手动泵 AppKit）只管把 payload 画出
 
 派发只在主界面（`Screen::Main` 或首页 `Screen::Home`——七个动作同一条规则；登录屏直接丢）；
 热键**不因开关状态而注销**——关掉了还得靠它开回来。`[hotkeys]` 因此从 6 条变 7 条（`lyrics`），`enabled` 从配置模板里消失。
+
+### 开关两次才发现的三个坑（macOS，实测 2026-10-13）
+
+热键开了之后才会有人真的反复「关 → 开」，于是三个只在「建 → 拆 → 再建」里露头的问题浮出来。
+前两个的症状合起来就是使用者报的那句「全局热键关不掉，再按一次说『歌词窗口起不来』、窗口还冻在
+那儿不换词」：关的那一下窗口没真下屏（但内存里已当它没了 → 冻住），开的那一下在建面板之前就
+撞在激活策略上。第三个要连按几轮才看得出来。
+
+| 坑 | 实情（探针 / 真机） | 修法 |
+|---|---|---|
+| 拆窗口 | `Retained<NSPanel>` drop 只发一次 `release`；窗口上屏期间 AppKit 自己持有它，**只 release 不下屏**——`CGWindowList` 里还在（`onscreen=1`），而 `is_running()` 已是 `false` → `sync` 早退 → 窗口停在最后一句 | `Drop for Inner` 里显式 `panel.close()`；建窗口时 `setReleasedWhenClosed(false)`，把释放权只留给 Rust 的 `Retained`（免得 `close` 与它各 release 一次） |
+| 再建窗口 | `NSApplication.setActivationPolicy(Accessory)` 是**幂等 setter**：第二次起返回 `false`（「没变化」，不是失败；探针 1st=1、2nd=0、3rd=0）。原来 `if !setActivationPolicy(..)` 直接当失败返回，于是每次重开都在建面板之前报「歌词窗口起不来」 | 先看 `activationPolicy()`：已经是 Accessory 就跳过；只有「想设却没设上」才算失败 |
+| 位置回写 | `setFrame` 把窗口原点**吸附到整点**，量回来的中心天生差 ±0.5（`round()` 之后 ±1）。原来每次重画都拿这个测量值当新中心点写回状态文件，下一轮建窗口再从它出发——连按 8 轮实测 `cy` 961 → 972（每轮 +1~2） | 重画一律按**记着的**整数中心摆；只有**解锁态**才量矩形，且差过 1 点（吸附噪声的量级）才算拖动 |
+
+Windows 那半不受影响：`Drop` 走 `WM_CLOSE` → `DestroyWindow`（真销毁）、类名重复注册
+（`ERROR_CLASS_ALREADY_EXISTS`）早就当成功处理、窗口坐标本来就是整数像素。
+真机回归（`ctrl+shift+d` 连按 8 轮 + `ctrl+shift+l` 连按 4 次 + 合成拖动 + 重启）：每轮窗口真下屏、
+再建成功（日志 11 条「桌面歌词窗口已就绪」、0 条失败），`bounds` 的 `y` 与状态文件的 `cy` 全程不变，
+拖动后重启回到拖到的地方。
 
 ## 本地曲库（`5`，阶段一，2026-10-13）
 

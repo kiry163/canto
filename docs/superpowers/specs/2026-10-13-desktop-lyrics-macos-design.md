@@ -160,6 +160,7 @@ Windows 那份现在是唯一实现：非 Windows 走空实现，`[desktop_lyric
 | 6 | 压在别的 app 的全屏之上 / 切 space 还在 | 真机看（`canJoinAllSpaces` + `FullScreenAuxiliary`） |
 | 7 | `enabled = false` 时进程里没有那个 level 3 的窗口 | `CGWindowList` |
 | 8 | 退出 canto 窗口随之消失 | 同上 + `ps` |
+| 9 | 热键 `ctrl+shift+d` 关掉再开**连按 8 轮**：每轮窗口可真下屏、再建成功、位置一点不飘（`ctrl+shift+l` 连按 4 次同理，拖动后重启回原位） | 真机 + `CGWindowList` 探针 + 读状态文件 + 日志里「桌面歌词窗口已就绪」的条数 |
 
 **实测结果（2026-10-13，macOS 15.5 / x86_64，tuios 里真二进制 + 真播放）：**
 
@@ -173,10 +174,25 @@ Windows 那份现在是唯一实现：非 Windows 走空实现，`[desktop_lyric
 | 6 | ❌ 未验：本机没有可切全屏的应用（不想动使用者的桌面）。`CanJoinAllSpaces` + `FullScreenAuxiliary` 已设，但没有实测 |
 | 7 | ✅ `enabled = false` 时日志里连「桌面歌词窗口已就绪」都没有（`install` 根本没进），进程里也没有 level 3 的窗口 |
 | 8 | ✅ `q` 退出后窗口消失、桌面无残留（截图确认） |
+| 9 | ✅（2026-10-13 补测，见下）8 轮开关每轮都下屏/再建成功，`bounds.y` 与 `cy` 全程不变；`ctrl+shift+l` 4 次同理；合成拖动 (896,956) → (746,876) 后状态文件写 (746,877)，重启回到该处 |
 
-实施时抓到一个真机才会暴露的实现 bug：`setIgnoresMouseEvents` 的极性写反（写成 `!payload.locked`），
+第 9 条是补上的：原清单没有「关掉再开」这一格，第 8 条只覆盖进程退出（进程退出本来就什么都不剩），
+所以下面这三个只在建→拆→再建里露头的 bug 一次都没被跑到。
+
+后来抓到三个真机才会暴露的实现 bug（细节与实测数据见 `docs/design.md`「开关两次才发现的三个坑」）：
+1. **关窗口没真下屏**：macOS `Imp` 只靠 `Retained<NSPanel>` drop 的 `release`，而上屏期间 AppKit
+   自己持有窗口——窗口留在屏上，`is_running()` 却已是 `false`（`sync` 早退，歌词冻在最后一句）。
+   修法：`Drop for Inner` 里显式 `close()`，建窗口时 `setReleasedWhenClosed(false)`。
+2. **再开必失败**：`setActivationPolicy(Accessory)` 是幂等 setter，第二次起返回 `false`，原代码当
+   失败处理 → 每次重开都在建面板之前报「歌词窗口起不来」。修法：先查 `activationPolicy()`。
+3. **位置自己往下飘**：`setFrame` 把原点吸附到整点，量回来的中心带 ±0.5 舍入被写回状态文件，
+   每次开关累积 +1~2 点（8 轮实测 961 → 972）。修法：重画按记着的整数中心摆，只有解锁态才量
+   矩形，且差过 1 点才算拖动。
+
+实施时抓到的一个同类真机 bug：`setIgnoresMouseEvents` 的极性写反（写成 `!payload.locked`），
 症状是「锁定态点得着、解锁后拖不动」——修法就是传 `locked` 本身。教训：第 5 条这种**双向**判据
-（锁定不跟手 + 解锁跟手）才是能抓住极性错误的形式，单测一边抓不住。
+（锁定不跟手 + 解锁跟手）才是能抓住极性错误的形式，单测一边抓不住；第 9 条同理——「关掉再开」
+这种**往返**判据才抓得住上面那三个。
 
 ## 8. 实测依据（探针，2026-10-13）
 
