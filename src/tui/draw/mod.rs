@@ -460,17 +460,16 @@ mod tests {
         assert!(text.contains("L登出"), "登出是全局键，写在「全局」里：{text}");
     }
 
-    /// 首页不是列表屏：`?` 里只该列**首页上真按得出来**的键。列表 / 歌曲两段的键在首页上
-    /// 一个都没接（`d`、`/`、`PgUp`…），列出来就是骗人。
+    /// 首页不是列表屏：`?` 里只该列**首页上真按得出来**的键，而通用的挪 / `Enter`
+    /// 不用进表（状态行那句提示就够了）。
     #[test]
     fn the_home_help_table_only_lists_keys_that_work_there() {
         let (mut app, _runtime) = test_app();
         app.screen = crate::tui::state::Screen::Home;
         app.apply(crate::tui::keys::Action::Help);
         let text = frame_text(&mut app, 160, 40);
-        assert!(text.contains("进选中那一屏"), "首页自己的键要在表里：{text}");
-        for dead in ["选曲目", "翻页（Ctrl+U / Ctrl+D）", "筛选当前列表"] {
-            assert!(!text.contains(dead), "首页上按不出来，别写进表：{dead}");
+        for dead in ["选曲目", "翻页（Ctrl+U / Ctrl+D）", "筛选当前列表", "选入口"] {
+            assert!(!text.contains(dead), "首页上按不出来（或通用到不必列），别写进表：{dead}");
         }
     }
 
@@ -678,6 +677,24 @@ mod tests {
         let above = grid_top;
         let below = inner.height - 1 - grid_bottom;
         assert!(above.abs_diff(below) <= 1, "上留 {above} 行、下留 {below} 行");
+    }
+
+    /// 选中只是前面那个 `▶`：整帧不涂任何底色（原来是 `highlight()` 那层深底）。
+    #[test]
+    fn the_home_highlight_is_only_the_marker() {
+        let (mut app, _runtime) = test_app();
+        app.go_home();
+        let (width, height) = (120, 40);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("测试终端");
+        terminal.draw(|frame| app.draw(frame)).expect("绘制");
+        let buffer = terminal.backend().buffer();
+        let painted: Vec<(u16, u16)> = (0..height)
+            .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .filter(|&(x, y)| buffer[(x, y)].bg != Color::Reset)
+            .collect();
+        assert!(painted.is_empty(), "首页不该有底色，{painted:?} 这些格子涂了");
+        let text = frame_flat(&mut app, width, height);
+        assert!(text.contains("▶1我的收藏"), "选中还是靠 `▶`：{text}");
     }
 
     /// 选中那格带 `▶`；`j` 挪一格，`▶` 跟着走、只在一格上。

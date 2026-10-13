@@ -2,17 +2,16 @@
 //!
 //! 它只画内容区那一块——播放条、状态行、歌词块、浮层都由主界面那套外壳负责（首页不是
 //! 另一套界面，只是内容区换了东西）。格由 `Menu::ALL` 生成，编号就是下标 + 1，按 3 列
-//! 换行（`ceil(n/3)` 行），整块在内容区里居中。
+//! 换行（`ceil(n/3)` 行），整块在内容区里居中；选中只是前面那个 `▶ `，不涂底色。
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
 use ratatui::text::Line;
 use ratatui::widgets::{Block, Padding, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use super::super::state::{App, Menu};
-use super::{highlight, panel_block};
+use super::panel_block;
 
 /// 网格列数：条目按它换行（4 项 = 3 + 1）。
 const COLUMNS: usize = 3;
@@ -38,17 +37,11 @@ impl App {
         let cells = grid_cells(panel.inner(area), cell_width, labels.len());
         frame.render_widget(panel, area);
         for (index, cell) in cells.into_iter().enumerate() {
-            // `▶ ` 只出现在选中那格；别的格补两格空格，等宽格子里文字才对得齐。
-            let (marker, style) = if index == selected {
-                ("▶ ", highlight())
-            } else {
-                ("  ", Style::new())
-            };
-            let block = Block::bordered().padding(Padding::horizontal(1)).border_style(style);
+            // 选中只靠前面那个 `▶ `：不涂底色、也不改颜色（等宽格子里补两格空格，文字才对得齐）。
+            let marker = if index == selected { "▶ " } else { "  " };
+            let block = Block::bordered().padding(Padding::horizontal(1));
             frame.render_widget(
-                Paragraph::new(Line::from(format!("{marker}{}", labels[index])))
-                    .style(style)
-                    .block(block),
+                Paragraph::new(Line::from(format!("{marker}{}", labels[index]))).block(block),
                 cell,
             );
         }

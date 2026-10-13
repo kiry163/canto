@@ -112,8 +112,9 @@ impl Row {
 
 /// 每屏一套键位说明。`Some(menu)` = 那四屏之一：屏专属 + 列表 + 切屏 + 全局 + 播放 + 歌曲 +
 /// 全局热键；`None` = 首页（它不是 `Menu` 的一员，`Menu` 的含义是「一份歌曲列表 + 选中位置 +
-/// 筛选」）：首页自己那段 + 切屏 + 全局（不含 `/`）+ 播放 + 全局热键。**没有的段整段不列**
-/// ——首页没有「选中的歌」，`d`、`a`、`PgUp`、`/` 在它那儿一个都没接，列出来就是骗人。
+/// 筛选」）：切屏 + 全局（不含 `/`）+ 播放 + 全局热键——**通用的挪格 / `Enter` 不进表**（那些
+/// 谁都知道，状态行那句提示里也写着），而首页上没有的段整段不列（`d`、`a`、`PgUp`、`/` 在它
+/// 那儿一个都没接，列出来就是骗人）。
 ///
 /// **这是唯一的键位表**：菜单栏没了，切屏只有数字键，得让人在哪儿都能查到。同一按键只写
 /// 一次——`/`、`Enter`、`L` 这些通用的在后面几块写过，当前屏那节就只留这一屏特有的。
@@ -122,45 +123,39 @@ impl Row {
 /// 已经在「列表」段里）。表格比浮层长（内容上限 18 行），最常查的得在上面。
 fn help_rows(screen: Option<Menu>, hotkeys: &HotkeyConfig) -> Vec<Row> {
     let mut rows = Vec::new();
+    // 首页（`None`）不单开一段：挪格、`Enter` 进屏是最通用的那几个键，状态行那句提示里也有
+    // ——帮助只留真需要查的，于是它从「切屏」开始。
     let list = screen.is_some();
-    match screen {
-        Some(menu) => {
-            let (title, section): (&'static str, Vec<Row>) = match menu {
-                // 收藏屏没有专属键：`j`/`k` 选曲目、`/` 筛选都是所有列表共有的。
-                Menu::Favorites => ("", Vec::new()),
-                Menu::Playlists => (
-                    "歌单",
-                    vec![
-                        Row::Keys { keys: "Enter", help: "进入该歌单的曲目" },
-                        Row::Keys { keys: "Esc", help: "回歌单列表" },
-                    ],
-                ),
-                Menu::Search => (
-                    "搜索",
-                    vec![
-                        Row::Keys { keys: "Enter", help: "搜索" },
-                        Row::Keys { keys: "Esc", help: "取消输入" },
-                    ],
-                ),
-                Menu::History => ("历史", vec![Row::Keys { keys: "Enter", help: "从那首重播" }]),
-            };
-            if !section.is_empty() {
-                rows.push(Row::Section(title));
-                rows.extend(section);
-            }
-            rows.extend([
-                Row::Section("列表"),
-                Row::Keys { keys: "j / k、↑ / ↓", help: "选曲目" },
-                Row::Keys { keys: "g / G、Home / End", help: "首 / 尾" },
-                Row::Keys { keys: "PgUp / PgDn", help: "翻页（Ctrl+U / Ctrl+D）" },
-            ]);
+    if let Some(menu) = screen {
+        let (title, section): (&'static str, Vec<Row>) = match menu {
+            // 收藏屏没有专属键：`j`/`k` 选曲目、`/` 筛选都是所有列表共有的。
+            Menu::Favorites => ("", Vec::new()),
+            Menu::Playlists => (
+                "歌单",
+                vec![
+                    Row::Keys { keys: "Enter", help: "进入该歌单的曲目" },
+                    Row::Keys { keys: "Esc", help: "回歌单列表" },
+                ],
+            ),
+            Menu::Search => (
+                "搜索",
+                vec![
+                    Row::Keys { keys: "Enter", help: "搜索" },
+                    Row::Keys { keys: "Esc", help: "取消输入" },
+                ],
+            ),
+            Menu::History => ("历史", vec![Row::Keys { keys: "Enter", help: "从那首重播" }]),
+        };
+        if !section.is_empty() {
+            rows.push(Row::Section(title));
+            rows.extend(section);
         }
-        None => rows.extend([
-            Row::Section("首页"),
-            Row::Keys { keys: "j / k、↑ / ↓", help: "选入口" },
+        rows.extend([
+            Row::Section("列表"),
+            Row::Keys { keys: "j / k、↑ / ↓", help: "选曲目" },
             Row::Keys { keys: "g / G、Home / End", help: "首 / 尾" },
-            Row::Keys { keys: "Enter", help: "进选中那一屏" },
-        ]),
+            Row::Keys { keys: "PgUp / PgDn", help: "翻页（Ctrl+U / Ctrl+D）" },
+        ]);
     }
     rows.extend([
         Row::Section("切屏"),
@@ -397,19 +392,18 @@ mod tests {
         assert!(!helps(Some(Menu::Favorites)).contains(&"进入该歌单的曲目"), "切屏换了那一节就该换");
         assert_eq!(sections(Some(Menu::History))[0], "历史");
 
-        // 首页：`Menu` 停在哪儿都不算数，它列的是首页自己的键。
-        assert_eq!(sections(None)[0], "首页");
-        assert!(helps(None).contains(&"进选中那一屏"), "首页 `Enter` 是进屏，不是播放选中");
+        // 首页：通用的挪 / `Enter` 不进表，它直接从「切屏」开始。
+        assert_eq!(sections(None)[0], "切屏", "首页不再单开一段：{:?}", sections(None));
         assert!(
-            !helps(None).iter().any(|help| *help == "选曲目" || *help == "播放选中"),
-            "首页没有「选中的歌」，列表 / 歌曲那两套键一个都没接：{:?}",
+            !helps(None).iter().any(|help| matches!(*help, "选入口" | "进选中那一屏" | "首 / 尾")),
+            "挪格与 Enter 是通用键，不必进帮助：{:?}",
             helps(None)
         );
         assert!(!sections(None).contains(&"列表") && !sections(None).contains(&"歌曲"));
     }
 
     /// 首页那一套：列表 / 歌曲两段的键一个都不许在（`Context::Home` 里一个都没绑），
-    /// 首页自己的键要在。
+    /// 通用的挪 / `Enter` 也不进表。
     #[test]
     fn the_home_table_lists_no_keys_the_home_ignores() {
         let rows = help_rows(None, &HotkeyConfig::default());
@@ -422,13 +416,14 @@ mod tests {
             "下载（含 .lrc）",
             "加进歌单",
             "从歌单移除",
+            "选入口",
+            "进选中那一屏",
         ] {
             assert!(
                 !cells.iter().any(|(_, help)| *help == dead),
-                "首页上按不出来，别写进表：{dead}（{cells:?}）"
+                "首页上按不出来（或通用到不必列），别写进表：{dead}（{cells:?}）"
             );
         }
-        assert!(cells.contains(&("Enter", "进选中那一屏")), "{cells:?}");
         assert!(cells.contains(&("0", "首页")), "切屏那一节首页也得有：{cells:?}");
     }
 
