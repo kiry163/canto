@@ -2488,6 +2488,14 @@ mod tests {
         app.apply(keys::Action::Home);
         assert!(matches!(app.screen, Screen::Home), "`0` 要回首页");
         assert!(!app.now_playing_full, "回首页要把全屏收起来");
+
+        // 首页上再开一次全屏、再按 `0`：钉的是 `go_home` 里「先收全屏、再对首页早返回」的
+        // 次序（次序倒了，这一下就成了「看着没反应」）。
+        app.apply(keys::Action::ToggleNowPlaying);
+        assert!(app.now_playing_full, "首页上也能开全屏");
+        app.apply(keys::Action::Home);
+        assert!(!app.now_playing_full, "首页上的全屏同样得收起来");
+        assert_eq!(app.home_state.selected(), Some(0), "已经在首页：`0` 是高亮无操作");
     }
 
     /// 已经在首页时 `0` 是**无操作**：高亮是刚用 `j`/`k` 挪好的，别给弹回默认那一行。
