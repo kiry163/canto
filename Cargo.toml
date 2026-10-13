@@ -12,6 +12,7 @@ crossterm = "0.29.0"
 dirs = "7.0.0"
 global-hotkey = "0.8"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
+lofty = "0.25.4"
 ratatui = "0.30.2"
 reqwest = { version = "0.13.5", features = ["json", "cookies", "blocking", "query", "form"] }
 rodio = "0.22.2"

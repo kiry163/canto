@@ -93,6 +93,25 @@ pub fn lock_path() -> PathBuf {
     data_dir().join("canto.lock")
 }
 
+/// 本地曲库的索引：`~/.cache/canto/library.json`。
+///
+/// 放缓存目录（不是数据目录）：它是**派生数据**，删了只会重扫一次；[`data_dir`] 只放
+/// 使用者自己建的东西（配置、会话、历史、本地歌单）。
+// Task 4 的扫描线程接上就摘掉。
+#[allow(dead_code)]
+pub fn library_index_path() -> PathBuf {
+    cache_dir().join("library.json")
+}
+
+/// 本地歌单：`~/.config/canto/local_playlists.json`。
+///
+/// 跟索引相反，这是使用者建的**数据**（丢了就没了），所以跟历史放一起。
+// Task 9 的本地歌单存储接上就摘掉。
+#[allow(dead_code)]
+pub fn local_playlists_path() -> PathBuf {
+    data_dir().join("local_playlists.json")
+}
+
 /// 二维码落盘的一份（`o` 用它调系统查看器；作废了就覆盖）。
 pub fn qr_png_path() -> PathBuf {
     data_dir().join("login-qr.png")

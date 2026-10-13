@@ -32,6 +32,8 @@ pub struct Config {
     pub hotkeys: HotkeyConfig,
     /// 桌面歌词（`[desktop_lyrics]` 段；只 Windows 生效）。
     pub desktop_lyrics: DesktopLyricsConfig,
+    /// 本地曲库目录（`[library]` 段）。
+    pub library: LibraryConfig,
 }
 
 impl Default for Config {
@@ -46,6 +48,7 @@ impl Default for Config {
             notice_seconds: 4,
             hotkeys: HotkeyConfig::default(),
             desktop_lyrics: DesktopLyricsConfig::default(),
+            library: LibraryConfig::default(),
         }
     }
 }
@@ -176,6 +179,28 @@ impl Rgb {
     }
 }
 
+/// `[library]` 段：本地曲库目录。
+///
+/// `dirs` 是 `Option`，因为「没写」与「写成空表」是两件事：没写 = 就扫下载目录；
+/// 写了空表 = 本地功能整体关掉（首页那一格也不画）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct LibraryConfig {
+    pub dirs: Option<Vec<String>>,
+}
+
+// Task 4 的扫描线程接上 `resolve` 就摘掉（现在是「配置先落地」的中间态）。
+#[allow(dead_code)]
+impl LibraryConfig {
+    /// 真正要扫的目录。相对路径原样留着（跟 `download_dir` 的语义一致，按当前工作目录解析）。
+    pub fn resolve(&self, download_dir: &Path) -> Vec<PathBuf> {
+        match &self.dirs {
+            None => vec![download_dir.to_path_buf()],
+            Some(dirs) => dirs.iter().map(PathBuf::from).collect(),
+        }
+    }
+}
+
 /// `[desktop_lyrics]` 段：桌面歌词覆盖层（Windows / macOS）。
 ///
 /// 八个字段全是**偏好**；开 / 关与窗口位置是**状态**（全局热键翻、拖动改），记在
@@ -263,6 +288,8 @@ struct Raw {
     hotkeys: Option<HotkeyConfig>,
     /// 桌面歌词；缺这一整段就用默认值。
     desktop_lyrics: Option<RawDesktopLyrics>,
+    /// 本地曲库；缺这一整段 = 只扫下载目录。
+    library: Option<LibraryConfig>,
 }
 
 impl Raw {
@@ -343,6 +370,9 @@ impl Raw {
             lyrics.hide_when_paused = hide;
         }
         config.desktop_lyrics = lyrics;
+        if let Some(library) = self.library {
+            config.library = library;
+        }
         config
     }
 }
@@ -511,6 +541,34 @@ mod tests {
         let result = load_file(&path);
         std::fs::remove_dir_all(&dir).ok();
         result
+    }
+
+    #[test]
+    fn library_dirs_default_to_the_download_dir() {
+        let (config, warning) = load_from("library-missing", "quality = \"flac\"\n");
+        assert_eq!(
+            config.library.resolve(Path::new("C:/Music/canto")),
+            vec![PathBuf::from("C:/Music/canto")],
+            "缺 [library] 段 = 就扫下载目录"
+        );
+        assert!(warning.is_none(), "缺段不是错误：{warning:?}");
+    }
+
+    #[test]
+    fn an_empty_library_table_turns_the_feature_off() {
+        let (config, warning) = load_from("library-empty", "[library]\ndirs = []\n");
+        assert!(config.library.resolve(Path::new("C:/Music/canto")).is_empty());
+        assert!(warning.is_none(), "空表是明确关闭，不是配置错误：{warning:?}");
+    }
+
+    #[test]
+    fn library_dirs_come_from_the_config_in_order() {
+        let (config, _) = load_from("library-dirs", "[library]\ndirs = ['D:/music', 'E:/flac']\n");
+        assert_eq!(
+            config.library.resolve(Path::new("C:/Music/canto")),
+            vec![PathBuf::from("D:/music"), PathBuf::from("E:/flac")],
+            "写了就以写的为准，不再顺手带上下载目录"
+        );
     }
 
     #[test]

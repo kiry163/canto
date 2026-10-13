@@ -12,6 +12,7 @@ mod hotkeys;
 mod http;
 mod instance;
 mod levels;
+mod library;
 mod media;
 mod model;
 mod overlay;
