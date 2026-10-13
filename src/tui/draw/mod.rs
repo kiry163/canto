@@ -1340,6 +1340,7 @@ mod tests {
                 local_path: None,
                 duration_secs: 276,
                 sizes: crate::model::FileSizes { mp3_128: 4_400_000, ..Default::default() },
+                album_name: "年华".to_string(),
             },
             50,
         );
@@ -1362,6 +1363,8 @@ mod tests {
         assert_eq!(column_of(header, "备注"), column_of(data, "刚刚"), "备注列对齐");
         assert!(data.contains("MP3 128k"), "历史也报音质：{data}");
         assert!(data.contains("4.2MB"), "历史也报体积：{data}");
+        assert!(data.contains("年华"), "历史也有专辑列：{data}");
+        assert_eq!(column_of(header, "专辑"), column_of(data, "年华"), "专辑列对齐");
         assert!(data.contains("刚刚 · 来自《我的收藏》"), "备注列写时间与来源：{data}");
         assert!(!data.contains("成全 — 刘若英"), "不该再拼「标题 — 歌手」：{data}");
 
@@ -1382,6 +1385,7 @@ mod tests {
                 local_path: None,
                 duration_secs: 0,
                 sizes: crate::model::FileSizes::default(),
+                album_name: String::new(),
             },
             50,
         );
@@ -1390,6 +1394,7 @@ mod tests {
         let rows = frame_raw(&mut app, 140, 30);
         let data = rows.iter().find(|row| row.contains("老条目")).expect("有数据行");
         assert!(data.contains("--:--"), "老记录写占位符：{data}");
+        assert!(data.contains('—'), "老记录没有专辑也写占位符：{data}");
         // 状态栏那行本来就写引擎位置（`00:00/--:--`），这里只看数据行。
         assert!(!data.contains("00:00"), "不许写假的 00:00：{data}");
     }
@@ -1418,6 +1423,7 @@ mod tests {
                 local_path: None,
                 duration_secs: 276,
                 sizes: crate::model::FileSizes::default(),
+                album_name: String::new(),
             },
             50,
         );
@@ -1573,12 +1579,14 @@ mod tests {
         let mut song = crate::tui::test_support::local_song("C:/Music/canto/曲终人散.flac");
         song.local_bytes = 31_457_280;
         song.duration_secs = 270;
+        song.album_name = "曲终人散".to_string();
         app.library = vec![song];
         app.refresh_local_view();
         app.switch_menu(Menu::LocalLibrary);
 
         let text = frame_text(&mut app, 140, 40);
         assert!(text.contains("FLAC"), "本地歌报容器：{text}");
+        assert!(text.contains("曲终人散"), "本地歌也有专辑列：{text}");
         assert!(text.contains("30.0MB"), "本地歌报真实大小：{text}");
         assert!(!text.contains("MP3 128k"), "不该再显示配置档位：{text}");
     }

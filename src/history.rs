@@ -27,6 +27,9 @@ pub struct Entry {
     /// 时长（秒）。后加的字段：老记录没有 → 0 → 列表里写 `--:--`。
     #[serde(default)]
     pub duration_secs: u64,
+    /// 专辑名。后加的字段：老记录没有 → 空串 → 专辑那一格写 `—`。
+    #[serde(default)]
+    pub album_name: String,
     /// 起播那一刻接口报的各档位体积。后加的字段：老记录没有 → 全 0 → 体积 `—`。
     ///
     /// 存**原始档位表**而不是算好的那一档：配置改了之后列表会按新下限重算（跟别的屏一致）。
@@ -229,6 +232,7 @@ mod tests {
             local_path: None,
             duration_secs: 0,
             sizes: crate::model::FileSizes::default(),
+            album_name: String::new(),
         }
     }
 
@@ -245,11 +249,13 @@ mod tests {
             local_path: None,
             duration_secs: 276,
             sizes,
+            album_name: "年华".to_string(),
         };
         let text = serde_json::to_string(&entry).expect("序列化");
         let back: Entry = serde_json::from_str(&text).expect("反序列化");
         assert_eq!(back.duration_secs, 276);
         assert_eq!(back.sizes.mp3_128, 4_400_000);
+        assert_eq!(back.album_name, "年华");
     }
 
     /// 升级前的老文件（没有这两个字段）照样读得出来：默认 0，列表里写 `--:--`/`—`。
@@ -259,6 +265,7 @@ mod tests {
         let entries: Vec<Entry> = serde_json::from_str(old).expect("老文件要读得出来");
         assert_eq!(entries[0].duration_secs, 0);
         assert_eq!(entries[0].sizes.mp3_128, 0);
+        assert_eq!(entries[0].album_name, "");
     }
 
     fn temp_path(tag: &str) -> std::path::PathBuf {

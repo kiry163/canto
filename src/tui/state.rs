@@ -2189,9 +2189,10 @@ impl App {
                 at: history::now_secs(),
                 origin: self.queue.origin().to_string(),
                 local_path: song.path().map(std::path::Path::to_path_buf),
-                // 起播这一刻手里就有时长与各档位体积，落盘存下来（历史屏那几列要用）。
+                // 起播这一刻手里就有时长、专辑与各档位体积，落盘存下来（历史屏那几列要用）。
                 duration_secs: song.duration_secs,
                 sizes: song.sizes,
+                album_name: song.album_name.clone(),
             },
             self.config.history_limit,
         );
@@ -2243,7 +2244,10 @@ impl App {
                     title: entry.title.clone(),
                     singers: entry.singers.clone(),
                     album_mid: String::new(),
-                    album_name: String::new(),
+                    album_name: fresh.map_or_else(
+                        || entry.album_name.clone(),
+                        |song| song.album_name.clone(),
+                    ),
                     duration_secs: fresh.map_or(entry.duration_secs, |song| song.duration_secs),
                     sizes: entry.sizes,
                     local_bytes: fresh.map_or(0, |song| song.local_bytes),
@@ -3297,6 +3301,7 @@ mod tests {
                 local_path: Some(std::path::PathBuf::from("C:/Music/canto/曲终人散.wav")),
                 duration_secs: 0,
                 sizes: crate::model::FileSizes::default(),
+                album_name: String::new(),
             },
             10,
         );
@@ -3310,6 +3315,7 @@ mod tests {
                 local_path: None,
                 duration_secs: 0,
                 sizes: crate::model::FileSizes::default(),
+                album_name: String::new(),
             },
             10,
         );
@@ -4287,6 +4293,7 @@ mod tests {
         let mut song = crate::tui::test_support::titled_song("a", "成全", "刘若英");
         song.duration_secs = 276;
         song.sizes.mp3_128 = 4_400_000;
+        song.album_name = "年华".to_string();
         app.record_history(&song);
 
         // 从历史屏拿到的那份 Song（`refresh_history_view` 还原）再记一次。
@@ -4294,10 +4301,12 @@ mod tests {
         let replayed = app.nav.history_view.items()[0].clone();
         assert_eq!(replayed.duration_secs, 276, "还原要带时长");
         assert_eq!(replayed.sizes.mp3_128, 4_400_000, "还原要带体积");
+        assert_eq!(replayed.album_name, "年华", "还原要带专辑");
         app.record_history(&replayed);
 
         let latest = &app.history.entries()[0];
         assert_eq!(latest.duration_secs, 276);
         assert_eq!(latest.sizes.mp3_128, 4_400_000);
+        assert_eq!(latest.album_name, "年华");
     }
 }
