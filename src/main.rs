@@ -17,6 +17,7 @@ mod media;
 mod model;
 mod overlay;
 mod paths;
+mod playlists;
 mod player;
 mod qq;
 mod qr;
