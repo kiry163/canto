@@ -310,6 +310,8 @@ impl App {
             playing: playing == Some(song.mid.as_str()),
             title: &song.title,
             singers: &song.singers,
+            // 本地条目取曲库那份的专辑（tag 是扫描时读的）；空串由 `rows` 写成 `—`。
+            album: &source.album_name,
             duration: (source.duration_secs > 0).then_some(source.duration_secs),
             tier: Some(copy.tier),
             size: copy.size,

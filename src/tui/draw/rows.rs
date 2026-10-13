@@ -24,6 +24,7 @@ pub(super) enum Field {
     Marker,
     Title,
     Singers,
+    Album,
     Duration,
     Tier,
     Size,
@@ -76,8 +77,17 @@ pub(super) const INDENT: u16 = 2;
 pub(super) const MIN_FOR_HEADER: u16 = 6;
 
 /// 让位顺序：装不下时从前往后撤。`标题`/`标记`/`缓存`/`下载` 永不撤。
-const DROP_ORDER: [Field; 5] =
-    [Field::Note, Field::Size, Field::Tier, Field::Duration, Field::Singers];
+///
+/// `专辑` 排第二：60 列（最小窗口）下它跟 `备注` 一起出局，于是加这一列**没有**动
+/// 最小窗口的观感（历史屏撤完这两列正好 60，其余 8 列一个不少）。
+const DROP_ORDER: [Field; 6] = [
+    Field::Note,
+    Field::Album,
+    Field::Size,
+    Field::Tier,
+    Field::Duration,
+    Field::Singers,
+];
 
 /// 这批列（宽度已定）要占多少列，含列间空格。
 pub(super) fn total(columns: &[Column]) -> u16 {
@@ -139,6 +149,7 @@ pub(super) fn track_columns() -> Vec<Column> {
         column(Field::Marker, "", MARKER, Align::Left),
         fill(Field::Title, "标题", FILL_MIN, Align::Left),
         fill(Field::Singers, "歌手", FILL_MIN, Align::Left),
+        fill(Field::Album, "专辑", FILL_MIN, Align::Left),
         column(Field::Duration, "时长", DURATION, Align::Right),
         column(Field::Tier, "音质", TIER, Align::Left),
         column(Field::Size, "体积", SIZE, Align::Right),
@@ -153,6 +164,7 @@ pub(super) fn local_columns() -> Vec<Column> {
         column(Field::Marker, "", MARKER, Align::Left),
         fill(Field::Title, "标题", FILL_MIN, Align::Left),
         fill(Field::Singers, "歌手", FILL_MIN, Align::Left),
+        fill(Field::Album, "专辑", FILL_MIN, Align::Left),
         column(Field::Duration, "时长", DURATION, Align::Right),
         column(Field::Tier, "音质", TIER, Align::Left),
         column(Field::Size, "体积", SIZE, Align::Right),
@@ -190,6 +202,8 @@ pub(super) struct Row<'a> {
     pub playing: bool,
     pub title: &'a str,
     pub singers: &'a str,
+    /// 专辑名；空串 = 不知道（老历史条目、没打 album tag 的文件）→ 那一格写 `—`。
+    pub album: &'a str,
     /// 秒；`None` = 不知道 → `--:--`。
     pub duration: Option<u64>,
     /// 音质或容器；`None` → `—`。
@@ -239,6 +253,10 @@ fn cell(column: &Column, row: &Row<'_>, width: usize) -> Span<'static> {
         Field::Marker => Span::raw(if row.playing { "♪" } else { " " }.to_string()),
         Field::Title => Span::raw(clip(row.title, width)),
         Field::Singers => Span::raw(clip(row.singers, width)),
+        Field::Album => Span::raw(clip(
+            if row.album.is_empty() { "—" } else { row.album },
+            width,
+        )),
         Field::Duration => {
             let text = row.duration.map_or_else(
                 || "--:--".to_string(),
@@ -263,8 +281,9 @@ fn cell(column: &Column, row: &Row<'_>, width: usize) -> Span<'static> {
             pad(if row.downloaded { "↓" } else { " " }, width, Align::Center),
             Style::new().fg(Color::Cyan),
         ),
+        // 空备注也补齐：别的每一列都会补到列宽，只有它退回空串的话，这一行会比表头短一截。
         Field::Note => Span::styled(
-            row.note.map_or_else(String::new, |note| clip(note, width)),
+            clip(row.note.unwrap_or(""), width),
             Style::new().fg(Color::DarkGray),
         ),
     }
@@ -406,9 +425,11 @@ mod tests {
         }
     }
 
-    /// 60 列（最小窗口）：撤掉「备注」，`标题`/`歌手` 各 12，正好铺满。
+    /// 60 列（最小窗口）：撤掉「备注」与「专辑」，`标题`/`歌手` 各 12，正好铺满。
+    ///
+    /// 这正是 spec 里那句「最紧那一档仍然画」的现状：加专辑列**没有**动 60 列的观感。
     #[test]
-    fn sixty_columns_drop_the_note_and_split_the_rest_evenly() {
+    fn sixty_columns_drop_the_note_and_the_album() {
         let fitted = fit(&history_columns(), 60);
         assert_eq!(
             fields(&fitted),
@@ -422,7 +443,7 @@ mod tests {
                 Field::Cached,
                 Field::Downloaded,
             ],
-            "60 列下只该撤「备注」"
+            "60 列下该撤「备注」与「专辑」"
         );
         assert_eq!(width_of(&fitted, Field::Title), 12);
         assert_eq!(width_of(&fitted, Field::Singers), 12);
@@ -430,50 +451,54 @@ mod tests {
     }
 
     /// 宽屏：9 列全在，定宽列一个都不许动。
-    /// spec §6：60 / 80 / 120 / 200 列各钉一次「哪些列在、`标题`/`歌手` 拿到多少列、正好铺满」。
+    /// spec §6：60 / 80 / 120 / 200 列各钉一次「哪些列在、`标题`/`歌手`/`专辑` 拿到多少列、
+    /// 正好铺满」。
+    ///
+    /// 60 列那两行是加专辑列之前**一模一样**的数字：专辑列自己先出局，所以最小窗口不受影响。
     #[test]
     fn the_fit_shapes_at_the_four_window_widths() {
-        // (宽度, 用历史列集, 列数, 标题宽, 歌手宽)
-        let cases = [
-            (60_u16, false, 8, 12, 12), // 60 列（最小窗口）：撤「备注」，正好铺满
-            (80, false, 8, 22, 22),
-            (120, false, 8, 42, 42),
-            (200, false, 8, 82, 82),
-            (60, true, 8, 12, 12),
-            (80, true, 9, 13, 13), // 80 列起 9 列全在，余量在三个 `Fill` 里等分
-            (120, true, 9, 27, 26), // 除不尽时多出来那一列给前面的
-            (200, true, 9, 53, 53),
+        // (宽度, 哪张屏, 列数, 标题, 歌手, 专辑)
+        let cases: [(u16, &str, usize, u16, u16, u16); 12] = [
+            (60, "曲目", 8, 12, 12, 0), // 装不下「专辑」，正好铺满
+            (80, "曲目", 9, 15, 14, 14),
+            (120, "曲目", 9, 28, 28, 27), // 除不尽时多出来那一列给前面的
+            (200, "曲目", 9, 55, 54, 54),
+            (60, "历史", 8, 12, 12, 0), // 历史屏 60 列撤「备注」+「专辑」
+            (80, "历史", 10, 10, 10, 9),
+            (120, "历史", 10, 20, 20, 19),
+            (200, "历史", 10, 40, 40, 39),
+            (60, "本地", 7, 11, 11, 11), // 本地那屏没有缓存/下载两列（定宽只有 21），60 列就装得下
+            (80, "本地", 7, 18, 18, 17),
+            (120, "本地", 7, 31, 31, 31),
+            (200, "本地", 7, 58, 58, 57),
         ];
-        for (width, history, count, title, singers) in cases {
-            let columns = if history { history_columns() } else { track_columns() };
+        for (width, screen, count, title, singers, album) in cases {
+            let columns = match screen {
+                "曲目" => track_columns(),
+                "历史" => history_columns(),
+                _ => local_columns(),
+            };
             let fitted = fit(&columns, width);
-            assert_eq!(
-                fitted.len(),
-                count,
-                "{width} 列（历史={history}）的列数：{fitted:?}"
-            );
-            assert_eq!(
-                width_of(&fitted, Field::Title),
-                title,
-                "{width} 列（历史={history}）的标题宽"
-            );
-            assert_eq!(
-                width_of(&fitted, Field::Singers),
-                singers,
-                "{width} 列（历史={history}）的歌手宽"
-            );
-            assert_eq!(
-                total(&fitted),
-                width,
-                "{width} 列（历史={history}）要正好铺满"
-            );
+            let where_ = format!("{width} 列（{screen}）");
+            assert_eq!(fitted.len(), count, "{where_}的列数：{fitted:?}");
+            assert_eq!(width_of(&fitted, Field::Title), title, "{where_}的标题宽");
+            assert_eq!(width_of(&fitted, Field::Singers), singers, "{where_}的歌手宽");
+            if album == 0 {
+                assert!(
+                    !fitted.iter().any(|column| column.field == Field::Album),
+                    "{where_}不该有专辑列"
+                );
+            } else {
+                assert_eq!(width_of(&fitted, Field::Album), album, "{where_}的专辑宽");
+            }
+            assert_eq!(total(&fitted), width, "{where_}要正好铺满");
         }
     }
 
     #[test]
     fn a_wide_window_keeps_every_column() {
         let fitted = fit(&history_columns(), 160);
-        assert_eq!(fitted.len(), 9, "160 列下 9 列全在：{fitted:?}");
+        assert_eq!(fitted.len(), 10, "160 列下 10 列全在：{fitted:?}");
         assert_eq!(total(&fitted), 160);
         assert_eq!(width_of(&fitted, Field::Duration), DURATION);
         assert_eq!(width_of(&fitted, Field::Tier), TIER);
@@ -483,10 +508,12 @@ mod tests {
         assert_eq!(width_of(&fitted, Field::Marker), MARKER);
     }
 
-    /// 窄到极限：先撤备注、再撤体积，`标题`/`歌手` 压到下限就停（标记列与标题永不撤）。
+    /// 窄到极限：先撤备注、再撤专辑、然后才是体积，`标题`/`歌手` 压到下限就停
+    /// （标记列与标题永不撤）。
     #[test]
-    fn the_drop_order_goes_note_then_size_then_tier() {
-        // 45 列：先撤「备注」还是不够（52），再撤「体积」→ 44 装得下，余 1 列给第一个 Fill。
+    fn the_drop_order_goes_note_then_album_then_size() {
+        // 45 列：撤「备注」（61）还不够，撤「专辑」（52）还不够，再撤「体积」→ 44 装得下，
+        // 余 1 列给第一个 Fill。
         let fitted = fit(&history_columns(), 45);
         assert_eq!(
             fields(&fitted),
@@ -515,6 +542,7 @@ mod tests {
                 Field::Marker,
                 Field::Title,
                 Field::Singers,
+                Field::Album,
                 Field::Duration,
                 Field::Tier,
                 Field::Size,
@@ -528,6 +556,7 @@ mod tests {
                 Field::Marker,
                 Field::Title,
                 Field::Singers,
+                Field::Album,
                 Field::Duration,
                 Field::Tier,
                 Field::Size
@@ -539,6 +568,7 @@ mod tests {
                 Field::Marker,
                 Field::Title,
                 Field::Singers,
+                Field::Album,
                 Field::Duration,
                 Field::Tier,
                 Field::Size,
@@ -551,6 +581,7 @@ mod tests {
                 Field::Marker,
                 Field::Title,
                 Field::Singers,
+                Field::Album,
                 Field::Duration,
                 Field::Tier,
                 Field::Size,
@@ -593,7 +624,8 @@ mod tests {
     /// 所以这里比的是绝对显示列。
     #[test]
     fn the_header_lines_up_with_the_row() {
-        let columns = fit(&history_columns(), 60);
+        // 120 列：专辑列在这一档是有的（60 列下它自己就出局了）。
+        let columns = fit(&history_columns(), 120);
         let head = render(&header(&columns));
         let row = format!(
             "{}{}",
@@ -604,6 +636,7 @@ mod tests {
                     playing: true,
                     title: "成全",
                     singers: "刘若英",
+                    album: "年华",
                     duration: Some(276),
                     tier: Some("MP3 128k".into()),
                     size: Some(4_400_000),
@@ -622,6 +655,7 @@ mod tests {
         for (field, needle, value) in [
             (Field::Title, "标题", "成全"),
             (Field::Singers, "歌手", "刘若英"),
+            (Field::Album, "专辑", "年华"),
             (Field::Duration, "时长", "04:36"),
             (Field::Tier, "音质", "MP3 128k"),
             (Field::Size, "体积", "4.2MB"),
@@ -663,6 +697,7 @@ mod tests {
                     playing: false,
                     title,
                     singers: "周杰伦",
+                    album: "叶惠美",
                     duration: Some(61),
                     tier: Some("FLAC".into()),
                     size: None,
@@ -698,6 +733,7 @@ mod tests {
                 playing: false,
                 title: "没时长的",
                 singers: "",
+                album: "",
                 duration: None,
                 tier: None,
                 size: None,
@@ -707,7 +743,7 @@ mod tests {
             },
         ));
         assert!(text.contains("--:--"), "时长未知：{text:?}");
-        assert!(text.contains('—'), "音质/体积未知：{text:?}");
+        assert!(text.contains('—'), "音质/体积/专辑未知：{text:?}");
         assert!(!text.contains("00:00"), "不许写假的 00:00：{text:?}");
     }
 
