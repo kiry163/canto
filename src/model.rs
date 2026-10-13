@@ -139,7 +139,9 @@ impl Song {
 }
 
 /// 各档位文件大小；同时用来判断最高可用音质。
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+///
+/// 带 serde：历史记录把它一起落盘（`history::Entry.sizes`），列表据此按当前配置下限重算。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FileSizes {
     pub mp3_128: u64,
     pub mp3_320: u64,

@@ -2189,6 +2189,9 @@ impl App {
                 at: history::now_secs(),
                 origin: self.queue.origin().to_string(),
                 local_path: song.path().map(std::path::Path::to_path_buf),
+                // 起播这一刻手里就有时长与各档位体积，落盘存下来（历史屏那几列要用）。
+                duration_secs: song.duration_secs,
+                sizes: song.sizes,
             },
             self.config.history_limit,
         );
@@ -2208,7 +2211,7 @@ impl App {
 
     /// 历史屏：新在前；每行右侧写「时间 · 来自《来源》」。
     ///
-    /// `history::Entry` 只有 mid / 标题 / 歌手，所以还原出来的 `Song` 没有时长与档位；
+    /// 时长/体积从记录里还原（本地条目优先取**当前曲库**那份，文件被换过就是新值）；
     /// 取流只认 mid（`qq::vkey::candidates` 用 mid 拼文件名，`media_mid` 缺失时回落到
     /// mid），因此能直接播——这一点由实测确认（见 README 的已知限制）。
     pub(super) fn refresh_history_view(&mut self) {
@@ -2221,25 +2224,29 @@ impl App {
             .filter(|entry| self.logged_in() || entry.local_path.is_some())
             .cloned()
             .collect();
+        let library = &self.library;
         let songs: Vec<Song> = entries
             .iter()
-            .map(|entry| Song {
-                mid: entry.mid.clone(),
-                song_id: None,
-                media_mid: None,
-                title: entry.title.clone(),
-                singers: entry.singers.clone(),
-                album_mid: String::new(),
-                album_name: String::new(),
-                duration_secs: 0,
-                sizes: crate::model::FileSizes::default(),
-                // 历史还原的 `Song` 先不带本地大小（Task 8 让记录带上时长/体积，那时一起补）。
-                local_bytes: 0,
-                // 本地条目带得回自己的路径（重播不再经过 vkey）；QQ 老条目照旧。
-                source: match &entry.local_path {
-                    Some(path) => crate::model::Source::Local(path.clone()),
-                    None => crate::model::Source::Qq,
-                },
+            .map(|entry| {
+                // 本地条目以**当前曲库**为准（文件可能被换过 / 重新扫过）；查不到就用记录里那份。
+                let fresh = library.iter().find(|song| song.mid == entry.mid);
+                Song {
+                    mid: entry.mid.clone(),
+                    song_id: None,
+                    media_mid: None,
+                    title: entry.title.clone(),
+                    singers: entry.singers.clone(),
+                    album_mid: String::new(),
+                    album_name: String::new(),
+                    duration_secs: fresh.map_or(entry.duration_secs, |song| song.duration_secs),
+                    sizes: entry.sizes,
+                    local_bytes: fresh.map_or(0, |song| song.local_bytes),
+                    // 本地条目带得回自己的路径（重播不再经过 vkey）；QQ 老条目照旧。
+                    source: match &entry.local_path {
+                        Some(path) => crate::model::Source::Local(path.clone()),
+                        None => crate::model::Source::Qq,
+                    },
+                }
             })
             .collect();
         let labels: Vec<String> = entries
@@ -3282,6 +3289,8 @@ mod tests {
                 at: 2,
                 origin: "本地曲库".to_string(),
                 local_path: Some(std::path::PathBuf::from("C:/Music/canto/曲终人散.wav")),
+                duration_secs: 0,
+                sizes: crate::model::FileSizes::default(),
             },
             10,
         );
@@ -3293,6 +3302,8 @@ mod tests {
                 at: 1,
                 origin: "我的收藏".to_string(),
                 local_path: None,
+                duration_secs: 0,
+                sizes: crate::model::FileSizes::default(),
             },
             10,
         );
@@ -4206,5 +4217,26 @@ mod tests {
         assert!(app.downloads.is_empty(), "重扫之后删掉的那份不该还在");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 历史重播：还原出来的 Song 带着时长/体积，所以新记录照样完整（不会越播越空）。
+    #[test]
+    fn replaying_from_history_keeps_the_duration_and_sizes() {
+        let (mut app, _runtime) = test_app();
+        let mut song = crate::tui::test_support::titled_song("a", "成全", "刘若英");
+        song.duration_secs = 276;
+        song.sizes.mp3_128 = 4_400_000;
+        app.record_history(&song);
+
+        // 从历史屏拿到的那份 Song（`refresh_history_view` 还原）再记一次。
+        app.refresh_history_view();
+        let replayed = app.nav.history_view.items()[0].clone();
+        assert_eq!(replayed.duration_secs, 276, "还原要带时长");
+        assert_eq!(replayed.sizes.mp3_128, 4_400_000, "还原要带体积");
+        app.record_history(&replayed);
+
+        let latest = &app.history.entries()[0];
+        assert_eq!(latest.duration_secs, 276);
+        assert_eq!(latest.sizes.mp3_128, 4_400_000);
     }
 }
