@@ -24,6 +24,14 @@ impl App {
         } else {
             area
         };
+        // 名字输入行占顶上那一行（输入态进来就画，跟筛选输入行同一条道理）。
+        let area = if self.local_input.is_some() {
+            let rows = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(area);
+            self.draw_local_input(frame, rows[0]);
+            rows[1]
+        } else {
+            area
+        };
         match self.nav.menu {
             Menu::Playlists if self.nav.shown.is_none() => {
                 let items: Vec<ListItem> = self
@@ -39,6 +47,43 @@ impl App {
                     .highlight_style(highlight())
                     .highlight_symbol("▶ ");
                 frame.render_stateful_widget(list, area, &mut self.nav.playlists.state);
+            }
+            Menu::LocalPlaylists if self.nav.local_shown.is_none() => {
+                if self.nav.local_playlists.items().is_empty() {
+                    frame.render_widget(
+                        Paragraph::new("还没有本地歌单 · N 新建一张")
+                            .style(Style::new().fg(Color::DarkGray))
+                            .alignment(ratatui::layout::Alignment::Center)
+                            .block(panel_block(&title)),
+                        area,
+                    );
+                } else {
+                    let items: Vec<ListItem> = self
+                        .nav
+                        .local_playlists
+                        .visible_rows()
+                        .map(|(playlist, _)| {
+                            ListItem::new(format!("{:>5}  {}", playlist.songs.len(), playlist.name))
+                        })
+                        .collect();
+                    let list = List::new(items)
+                        .block(panel_block(&title))
+                        .highlight_style(highlight())
+                        .highlight_symbol("▶ ");
+                    frame.render_stateful_widget(list, area, &mut self.nav.local_playlists.state);
+                }
+            }
+            // 空歌单：进去之后列表是空的，得说一句「怎么往里加」，别只留一块空白。
+            Menu::LocalPlaylists
+                if self.nav.local_shown.is_some() && self.nav.local_tracks.items().is_empty() =>
+            {
+                frame.render_widget(
+                    Paragraph::new("空歌单 · 曲库里按 P 把歌加进来")
+                        .style(Style::new().fg(Color::DarkGray))
+                        .alignment(ratatui::layout::Alignment::Center)
+                        .block(panel_block(&title)),
+                    area,
+                );
             }
             Menu::Search => {
                 // 输入行占第一行（Task 7 把它做成常驻），结果在下面。
@@ -97,6 +142,16 @@ impl App {
                 self.nav.local_view.items().len(),
                 "首",
             ),
+            (Menu::LocalPlaylists, true) => (
+                self.nav.title_chain().join(" › "),
+                self.nav.local_tracks.items().len(),
+                "首",
+            ),
+            (Menu::LocalPlaylists, false) => (
+                self.nav.menu.title().to_string(),
+                self.nav.local_playlists.items().len(),
+                "张",
+            ),
             (Menu::Playlists, false) => (
                 self.nav.menu.title().to_string(),
                 self.nav.playlists.items().len(),
@@ -112,11 +167,7 @@ impl App {
                 self.nav.search_results.items().len(),
                 "首",
             ),
-            (Menu::History, _) => (
-                self.nav.menu.title().to_string(),
-                self.history.len(),
-                "条",
-            ),
+            (Menu::History, _) => (self.nav.menu.title().to_string(), self.history.len(), "条"),
         }
     }
 
@@ -125,6 +176,21 @@ impl App {
         let line = Line::from(vec![
             Span::styled("筛选：", Style::new().fg(Color::Yellow)),
             Span::raw(self.nav.filter_text().to_string()),
+            Span::styled("▏", Style::new().fg(Color::Yellow)),
+        ]);
+        frame.render_widget(Paragraph::new(line), area);
+    }
+
+    /// 本地歌单的名字输入行（`N` 新建 / `R` 改名）。跟筛选输入行一样的道理：
+    /// 不画出来的话，打进去的字看不见。
+    pub(super) fn draw_local_input(&self, frame: &mut Frame, area: Rect) {
+        let Some(input) = self.local_input.as_ref() else {
+            return;
+        };
+        let what = input.label();
+        let line = Line::from(vec![
+            Span::styled(what, Style::new().fg(Color::Yellow)),
+            Span::raw(input.text.clone()),
             Span::styled("▏", Style::new().fg(Color::Yellow)),
         ]);
         frame.render_widget(Paragraph::new(line), area);
@@ -225,6 +291,13 @@ impl App {
                     Style::new().fg(Color::Green),
                 ));
                 line.push(Span::raw(format!("{} — {}", song.title, song.singers)));
+                // 本地歌单里的条目：文件被移走 / 改名之后也留着（不然歌单会被一次扫描清空），
+                // 认不出来就标一句，免得让人以为还能播。
+                if self.nav.menu == Menu::LocalPlaylists
+                    && !self.library.iter().any(|kept| kept.mid == song.mid)
+                {
+                    line.push(Span::styled("（已丢失）", Style::new().fg(Color::DarkGray)));
+                }
                 ListItem::new(Line::from(line))
             })
             .collect();

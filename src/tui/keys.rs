@@ -52,6 +52,15 @@ pub enum Action {
     LoginRetry,
     AddToPlaylist,
     RemoveFromPlaylist,
+    /// `N`：新建一张本地歌单（本地歌单屏；进名字输入态）。
+    LocalPlaylistCreate,
+    /// `R`：给选中的本地歌单改名（本地歌单屏）。
+    LocalPlaylistRename,
+    /// 本地歌单名字输入态里打的字。
+    LocalInputChar(char),
+    LocalInputBackspace,
+    LocalInputSubmit,
+    LocalInputCancel,
     Download,
     ToggleLyric,
     /// `v`：频谱区（与列表互斥；歌词栏不在时吃满内容区）。
@@ -90,6 +99,8 @@ pub enum Context {
     SearchInput,
     /// `/` 打开的列表筛选框（跟搜索框一样是文本输入，只是 Enter 的含义不同）。
     FilterInput,
+    /// 本地歌单的名字输入框（`N` 新建 / `R` 改名）。
+    LocalInput,
     /// `p` 弹出的歌单选择框。
     PlaylistPicker,
     /// 帮助浮层。
@@ -112,6 +123,16 @@ pub fn resolve(context: Context, key: KeyEvent) -> Option<Action> {
             KeyCode::Backspace => Some(Action::FilterBackspace),
             KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 Some(Action::FilterChar(character))
+            }
+            _ => None,
+        },
+        // 名字输入框：跟筛选框一样是文本，只是 Enter 提交、Esc 放弃。
+        Context::LocalInput => match key.code {
+            KeyCode::Enter => Some(Action::LocalInputSubmit),
+            KeyCode::Esc => Some(Action::LocalInputCancel),
+            KeyCode::Backspace => Some(Action::LocalInputBackspace),
+            KeyCode::Char(character) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                Some(Action::LocalInputChar(character))
             }
             _ => None,
         },
@@ -171,7 +192,7 @@ pub fn resolve(context: Context, key: KeyEvent) -> Option<Action> {
             KeyCode::Char('G') | KeyCode::End => Some(Action::Last),
             KeyCode::Enter => Some(Action::Enter),
             KeyCode::Char('0') => Some(Action::Home),
-            KeyCode::Char(digit @ '1'..='5') => Some(Action::Menu(digit as usize - '1' as usize)),
+            KeyCode::Char(digit @ '1'..='6') => Some(Action::Menu(digit as usize - '1' as usize)),
             // 播放控制跟主界面同一套键（含 `h`/`l`、`.`/`,` 这两个拼法）。
             KeyCode::Char(' ') => Some(Action::PlayPause),
             KeyCode::Char('n') => Some(Action::Next),
@@ -198,7 +219,7 @@ fn common(key: KeyEvent) -> Option<Action> {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         // 数字键切屏——菜单栏去掉后这是唯一的切屏入口，帮助浮层里有这张表。
-        KeyCode::Char(digit @ '1'..='5') => Some(Action::Menu(digit as usize - '1' as usize)),
+        KeyCode::Char(digit @ '1'..='6') => Some(Action::Menu(digit as usize - '1' as usize)),
         // `0` = 回首页（跟四屏同一套编号；首页自己也是 `0`）。
         KeyCode::Char('0') => Some(Action::Home),
         KeyCode::Char('q') => Some(Action::Quit),
@@ -229,6 +250,10 @@ fn common(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('u') => Some(Action::QueueOverlay),
         KeyCode::Char('D') => Some(Action::HistoryClear),
         KeyCode::Char('x') => Some(Action::RemoveFromPlaylist),
+        // `N` / `R` 是「本地歌单」屏的两个入口（别的屏按了没反应，见 `state.rs` 的分岔）；
+        // 小写 `n` 是「下一首」，别抢。
+        KeyCode::Char('N') => Some(Action::LocalPlaylistCreate),
+        KeyCode::Char('R') => Some(Action::LocalPlaylistRename),
         KeyCode::Char('d') => Some(Action::Download),
         KeyCode::Char('y') => Some(Action::ToggleLyric),
         // `v` = 频谱区。两个开关独立：`y` 管歌词栏、`v` 管频谱区。
@@ -494,8 +519,30 @@ mod tests {
         assert_eq!(press(Context::Content, KeyCode::Char('3')), Some(Action::Menu(2)));
         assert_eq!(press(Context::Content, KeyCode::Char('4')), Some(Action::Menu(3)));
         assert_eq!(press(Context::Content, KeyCode::Char('5')), Some(Action::Menu(4)));
-        assert_eq!(press(Context::Content, KeyCode::Char('6')), None, "只有五项");
+        assert_eq!(press(Context::Content, KeyCode::Char('6')), Some(Action::Menu(5)));
+        assert_eq!(press(Context::Content, KeyCode::Char('7')), None, "只有六项");
         assert_eq!(press(Context::Content, KeyCode::Char('r')), Some(Action::LocalRescan));
+    }
+
+    /// 本地歌单屏的两个入口不许抢走 `n`（`n` 是下一首）。
+    #[test]
+    fn the_local_playlist_keys_do_not_steal_n() {
+        assert_eq!(
+            press(Context::Content, KeyCode::Char('N')),
+            Some(Action::LocalPlaylistCreate)
+        );
+        assert_eq!(
+            press(Context::Content, KeyCode::Char('R')),
+            Some(Action::LocalPlaylistRename)
+        );
+        assert_eq!(press(Context::Content, KeyCode::Char('n')), Some(Action::Next), "`n` 还是下一首");
+        // 输入态里打的是字，不是快捷键。
+        assert_eq!(
+            press(Context::LocalInput, KeyCode::Char('N')),
+            Some(Action::LocalInputChar('N'))
+        );
+        assert_eq!(press(Context::LocalInput, KeyCode::Enter), Some(Action::LocalInputSubmit));
+        assert_eq!(press(Context::LocalInput, KeyCode::Esc), Some(Action::LocalInputCancel));
     }
 
     #[test]

@@ -6,9 +6,6 @@
 //!
 //! 条目只存 `mid` + 标题与歌手的**快照**：文件被移走或改名后条目还在（渲染成「（已丢失）」），
 //! 不会因为一次扫描就把歌单清空。
-// Task 10/11 的本地歌单屏一接上就摘掉这个 `allow(dead_code)`：
-// 现在是「存储先落地、界面还没来」的中间态。
-#![allow(dead_code)]
 
 use std::path::Path;
 
@@ -42,6 +39,15 @@ pub enum NameError {
     Duplicate,
 }
 
+impl std::fmt::Display for NameError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            NameError::Empty => "名字不能是空的",
+            NameError::Duplicate => "这个名字已经有过了",
+        })
+    }
+}
+
 /// `local_playlists.json` 的全部内容。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Store {
@@ -68,7 +74,10 @@ impl Store {
         match serde_json::from_str::<Self>(&text) {
             Ok(store) if store.version == VERSION => store,
             Ok(store) => {
-                tracing::warn!("本地歌单版本是 {}（当前 {VERSION}），按空处理", store.version);
+                tracing::warn!(
+                    "本地歌单版本是 {}（当前 {VERSION}），按空处理",
+                    store.version
+                );
                 Self::default()
             }
             Err(error) => {
@@ -112,6 +121,8 @@ impl Store {
     }
 
     /// 加一首：同一 `mid` 只留一份，顺序就是加入顺序。
+    /// Task 11 的 `P` 会把曲库里的歌加进来;本任务先只有测试在用。
+    #[allow(dead_code)]
     pub fn add(&mut self, index: usize, song: &Song) {
         let Some(playlist) = self.playlists.get_mut(index) else {
             return;
@@ -143,13 +154,6 @@ impl Store {
         }
     }
 
-    /// 第 `index` 张歌单有几首（越界按 0）。
-    pub fn len_of(&self, index: usize) -> usize {
-        self.playlists
-            .get(index)
-            .map_or(0, |playlist| playlist.songs.len())
-    }
-
     /// 名字校验：去首尾空白 → 非空 → 不与**别的**歌单重名（`ignore` 是正在改名的那张）。
     fn check_name(
         &self,
@@ -177,11 +181,8 @@ mod tests {
     use super::*;
 
     fn tmp_file(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "canto-playlists-{}-{}",
-            std::process::id(),
-            name
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("canto-playlists-{}-{}", std::process::id(), name));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).expect("建目录");
         dir.join("local_playlists.json")
@@ -205,14 +206,23 @@ mod tests {
         let path = tmp_file("round-trip");
         let mut store = Store::default();
         let index = store.create("通勤").expect("建歌单");
-        store.add(index, &local_song(std::path::Path::new(r"C:\m\张宇 - 曲终人散.mp3"), "曲终人散"));
+        store.add(
+            index,
+            &local_song(
+                std::path::Path::new(r"C:\m\张宇 - 曲终人散.mp3"),
+                "曲终人散",
+            ),
+        );
         store.rename(index, "通勤路上").expect("改名");
         store.save(&path).expect("落盘");
 
         let back = Store::load(&path);
         assert_eq!(back.playlists.len(), 1);
         assert_eq!(back.playlists[0].name, "通勤路上");
-        assert_eq!(back.playlists[0].songs[0].mid, r"local:C:\m\张宇 - 曲终人散.mp3");
+        assert_eq!(
+            back.playlists[0].songs[0].mid,
+            r"local:C:\m\张宇 - 曲终人散.mp3"
+        );
         assert_eq!(back.playlists[0].songs[0].title, "曲终人散", "标题快照留着");
         assert_eq!(back.playlists[0].songs[0].singers, "张宇");
     }
@@ -222,7 +232,11 @@ mod tests {
         let mut store = Store::default();
         store.create("通勤").expect("建歌单");
         assert_eq!(store.create("通勤"), Err(NameError::Duplicate));
-        assert_eq!(store.create("  通勤  "), Err(NameError::Duplicate), "先去掉首尾空白再比");
+        assert_eq!(
+            store.create("  通勤  "),
+            Err(NameError::Duplicate),
+            "先去掉首尾空白再比"
+        );
         assert_eq!(store.create("   "), Err(NameError::Empty));
         let other = store.create("另一个").expect("第二个歌单");
         assert_eq!(store.rename(other, ""), Err(NameError::Empty));
@@ -238,7 +252,11 @@ mod tests {
         store.add(index, &a);
         store.add(index, &b);
         store.add(index, &a);
-        assert_eq!(store.len_of(index), 2, "同一首加两次只留一份");
+        assert_eq!(
+            store.playlists[index].songs.len(),
+            2,
+            "同一首加两次只留一份"
+        );
         assert_eq!(store.playlists[0].songs[1].mid, b.mid, "顺序就是加入顺序");
     }
 
@@ -248,7 +266,7 @@ mod tests {
         let index = store.create("通勤").expect("建歌单");
         store.add(index, &local_song(std::path::Path::new("/m/a.mp3"), "甲"));
         store.remove(index, 0);
-        assert_eq!(store.len_of(index), 0, "移出一首");
+        assert_eq!(store.playlists[index].songs.len(), 0, "移出一首");
         store.delete(index);
         assert!(store.playlists.is_empty(), "删整张歌单");
     }
@@ -258,12 +276,18 @@ mod tests {
         let path = tmp_file("missing");
         let mut store = Store::default();
         let index = store.create("通勤").expect("建歌单");
-        store.add(index, &local_song(std::path::Path::new("/m/gone.mp3"), "走远了"));
+        store.add(
+            index,
+            &local_song(std::path::Path::new("/m/gone.mp3"), "走远了"),
+        );
         store.save(&path).expect("落盘");
         // 文件已经不在磁盘上：条目仍然读得回来、名字还留着。
         let back = Store::load(&path);
-        assert_eq!(back.len_of(0), 1);
-        assert_eq!(back.playlists[0].songs[0].title, "走远了", "标题快照不依赖文件在不在");
+        assert_eq!(back.playlists[0].songs.len(), 1);
+        assert_eq!(
+            back.playlists[0].songs[0].title, "走远了",
+            "标题快照不依赖文件在不在"
+        );
     }
 
     #[test]

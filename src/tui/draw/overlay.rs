@@ -132,6 +132,16 @@ fn help_rows(screen: Option<Menu>, hotkeys: &HotkeyConfig) -> Vec<Row> {
             Menu::Favorites => ("", Vec::new()),
             // 本地曲库也没有屏专属段：`Enter`/`a`/`A`/`r` 已经在下面「歌曲」那一段里。
             Menu::LocalLibrary => ("", Vec::new()),
+            Menu::LocalPlaylists => (
+                "本地歌单",
+                vec![
+                    Row::Keys { keys: "Enter", help: "进入该歌单的曲目" },
+                    Row::Keys { keys: "Esc", help: "回歌单列表" },
+                    Row::Keys { keys: "N", help: "新建歌单" },
+                    Row::Keys { keys: "R", help: "改名" },
+                    Row::Keys { keys: "D", help: "删除这张歌单（按两次）" },
+                ],
+            ),
             Menu::Playlists => (
                 "歌单",
                 vec![
@@ -191,6 +201,14 @@ fn help_rows(screen: Option<Menu>, hotkeys: &HotkeyConfig) -> Vec<Row> {
             Row::Keys { keys: "Enter", help: "播放选中" },
             Row::Keys { keys: "a / A", help: "追加到队尾 / 插到下一首" },
             Row::Keys { keys: "r", help: "重扫曲库" },
+        ]);
+    } else if matches!(screen, Some(Menu::LocalPlaylists)) {
+        rows.extend([
+            Row::Section("本地歌单里的歌"),
+            Row::Keys { keys: "Enter", help: "播放选中" },
+            Row::Keys { keys: "a / A", help: "追加到队尾 / 插到下一首" },
+            Row::Keys { keys: "x", help: "移出这张歌单" },
+            Row::Keys { keys: "P", help: "把曲库里的歌加进来" },
         ]);
     } else if list {
         rows.extend([

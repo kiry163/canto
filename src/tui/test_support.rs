@@ -33,6 +33,11 @@ pub(super) fn test_app() -> (App, tokio::runtime::Runtime) {
             "canto-test-{}-{unique}-history.json",
             std::process::id()
         )),
+        // 本地歌单也各用各的：这条以前漏了，测试真去动了使用者 `~/.config/canto` 里那份。
+        std::env::temp_dir().join(format!(
+            "canto-test-{}-{unique}-local_playlists.json",
+            std::process::id()
+        )),
         tx,
     );
     // 大多数测试跑在「已登录」的世界里（未登录那几条自己把这个置回 false）：
@@ -71,10 +76,8 @@ pub(super) fn test_song(mid: &str) -> Song {
 
 /// 一棵两首曲目的临时曲库树：`<tmp>/canto/{a.wav, b.wav}`（内容是垃圾，只要扫得到）。
 pub(super) fn temp_library_tree(name: &str) -> std::path::PathBuf {
-    let root = std::env::temp_dir().join(format!(
-        "canto-test-{name}-{}-library",
-        std::process::id()
-    ));
+    let root =
+        std::env::temp_dir().join(format!("canto-test-{name}-{}-library", std::process::id()));
     std::fs::remove_dir_all(&root).ok();
     let canto = root.join("canto");
     std::fs::create_dir_all(&canto).expect("建曲库树");

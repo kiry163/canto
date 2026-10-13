@@ -91,7 +91,6 @@ pub fn local_mid(path: &Path) -> String {
 }
 
 /// [`local_mid`] 的反向：不是本地键（或路径为空）就是 `None`。
-#[allow(dead_code)]
 pub fn local_path(mid: &str) -> Option<PathBuf> {
     mid.strip_prefix("local:")
         .filter(|path| !path.is_empty())

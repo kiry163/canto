@@ -189,10 +189,11 @@ pub fn hints(context: keys::Context) -> &'static str {
         }
         // 首页没有「选中的歌」：提示里只给进屏 / 切屏与播放这几条。
         keys::Context::Home => {
-            "Enter 进入 · 1-5 直跳 · Space 暂停 · n/b 切歌 · u 队列 · ? 帮助"
+            "Enter 进入 · 1-6 直跳 · Space 暂停 · n/b 切歌 · u 队列 · ? 帮助"
         }
         keys::Context::SearchInput => "输入关键词 · Enter 搜索 · Esc 退出输入",
         keys::Context::FilterInput => "输入即筛选 · Enter 确认 · Esc 清空",
+        keys::Context::LocalInput => "输入歌单名 · Enter 确认 · Esc 放弃",
         keys::Context::PlaylistPicker => "j/k 选歌单 · Enter 确认 · Esc 取消",
         // 帮助浮层自己不再带底栏：关闭 / 滚动在这条状态行提示里；**登出不写**——它已经
         // 是全局键，浮层「全局」段里有它那一行，状态行只留这会儿最顺手的几个。
@@ -266,6 +267,45 @@ mod tests {
     use crate::tui::queue;
     use crate::tui::state::Menu;
     use crate::tui::test_support::{test_app, test_song};
+
+    /// 本地歌单屏：一张都没有时给入口；进去看空歌单有话说；文件没了的条目照样列出来、
+    /// 并且标「（已丢失）」。
+    #[test]
+    fn the_local_playlist_screen_paints_empty_and_lost_entries() {
+        let (mut app, _runtime) = test_app();
+        app.switch_menu(Menu::LocalPlaylists);
+        let empty = frame_rows(&mut app, 100, 24).join("\n");
+        assert!(empty.contains("还没有本地歌单"), "{empty:?}");
+
+        app.playlists_store.create("通勤").expect("建歌单");
+        app.switch_menu(Menu::LocalPlaylists);
+        let listed = frame_rows(&mut app, 100, 24).join("\n");
+        assert!(listed.contains("通勤"), "{listed:?}");
+
+        app.apply(crate::tui::keys::Action::Enter);
+        let opened = frame_rows(&mut app, 100, 24).join("\n");
+        assert!(opened.contains("空歌单"), "{opened:?}");
+
+        // 条目在，文件（与曲库）里没有：列表照样画这一行，后面缀一句「（已丢失）」。
+        app.apply(crate::tui::keys::Action::Back);
+        app.playlists_store.add(
+            0,
+            &crate::library::entry_to_song(&crate::library::Entry {
+                path: std::path::PathBuf::from("C:/m/gone.wav"),
+                mtime: 0,
+                size: 0,
+                title: "走远了".to_string(),
+                artist: "人".to_string(),
+                album: String::new(),
+                duration_secs: 0,
+            }),
+        );
+        app.switch_menu(Menu::LocalPlaylists);
+        app.apply(crate::tui::keys::Action::Enter);
+        let lost = frame_rows(&mut app, 100, 24).join("\n");
+        assert!(lost.contains("走远了"), "{lost:?}");
+        assert!(lost.contains("（已丢失）"), "{lost:?}");
+    }
 
     /// 把一帧按行铺开（每行去空白），要比较「谁在上面」时用得上。
     fn frame_rows(app: &mut App, width: u16, height: u16) -> Vec<String> {
@@ -613,7 +653,7 @@ mod tests {
         app.screen = Screen::Home;
         let status = frame_rows(&mut app, 120, 30).pop().expect("状态行");
         assert!(status.contains("Enter进入"), "{status:?}");
-        assert!(status.contains("1-5直跳"), "{status:?}");
+        assert!(status.contains("1-6直跳"), "{status:?}");
         assert!(!status.contains("Enter播放"), "不是主界面那条：{status:?}");
     }
 
@@ -643,9 +683,9 @@ mod tests {
             .map(|row| columns_of(row, '┌'))
             .filter(|columns| !columns.is_empty())
             .collect();
-        assert_eq!(tops.len(), 2, "两行格子（5 项 = 3 + 2）：{tops:?}");
+        assert_eq!(tops.len(), 2, "两行格子（6 项 = 3 + 3）：{tops:?}");
         assert_eq!(tops[0].len(), 3, "第 1 行三格：{tops:?}");
-        assert_eq!(tops[1].len(), 2, "第 2 行两格：{tops:?}");
+        assert_eq!(tops[1].len(), 3, "第 2 行三格：{tops:?}");
         assert_eq!(tops[0][1] - tops[0][0], tops[0][2] - tops[0][1], "列距要一致：{tops:?}");
         assert_eq!(tops[1][0], tops[0][0], "换行那一格对齐第 1 列：{tops:?}");
     }

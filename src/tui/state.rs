@@ -12,17 +12,18 @@ use crossterm::event::KeyEvent;
 use ratatui::widgets::ListState;
 
 use crate::config::Config;
-use crate::session;
+use crate::download;
 use crate::history::{self, History};
 use crate::hotkeys;
-use crate::overlay;
-use crate::download;
 use crate::model::{Lyric, Playlist, Song};
-use crate::player::{Engine, Track};
-use crate::qq;
+use crate::overlay;
 use crate::paths;
+use crate::player::{Engine, Track};
+use crate::playlists::{self, LocalPlaylist};
+use crate::qq;
 use crate::qq::vkey::Candidate;
 use crate::qr;
+use crate::session;
 
 use super::keys;
 use super::login::{self, LoginPhase, LoginState};
@@ -60,11 +61,8 @@ pub(super) enum Screen {
 ///
 /// **阻塞**（读 tag 是磁盘密集型）：只从后台线程里调。测试直接调它——线程那一层没有逻辑。
 fn scan_library(dirs: &[std::path::PathBuf], index_path: &std::path::Path) -> Msg {
-    let missing_dirs: Vec<std::path::PathBuf> = dirs
-        .iter()
-        .filter(|dir| !dir.is_dir())
-        .cloned()
-        .collect();
+    let missing_dirs: Vec<std::path::PathBuf> =
+        dirs.iter().filter(|dir| !dir.is_dir()).cloned().collect();
     let previous = crate::library::load_index(index_path, dirs);
     let outcome = crate::library::rescan(&previous, dirs);
     if let Err(error) = crate::library::save_index(index_path, &outcome.index) {
@@ -82,7 +80,10 @@ fn scan_library(dirs: &[std::path::PathBuf], index_path: &std::path::Path) -> Ms
 /// 后台任务的回话。
 pub(super) enum Msg {
     /// 拿到一张二维码（`attempt` 是第几张）。
-    Qr { png: Vec<u8>, attempt: u32 },
+    Qr {
+        png: Vec<u8>,
+        attempt: u32,
+    },
     /// 已扫码，等手机上确认。
     QrScanned,
     /// 扫码登录成功（`identity` 是账号）。
@@ -127,7 +128,7 @@ pub(super) enum Msg {
     },
 }
 
-/// 主界面屏（原左栏菜单项）。顺序即数字键 `1`–`5` 的顺序。
+/// 主界面屏（原左栏菜单项）。顺序即数字键 `1`–`6` 的顺序。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Menu {
     Favorites,
@@ -136,15 +137,18 @@ pub(super) enum Menu {
     History,
     /// 本地曲库：数据来自扫出来的索引（`library.rs`），**不发任何网络请求**。
     LocalLibrary,
+    /// 本地歌单：使用者自己建的（`playlists.rs`），落 `local_playlists.json`。
+    LocalPlaylists,
 }
 
 impl Menu {
-    pub const ALL: [Menu; 5] = [
+    pub const ALL: [Menu; 6] = [
         Menu::Favorites,
         Menu::Playlists,
         Menu::Search,
         Menu::History,
         Menu::LocalLibrary,
+        Menu::LocalPlaylists,
     ];
 
     pub fn title(self) -> &'static str {
@@ -154,6 +158,7 @@ impl Menu {
             Menu::Search => "搜索",
             Menu::History => "历史",
             Menu::LocalLibrary => "本地曲库",
+            Menu::LocalPlaylists => "本地歌单",
         }
     }
 }
@@ -191,6 +196,17 @@ fn matches_song(song: &Song, needle: &str) -> bool {
 /// 歌单按名字筛。
 fn matches_playlist(playlist: &Playlist, needle: &str) -> bool {
     playlist.name.to_lowercase().contains(needle)
+}
+
+/// 本地歌单按名字筛（它只有名字）。
+fn matches_local_playlist(playlist: &LocalPlaylist, needle: &str) -> bool {
+    playlist.name.to_lowercase().contains(needle)
+}
+
+impl ListView<LocalPlaylist> {
+    pub(super) fn local_playlists() -> Self {
+        Self::with_matcher(matches_local_playlist)
+    }
 }
 
 impl ListView<Song> {
@@ -241,7 +257,9 @@ impl<T> ListView<T> {
 
     /// 当前可见的条目。
     pub(super) fn visible_items(&self) -> impl Iterator<Item = &T> {
-        self.visible.iter().filter_map(|index| self.items.get(*index))
+        self.visible
+            .iter()
+            .filter_map(|index| self.items.get(*index))
     }
 
     /// 当前可见的行：条目 + 右侧副标题（没有副标题就是空串）。
@@ -348,6 +366,11 @@ pub(super) struct Nav {
     pub history_view: ListView<Song>,
     /// 本地曲库那一屏的列表（扫描结果灌进来，`refresh_local_view` 负责同步）。
     pub local_view: ListView<Song>,
+    /// 本地歌单那一屏：歌单名列一份，「进去看曲目」的曲目另列一份。
+    pub local_playlists: ListView<LocalPlaylist>,
+    pub local_tracks: ListView<Song>,
+    /// 当前进到哪张本地歌单里（`None` = 还在歌单列表那一级）；名字给面包屑用。
+    pub local_shown: Option<(usize, String)>,
     /// 当前曲目层对应的歌单（`None` = 不在嵌套层里）。
     pub shown: Option<(String, String)>,
     /// 这两屏的数据拉过没有（空列表也可能是「真的没有」，不能靠 `is_empty` 判断）。
@@ -369,6 +392,9 @@ impl Nav {
             search_results: ListView::songs(),
             history_view: ListView::songs(),
             local_view: ListView::songs(),
+            local_playlists: ListView::local_playlists(),
+            local_tracks: ListView::songs(),
+            local_shown: None,
             shown: None,
             favorites_loaded: false,
             playlists_loaded: false,
@@ -386,6 +412,10 @@ impl Nav {
     pub fn title_chain(&self) -> Vec<String> {
         match (self.menu, &self.shown) {
             (Menu::Playlists, Some((_, name))) => vec!["我的歌单".to_string(), name.clone()],
+            (Menu::LocalPlaylists, _) => match &self.local_shown {
+                Some((_, name)) => vec!["本地歌单".to_string(), name.clone()],
+                None => vec!["本地歌单".to_string()],
+            },
             (menu, _) => vec![menu.title().to_string()],
         }
     }
@@ -413,7 +443,8 @@ impl Nav {
 
     /// 焦点在主区时，能不能进入下一层（歌单列表 → 曲目）。
     pub fn can_enter_depth(&self) -> bool {
-        self.menu == Menu::Playlists && self.shown.is_none()
+        (self.menu == Menu::Playlists && self.shown.is_none())
+            || (self.menu == Menu::LocalPlaylists && self.local_shown.is_none())
     }
 
     /// 进入「我的歌单 › 嗯」这一层：清掉旧曲目、记住在哪个歌单里（标题由 `shown` 派生）。
@@ -428,10 +459,21 @@ impl Nav {
         self.push_tracks(id, name, Vec::new());
     }
 
+    /// 进入「本地歌单 › 某张」这一层：曲目由存储里的条目现造（文件没了也在，标「（已丢失）」）。
+    pub fn push_local_tracks(&mut self, index: usize, name: &str, songs: Vec<Song>) {
+        self.local_shown = Some((index, name.to_string()));
+        self.local_tracks = ListView::songs();
+        self.local_tracks.set_items(songs);
+    }
+
     /// 返回上一层。返回 `true` 表示这次的 Esc 被吃掉了。
     pub fn pop_tracks(&mut self) -> bool {
         if self.shown.take().is_none() {
-            return false;
+            if self.local_shown.take().is_none() {
+                return false;
+            }
+            self.local_tracks = ListView::songs();
+            return true;
         }
         self.tracks = ListView::songs();
         true
@@ -441,6 +483,9 @@ impl Nav {
     pub fn filter_text(&self) -> &str {
         match self.menu {
             Menu::Playlists if self.shown.is_none() => self.playlists.filter_text(),
+            Menu::LocalPlaylists if self.local_shown.is_none() => {
+                self.local_playlists.filter_text()
+            }
             _ => self.song_view().filter_text(),
         }
     }
@@ -449,6 +494,9 @@ impl Nav {
     pub fn set_filter(&mut self, keyword: &str) {
         match self.menu {
             Menu::Playlists if self.shown.is_none() => self.playlists.set_filter(keyword),
+            Menu::LocalPlaylists if self.local_shown.is_none() => {
+                self.local_playlists.set_filter(keyword)
+            }
             _ => self.song_view_mut().set_filter(keyword),
         }
     }
@@ -459,6 +507,10 @@ impl Nav {
             Menu::Playlists if self.shown.is_none() => {
                 (self.playlists.len(), self.playlists.items().len())
             }
+            Menu::LocalPlaylists if self.local_shown.is_none() => (
+                self.local_playlists.len(),
+                self.local_playlists.items().len(),
+            ),
             _ => {
                 let view = self.song_view();
                 (view.len(), view.items().len())
@@ -474,6 +526,7 @@ impl Nav {
             Menu::Search => &self.search_results,
             Menu::History => &self.history_view,
             Menu::LocalLibrary => &self.local_view,
+            Menu::LocalPlaylists => &self.local_tracks,
         }
     }
 
@@ -485,6 +538,7 @@ impl Nav {
             Menu::Search => &mut self.search_results,
             Menu::History => &mut self.history_view,
             Menu::LocalLibrary => &mut self.local_view,
+            Menu::LocalPlaylists => &mut self.local_tracks,
         }
     }
 
@@ -495,6 +549,7 @@ impl Nav {
         match self.menu {
             Menu::Favorites => Some(&self.favorites),
             Menu::Playlists => self.shown.as_ref().map(|_| &self.tracks),
+            Menu::LocalPlaylists => self.local_shown.as_ref().map(|_| &self.local_tracks),
             Menu::Search => Some(&self.search_results),
             Menu::History => Some(&self.history_view),
             Menu::LocalLibrary => Some(&self.local_view),
@@ -506,6 +561,7 @@ impl Nav {
         match self.menu {
             Menu::Favorites => Some(&mut self.favorites),
             Menu::Playlists => self.shown.as_ref().map(|_| &mut self.tracks),
+            Menu::LocalPlaylists => self.local_shown.as_ref().map(|_| &mut self.local_tracks),
             Menu::Search => Some(&mut self.search_results),
             Menu::History => Some(&mut self.history_view),
             Menu::LocalLibrary => Some(&mut self.local_view),
@@ -537,7 +593,6 @@ impl Nav {
         self.move_selection(pages * 10);
     }
 }
-
 
 /// 后台下载的进度（界面每帧读一次）。
 pub(super) struct Transfer {
@@ -597,6 +652,29 @@ pub(super) struct WriteRequest {
     add: bool,
 }
 
+/// 本地歌单的名字输入态：`kind` 决定提交时是新建还是给哪一张改名。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LocalInputKind {
+    Create,
+    Rename(usize),
+}
+
+#[derive(Debug)]
+pub(super) struct LocalInput {
+    pub(super) kind: LocalInputKind,
+    pub(super) text: String,
+}
+
+impl LocalInput {
+    /// 输入行的前缀（画在那一行上，别让打的字没有出处）。
+    pub(super) fn label(&self) -> &'static str {
+        match self.kind {
+            LocalInputKind::Create => "新建歌单：",
+            LocalInputKind::Rename(_) => "改名：",
+        }
+    }
+}
+
 pub(super) struct App {
     pub(super) handle: tokio::runtime::Handle,
     pub(super) engine: Engine,
@@ -616,6 +694,8 @@ pub(super) struct App {
     pub(super) history: History,
     /// 历史文件路径（测试注入临时路径用）。
     pub(super) history_path: std::path::PathBuf,
+    /// 本地歌单文件路径（同上：测试注入临时路径，别去动使用者真实的 `~/.config/canto`）。
+    pub(super) playlists_path: std::path::PathBuf,
 
     /// 正在看哪一屏、四屏各自的列表与选中位置。
     pub(super) nav: Nav,
@@ -678,6 +758,12 @@ pub(super) struct App {
     pub(super) library: Vec<Song>,
     /// 曲库是不是正在扫（扫描中按 `r` 不再起第二次）。
     pub(super) library_scanning: bool,
+    /// 本地歌单的存储（启动读一次，改过就立刻落盘）。
+    pub(super) playlists_store: playlists::Store,
+    /// 名字输入态（`N` 新建 / `R` 改名共用）。
+    pub(super) local_input: Option<LocalInput>,
+    /// `D` 第一次按下时记的是哪一张（第二次才真删；换一首 / 按别的键就作废）。
+    pub(super) pending_playlist_delete: Option<usize>,
     pub(super) quit: bool,
 }
 
@@ -687,8 +773,11 @@ impl App {
         engine: Engine,
         config: Config,
         history_path: std::path::PathBuf,
+        playlists_path: std::path::PathBuf,
         tx: Sender<Msg>,
     ) -> Self {
+        // 先读存储（下面 `playlists_path` 会被 move 进字段）。
+        let playlists_store = playlists::Store::load(&playlists_path);
         Self {
             handle,
             engine,
@@ -701,6 +790,7 @@ impl App {
             screen: Screen::Main,
             history: History::default(),
             history_path,
+            playlists_path,
             nav: Nav::new(),
             queue: queue::Queue::new(Vec::new(), 0, String::new()),
             request: 0,
@@ -728,6 +818,9 @@ impl App {
             logged_in: crate::session::jar().state().logged_in,
             library: Vec::new(),
             library_scanning: false,
+            playlists_store,
+            local_input: None,
+            pending_playlist_delete: None,
             quit: false,
         }
     }
@@ -855,7 +948,10 @@ impl App {
             return;
         }
         self.screen = Screen::Home;
-        let index = Menu::ALL.iter().position(|menu| *menu == self.nav.menu).unwrap_or(0);
+        let index = Menu::ALL
+            .iter()
+            .position(|menu| *menu == self.nav.menu)
+            .unwrap_or(0);
         self.home_state.select(Some(index));
     }
 
@@ -874,6 +970,7 @@ impl App {
             Menu::Favorites if !self.nav.favorites_loaded => self.reload_favorites(),
             Menu::Playlists if !self.nav.playlists_loaded => self.reload_playlists(),
             Menu::History => self.refresh_history_view(),
+            Menu::LocalPlaylists => self.refresh_local_playlists_view(),
             Menu::LocalLibrary => self.refresh_local_view(),
             _ => {}
         }
@@ -945,7 +1042,11 @@ impl App {
                             // 细节（落到哪、多大、歌词在哪）进日志，状态行只说做了什么。
                             tracing::info!(
                                 "{}《{}》→ {}（{:.1} MB，{}）",
-                                if saved.from_cache { "从缓存复制" } else { "下载" },
+                                if saved.from_cache {
+                                    "从缓存复制"
+                                } else {
+                                    "下载"
+                                },
                                 song.title,
                                 saved.path.display(),
                                 saved.bytes as f64 / 1_048_576.0,
@@ -1051,6 +1152,20 @@ impl App {
 
     /// `x`：从右栏当前显示的歌单里移除选中的歌。
     fn remove_selected(&mut self) {
+        // 本地歌单屏的 `x`：把选中那首移出这张歌单（条目按位置删，不按 mid）。
+        if self.nav.menu == Menu::LocalPlaylists {
+            let Some((index, _)) = self.nav.local_shown else {
+                return;
+            };
+            let Some(song) = self.nav.local_tracks.state.selected() else {
+                return;
+            };
+            self.playlists_store.remove(index, song);
+            self.save_playlists();
+            self.open_local_playlist(index);
+            self.notify("已移出歌单");
+            return;
+        }
         let Some(song) = self.selected_song() else {
             return;
         };
@@ -1164,6 +1279,97 @@ impl App {
             view.state.selected().unwrap_or(0),
             self.nav.origin_name(),
         ))
+    }
+
+    /// 存储改过就立刻落盘（`save` 自己走 tmp + rename）。
+    fn save_playlists(&mut self) {
+        if let Err(error) = self.playlists_store.save(&self.playlists_path) {
+            self.note_error(&error);
+        }
+        self.refresh_local_playlists_view();
+    }
+
+    /// 把存储里的歌单灌进左列表；正在看的那张被删了就退回歌单列表那一级
+    /// （别指着一个不存在的下标接着画）。
+    fn refresh_local_playlists_view(&mut self) {
+        let items = self.playlists_store.playlists.clone();
+        self.nav.local_playlists.set_items(items);
+        match self.nav.local_shown {
+            Some((index, _)) if index < self.playlists_store.playlists.len() => {
+                self.open_local_playlist(index)
+            }
+            Some(_) => {
+                self.nav.local_shown = None;
+                self.nav.local_tracks = ListView::songs();
+            }
+            None => {}
+        }
+    }
+
+    /// 进「本地歌单 › 某张」：条目 → `Song` 走 `library::entry_to_song`（文件没了也照样在，
+    /// 只是列表那边标「（已丢失）」）。
+    fn open_local_playlist(&mut self, index: usize) {
+        let Some(playlist) = self.playlists_store.playlists.get(index) else {
+            return;
+        };
+        let songs = playlist
+            .songs
+            .iter()
+            .filter_map(|stored| {
+                let path = crate::model::local_path(&stored.mid)?;
+                Some(crate::library::entry_to_song(&crate::library::Entry {
+                    path,
+                    mtime: 0,
+                    size: 0,
+                    title: stored.title.clone(),
+                    artist: stored.singers.clone(),
+                    album: String::new(),
+                    // 条目快照里没有时长（存储只留 mid / 标题 / 歌手），列表会显示 `--:--`。
+                    duration_secs: 0,
+                }))
+            })
+            .collect();
+        self.nav.push_local_tracks(index, &playlist.name, songs);
+    }
+
+    /// 输入态提交：新建 / 改名都先过一遍名字校验（重名 / 空名挡下、输入态留着让人改）。
+    fn submit_local_input(&mut self) {
+        let Some(input) = self.local_input.take() else {
+            return;
+        };
+        let outcome = match input.kind {
+            LocalInputKind::Create => self.playlists_store.create(&input.text).map(|_| "已建歌单"),
+            LocalInputKind::Rename(index) => self
+                .playlists_store
+                .rename(index, &input.text)
+                .map(|()| "已改名"),
+        };
+        match outcome {
+            Ok(what) => {
+                self.save_playlists();
+                self.notify(format!("{what}：{}", input.text.trim()));
+            }
+            Err(error) => {
+                self.local_input = Some(input);
+                self.notify(error.to_string());
+            }
+        }
+    }
+
+    /// `D` 第一次：记下要删哪张、提示再按一次；第二次：真删。
+    fn ask_delete_local_playlist(&mut self) {
+        let Some(index) = self.nav.local_playlists.state.selected() else {
+            return;
+        };
+        if self.pending_playlist_delete != Some(index) {
+            self.pending_playlist_delete = Some(index);
+            self.notify("再按一次 D 删掉这张歌单");
+            return;
+        }
+        self.pending_playlist_delete = None;
+        self.playlists_store.delete(index);
+        self.save_playlists();
+        self.notify("已删歌单");
     }
 
     /// `Enter`：当前焦点列表 → 新队列。
@@ -1443,6 +1649,9 @@ impl App {
         if self.picker.is_some() {
             return keys::Context::PlaylistPicker;
         }
+        if self.local_input.is_some() {
+            return keys::Context::LocalInput;
+        }
         // 首页在模态之后：首页上开 `u` / `?` / `v` 时上下文仍归它们。
         if matches!(self.screen, Screen::Home) {
             return keys::Context::Home;
@@ -1458,6 +1667,10 @@ impl App {
     }
 
     pub(super) fn apply(&mut self, action: keys::Action) {
+        // 「再按一次 D」的待确认只认那么一下：任何别的键都作废（免得走神之后误删）。
+        if !matches!(action, keys::Action::HistoryClear) {
+            self.pending_playlist_delete = None;
+        }
         match action {
             keys::Action::Quit => self.quit = true,
             keys::Action::Help => {
@@ -1476,8 +1689,42 @@ impl App {
                 }
             }
             keys::Action::LoginBack => self.go_home(),
+            keys::Action::LocalPlaylistCreate => {
+                // 只有站在本地歌单列表上才理会（别的屏按 `N` 不做事）。
+                if self.nav.menu == Menu::LocalPlaylists && self.nav.local_shown.is_none() {
+                    self.local_input = Some(LocalInput {
+                        kind: LocalInputKind::Create,
+                        text: String::new(),
+                    });
+                }
+            }
+            keys::Action::LocalPlaylistRename => {
+                // 只有站在本地歌单列表上才理会（别的屏按 `R` 不做事）。
+                if self.nav.menu == Menu::LocalPlaylists
+                    && self.nav.local_shown.is_none()
+                    && let Some(index) = self.nav.local_playlists.state.selected()
+                {
+                    self.local_input = Some(LocalInput {
+                        kind: LocalInputKind::Rename(index),
+                        text: String::new(),
+                    });
+                }
+            }
+            keys::Action::LocalInputChar(character) => {
+                if let Some(input) = self.local_input.as_mut() {
+                    input.text.push(character);
+                }
+            }
+            keys::Action::LocalInputBackspace => {
+                if let Some(input) = self.local_input.as_mut() {
+                    input.text.pop();
+                }
+            }
+            keys::Action::LocalInputSubmit => self.submit_local_input(),
+            keys::Action::LocalInputCancel => self.local_input = None,
             keys::Action::HistoryClear => {
-                // 只在历史屏有意义；别的屏按了不做事（Esc 在没得返回时也一样）。
+                // `D` 是「这一屏的破坏性动作」：历史屏清历史；本地歌单屏删整张歌单（双按确认）；
+                // 别的屏按了不做事（Esc 在没得返回时也一样）。
                 if self.nav.menu == Menu::History {
                     match self.history.clear(&self.history_path) {
                         Ok(()) => {
@@ -1486,6 +1733,8 @@ impl App {
                         }
                         Err(error) => self.note_error(&error),
                     }
+                } else if self.nav.menu == Menu::LocalPlaylists && self.nav.local_shown.is_none() {
+                    self.ask_delete_local_playlist();
                 }
             }
             keys::Action::QueueDelete => self.delete_queue_item(),
@@ -1592,9 +1841,7 @@ impl App {
             }
             keys::Action::InputCancel => self.nav.end_search_input(),
             // 登录屏那三个动作由 `apply_login` 处理，不会走到这里。
-            keys::Action::LoginCookie
-            | keys::Action::LoginOpenPng
-            | keys::Action::LoginRetry => {}
+            keys::Action::LoginCookie | keys::Action::LoginOpenPng | keys::Action::LoginRetry => {}
             keys::Action::Back => {
                 // 顺序：先关模态，再退输入态，最后退一层视图。
                 if self.help_open {
@@ -1634,7 +1881,8 @@ impl App {
             keys::Action::Quit => self.quit = true,
             keys::Action::LoginRetry => self.start_login(),
             keys::Action::LoginOpenPng => {
-                if let (Err(error), Screen::Login(state)) = (login::open_qr_png(), &mut self.screen) {
+                if let (Err(error), Screen::Login(state)) = (login::open_qr_png(), &mut self.screen)
+                {
                     state.phase = LoginPhase::Failed(error);
                 }
             }
@@ -1760,7 +2008,8 @@ impl App {
         let Some(step) = self.queue.remove(index) else {
             // 删的不是当前项：队列短了一格，高亮跟着收一下。
             let next = index.min(self.queue.len().saturating_sub(1));
-            self.queue_state.select((!self.queue.is_empty()).then_some(next));
+            self.queue_state
+                .select((!self.queue.is_empty()).then_some(next));
             return;
         };
         if self.queue.is_empty() {
@@ -1858,6 +2107,12 @@ impl App {
     /// `Enter`：歌单列表 = 往下进一层；曲目列表 = 以此列表开队列并从该首播。
     fn enter_selected(&mut self) {
         if self.nav.can_enter_depth() {
+            if self.nav.menu == Menu::LocalPlaylists {
+                if let Some(index) = self.nav.local_playlists.state.selected() {
+                    self.open_local_playlist(index);
+                }
+                return;
+            }
             let Some(playlist) = self.nav.playlists.selected().cloned() else {
                 return;
             };
@@ -2016,14 +2271,16 @@ impl App {
         if self.overlay.is_running() {
             let snapshot = self.engine.snapshot();
             self.overlay.sync(
-                overlay::Frame { lyric: self.lyric.as_ref(), snapshot: &snapshot },
+                overlay::Frame {
+                    lyric: self.lyric.as_ref(),
+                    snapshot: &snapshot,
+                },
                 &self.config.desktop_lyrics,
             );
         }
         // 开关翻了、或拖出过新位置：落盘（开关与位置同在 `desktop-lyrics.json`）。
         if let Some(state) = self.overlay.take_state()
-            && let Err(error) =
-                overlay::save_state(&crate::paths::desktop_lyrics_path(), state)
+            && let Err(error) = overlay::save_state(&crate::paths::desktop_lyrics_path(), state)
         {
             tracing::warn!("写歌词窗口状态失败：{error:#}");
         }
@@ -2101,7 +2358,8 @@ mod tests {
     #[test]
     fn switching_menus_keeps_each_views_selection() {
         let mut nav = Nav::new();
-        nav.favorites.set_items(vec![test_song("a"), test_song("b"), test_song("c")]);
+        nav.favorites
+            .set_items(vec![test_song("a"), test_song("b"), test_song("c")]);
         nav.favorites.select_first();
         nav.switch_menu(Menu::Favorites);
         nav.favorites.move_by(2);
@@ -2121,7 +2379,8 @@ mod tests {
     fn entering_a_playlist_shows_the_name_and_esc_pops_it() {
         let mut nav = Nav::new();
         nav.switch_menu(Menu::Playlists);
-        nav.playlists.set_items(vec![playlist("1", "嗯"), playlist("2", "循环")]);
+        nav.playlists
+            .set_items(vec![playlist("1", "嗯"), playlist("2", "循环")]);
         nav.playlists.select_first();
         assert!(nav.can_enter_depth(), "歌单列表是最上一层，可以往下进");
         let target = nav.playlists.selected().cloned().expect("选中了歌单");
@@ -2142,7 +2401,11 @@ mod tests {
     fn paging_moves_ten_rows_and_stops_at_the_end() {
         let mut nav = Nav::new();
         nav.switch_menu(Menu::Favorites);
-        nav.favorites.set_items((0..25).map(|index| test_song(&format!("m{index}"))).collect());
+        nav.favorites.set_items(
+            (0..25)
+                .map(|index| test_song(&format!("m{index}")))
+                .collect(),
+        );
         nav.favorites.select_first();
         nav.page_selection(1);
         assert_eq!(nav.favorites.state.selected(), Some(10));
@@ -2291,7 +2554,11 @@ mod tests {
 
         app.apply(keys::Action::Back);
         assert_eq!(app.nav.filter_counts(), (2, 2), "第一次 Esc 清掉筛选");
-        assert_eq!(app.nav.title_chain(), ["我的歌单", "嗯"], "第一次 Esc 不退层");
+        assert_eq!(
+            app.nav.title_chain(),
+            ["我的歌单", "嗯"],
+            "第一次 Esc 不退层"
+        );
 
         app.apply(keys::Action::Back);
         assert_eq!(app.nav.title_chain(), ["我的歌单"], "第二次 Esc 才退上一层");
@@ -2372,7 +2639,8 @@ mod tests {
     fn switching_screens_closes_the_spectrum_but_popping_a_level_does_not() {
         let (mut app, _runtime) = test_app();
         app.nav.switch_menu(Menu::Playlists);
-        app.nav.push_tracks("1", "嗯", vec![crate::tui::test_support::test_song("a")]);
+        app.nav
+            .push_tracks("1", "嗯", vec![crate::tui::test_support::test_song("a")]);
         app.apply(keys::Action::ToggleSpectrum);
         app.apply(keys::Action::Back); // 退层
         assert!(app.show_spectrum, "退层不是换屏");
@@ -2409,13 +2677,15 @@ mod tests {
     fn search_keeps_its_screen_so_browsing_is_not_lost() {
         let mut nav = Nav::new();
         nav.switch_menu(Menu::Favorites);
-        nav.favorites.set_items(vec![test_song("a"), test_song("b")]);
+        nav.favorites
+            .set_items(vec![test_song("a"), test_song("b")]);
         nav.favorites.select_first();
         nav.favorites.move_by(1);
 
         nav.switch_menu(Menu::Search);
         nav.search_text = "晴天".to_string();
-        nav.search_results.set_items(vec![test_song("s1"), test_song("s2")]);
+        nav.search_results
+            .set_items(vec![test_song("s1"), test_song("s2")]);
         nav.search_results.select_first();
 
         nav.switch_menu(Menu::Favorites);
@@ -2454,7 +2724,9 @@ mod tests {
         app.nav.playlists.set_items(vec![playlist("1", "嗯")]);
         // 进歌单（真请求会另外回填，这里只关心导航），再塞两首进去。
         app.nav.begin_tracks("1", "嗯");
-        app.nav.tracks.set_items(vec![test_song("a"), test_song("b")]);
+        app.nav
+            .tracks
+            .set_items(vec![test_song("a"), test_song("b")]);
         app.nav.tracks.move_by(1);
         assert_eq!(app.nav.title_chain(), ["我的歌单", "嗯"]);
 
@@ -2485,11 +2757,122 @@ mod tests {
     #[test]
     fn movement_goes_straight_to_the_list() {
         let mut nav = Nav::new();
-        nav.favorites.set_items(vec![test_song("a"), test_song("b")]);
+        nav.favorites
+            .set_items(vec![test_song("a"), test_song("b")]);
         nav.favorites.select_first();
         assert_eq!(nav.favorites.state.selected(), Some(0));
         nav.move_selection(1);
         assert_eq!(nav.favorites.state.selected(), Some(1));
+    }
+
+    /// 一个本地曲目（只关心 `mid` 与标题：本地歌单测试用）。
+    fn local_song(path: &str) -> Song {
+        crate::library::entry_to_song(&crate::library::Entry {
+            path: std::path::PathBuf::from(path),
+            mtime: 0,
+            size: 0,
+            title: "歌".to_string(),
+            artist: "人".to_string(),
+            album: String::new(),
+            duration_secs: 0,
+        })
+    }
+
+    /// 本地歌单屏：两级（歌单 → 曲目），`Esc` 退回来。
+    #[test]
+    fn the_local_playlist_screen_lists_playlists_then_tracks() {
+        let (mut app, _runtime) = test_app();
+        app.playlists_store.create("通勤").expect("建歌单");
+        app.playlists_store.add(0, &local_song("C:/m/a.wav"));
+        app.switch_menu(Menu::LocalPlaylists);
+        assert_eq!(app.nav.menu, Menu::LocalPlaylists);
+        assert_eq!(app.nav.local_playlists.items().len(), 1, "左列表是歌单");
+        app.apply(keys::Action::Enter);
+        assert_eq!(
+            app.nav.local_shown,
+            Some((0, "通勤".to_string())),
+            "进去看曲目"
+        );
+        assert_eq!(app.nav.local_tracks.items().len(), 1);
+        app.apply(keys::Action::Back);
+        assert_eq!(app.nav.local_shown, None, "Esc 回歌单列表");
+    }
+
+    /// `N` 新建、`R` 改名：名字从输入态来，并立刻落盘。
+    #[test]
+    fn capital_n_creates_and_r_renames_a_local_playlist() {
+        let (mut app, _runtime) = test_app();
+        app.switch_menu(Menu::LocalPlaylists);
+        app.apply(keys::Action::LocalPlaylistCreate);
+        assert!(app.local_input.is_some(), "`N` 进输入态");
+        for character in "通勤".chars() {
+            app.apply(keys::Action::LocalInputChar(character));
+        }
+        app.apply(keys::Action::LocalInputSubmit);
+        assert_eq!(app.playlists_store.playlists[0].name, "通勤");
+        assert!(app.local_input.is_none(), "提交完退出输入态");
+
+        app.apply(keys::Action::LocalPlaylistRename);
+        for character in "路上".chars() {
+            app.apply(keys::Action::LocalInputChar(character));
+        }
+        app.apply(keys::Action::LocalInputSubmit);
+        assert_eq!(app.playlists_store.playlists[0].name, "路上");
+    }
+
+    /// 重名要被挡下（歌单还是那一张），并且给一句通知。
+    #[test]
+    fn duplicate_names_are_refused_with_a_notice() {
+        let (mut app, _runtime) = test_app();
+        app.playlists_store.create("通勤").expect("建歌单");
+        app.switch_menu(Menu::LocalPlaylists);
+        app.apply(keys::Action::LocalPlaylistCreate);
+        for character in "通勤".chars() {
+            app.apply(keys::Action::LocalInputChar(character));
+        }
+        app.apply(keys::Action::LocalInputSubmit);
+        assert_eq!(app.playlists_store.playlists.len(), 1, "没建成第二张");
+        assert!(
+            app.notice_text().is_some(),
+            "给了说明：{:?}",
+            app.notice_text()
+        );
+    }
+
+    /// 删整张歌单要按两次 `D`；按别的键取消。
+    #[test]
+    fn deleting_a_playlist_needs_two_presses() {
+        let (mut app, _runtime) = test_app();
+        app.playlists_store.create("通勤").expect("建歌单");
+        app.switch_menu(Menu::LocalPlaylists);
+        app.apply(keys::Action::HistoryClear);
+        assert_eq!(app.playlists_store.playlists.len(), 1, "第一次不删");
+        assert!(
+            app.notice_text()
+                .is_some_and(|text| text.contains("再按一次")),
+            "{:?}",
+            app.notice_text()
+        );
+        app.apply(keys::Action::Down);
+        assert!(
+            app.pending_playlist_delete.is_none(),
+            "别的键取消这次待确认"
+        );
+        app.apply(keys::Action::HistoryClear);
+        app.apply(keys::Action::HistoryClear);
+        assert!(app.playlists_store.playlists.is_empty(), "第二次才删");
+    }
+
+    /// 文件不在了的条目仍然留在歌单里（渲染成「（已丢失）」，由绘制那一侧钉）。
+    #[test]
+    fn a_lost_entry_stays_in_the_playlist() {
+        let (mut app, _runtime) = test_app();
+        app.playlists_store.create("通勤").expect("建歌单");
+        app.playlists_store.add(0, &local_song("C:/m/gone.wav"));
+        app.switch_menu(Menu::LocalPlaylists);
+        app.apply(keys::Action::Enter);
+        assert_eq!(app.nav.local_tracks.items().len(), 1, "条目还在");
+        assert!(app.library.is_empty(), "而它已经不在曲库里");
     }
 
     /// 没有会话也落首页：不再被扔进登录屏（启动这一下也不取码——`start_login` 只能从
@@ -2513,7 +2896,8 @@ mod tests {
             app.switch_menu(menu);
             assert!(matches!(app.screen, Screen::Home), "{menu:?} 不该进");
             assert!(
-                app.notice_text().is_some_and(|text| text.contains("需要登录：按 L")),
+                app.notice_text()
+                    .is_some_and(|text| text.contains("需要登录：按 L")),
                 "{menu:?} 要提示登录：{:?}",
                 app.notice_text()
             );
@@ -2521,7 +2905,11 @@ mod tests {
         app.notice = None;
         app.switch_menu(Menu::LocalLibrary);
         assert_eq!(app.nav.menu, Menu::LocalLibrary, "本地屏照进，不被拦");
-        assert!(app.notice_text().is_none(), "本地屏不该出「需要登录」：{:?}", app.notice_text());
+        assert!(
+            app.notice_text().is_none(),
+            "本地屏不该出「需要登录」：{:?}",
+            app.notice_text()
+        );
     }
 
     /// 未登录时历史屏只列本地条目（QQ 条目直接不显示）。
@@ -2559,8 +2947,14 @@ mod tests {
             .iter()
             .map(|song| song.title.clone())
             .collect();
-        assert!(titles.iter().any(|title| title == "曲终人散"), "本地条目照列：{titles:?}");
-        assert!(!titles.iter().any(|title| title == "QQ 那首"), "QQ 条目不显示：{titles:?}");
+        assert!(
+            titles.iter().any(|title| title == "曲终人散"),
+            "本地条目照列：{titles:?}"
+        );
+        assert!(
+            !titles.iter().any(|title| title == "QQ 那首"),
+            "QQ 条目不显示：{titles:?}"
+        );
     }
 
     /// `L` 未登录时去登录屏（这时候才取码）；登录屏能退出来；`sign_out` 回首页。
@@ -2569,7 +2963,10 @@ mod tests {
         let (mut app, _runtime) = test_app();
         app.logged_in = false;
         app.apply(keys::Action::Logout);
-        assert!(matches!(app.screen, Screen::Login(_)), "未登录按 L 去登录屏");
+        assert!(
+            matches!(app.screen, Screen::Login(_)),
+            "未登录按 L 去登录屏"
+        );
 
         app.apply(keys::Action::LoginBack);
         assert!(matches!(app.screen, Screen::Home), "登录屏能退出来");
@@ -2592,9 +2989,22 @@ mod tests {
         );
 
         app.refresh_history_view();
-        let restored = app.nav.history_view.items().first().expect("还原出一首").clone();
-        assert!(restored.is_local(), "还原后还是本地曲目：{:?}", restored.source);
-        assert_eq!(restored.path(), Some(std::path::Path::new("C:/Music/canto/一首.wav")));
+        let restored = app
+            .nav
+            .history_view
+            .items()
+            .first()
+            .expect("还原出一首")
+            .clone();
+        assert!(
+            restored.is_local(),
+            "还原后还是本地曲目：{:?}",
+            restored.source
+        );
+        assert_eq!(
+            restored.path(),
+            Some(std::path::Path::new("C:/Music/canto/一首.wav"))
+        );
     }
 
     /// 老 `history.json`（没有 `local_path` 这一项）照旧读得动。
@@ -2617,13 +3027,20 @@ mod tests {
         ];
         app.switch_menu(Menu::LocalLibrary);
         assert_eq!(app.nav.menu, Menu::LocalLibrary);
-        assert_eq!(app.nav.local_view.visible_rows().count(), 2, "屏里的列表就是曲库");
+        assert_eq!(
+            app.nav.local_view.visible_rows().count(),
+            2,
+            "屏里的列表就是曲库"
+        );
         assert!(app.nav.favorites.error.is_none(), "没登录也不该去拉收藏");
 
         app.config.library.dirs = Some(vec!["C:/不存在的曲库".to_string()]);
         app.switch_menu(Menu::Favorites);
         app.apply(keys::Action::LocalRescan);
-        assert!(!app.library_scanning, "别的屏按 `r` 不重扫（那是刷新列表的意思）");
+        assert!(
+            !app.library_scanning,
+            "别的屏按 `r` 不重扫（那是刷新列表的意思）"
+        );
         app.switch_menu(Menu::LocalLibrary);
         app.apply(keys::Action::LocalRescan);
         assert!(app.library_scanning, "本地曲库屏才重扫");
@@ -2636,7 +3053,8 @@ mod tests {
         app.library = vec![crate::tui::test_support::local_song("C:/a.wav")];
         app.refresh_local_view();
         assert_eq!(app.nav.local_view.visible_rows().count(), 1);
-        app.library.push(crate::tui::test_support::local_song("C:/b.wav"));
+        app.library
+            .push(crate::tui::test_support::local_song("C:/b.wav"));
         app.refresh_local_view();
         assert_eq!(app.nav.local_view.visible_rows().count(), 2);
     }
@@ -2651,7 +3069,8 @@ mod tests {
         assert_eq!(app.local_songs().len(), 2, "两首都进曲库");
         assert!(!app.library_scanning);
         assert!(
-            app.notice_text().is_some_and(|text| text.contains("新增 2")),
+            app.notice_text()
+                .is_some_and(|text| text.contains("新增 2")),
             "第一次要有变化通知：{:?}",
             app.notice_text()
         );
@@ -2667,7 +3086,11 @@ mod tests {
         app.notice = None;
         app.on_msg(scan_library(&dirs, &index));
         assert_eq!(app.local_songs().len(), 2);
-        assert!(app.notice_text().is_none(), "没变化就别打扰：{:?}", app.notice_text());
+        assert!(
+            app.notice_text().is_none(),
+            "没变化就别打扰：{:?}",
+            app.notice_text()
+        );
     }
 
     #[test]
@@ -2682,7 +3105,8 @@ mod tests {
         app.on_msg(scan_library(&dirs, &index));
         assert_eq!(app.local_songs().len(), 1);
         assert!(
-            app.notice_text().is_some_and(|text| text.contains("移除 1")),
+            app.notice_text()
+                .is_some_and(|text| text.contains("移除 1")),
             "{:?}",
             app.notice_text()
         );
@@ -2695,7 +3119,8 @@ mod tests {
         let missing = dir.join("没有这个目录");
         app.on_msg(scan_library(&[missing], &dir.join("library.json")));
         assert!(
-            app.notice_text().is_some_and(|text| text.contains("没有这个目录")),
+            app.notice_text()
+                .is_some_and(|text| text.contains("没有这个目录")),
             "坏路径要点名：{:?}",
             app.notice_text()
         );
@@ -2708,7 +3133,8 @@ mod tests {
         app.library_scanning = true;
         app.start_library_scan();
         assert!(
-            app.notice_text().is_some_and(|text| text.contains("正在扫描")),
+            app.notice_text()
+                .is_some_and(|text| text.contains("正在扫描")),
             "{:?}",
             app.notice_text()
         );
@@ -2737,7 +3163,11 @@ mod tests {
         assert_ne!(app.overlay.locked(), before, "锁定态该翻一下");
         app.screen = Screen::Login(LoginState::default());
         app.dispatch_hotkey(keys::Action::LyricsLock);
-        assert_eq!(app.overlay.locked(), !before, "登录屏也要按同一条规则被挡住");
+        assert_eq!(
+            app.overlay.locked(),
+            !before,
+            "登录屏也要按同一条规则被挡住"
+        );
     }
 
     /// `lyrics` 是第 7 条全局热键（开 / 关歌词窗口）。这里只钉「登录屏挡住」这一半：
@@ -2808,7 +3238,11 @@ mod tests {
 
         app.apply(keys::Action::Home);
         assert!(matches!(app.screen, Screen::Home), "`0` 回首页");
-        assert_eq!(app.home_state.selected(), Some(1), "高亮停在刚离开的那一屏（我的歌单）");
+        assert_eq!(
+            app.home_state.selected(),
+            Some(1),
+            "高亮停在刚离开的那一屏（我的歌单）"
+        );
         app.apply(keys::Action::Menu(3));
         assert!(matches!(app.screen, Screen::Main));
         assert_eq!(app.nav.menu, Menu::History, "数字直达");
@@ -2825,7 +3259,11 @@ mod tests {
         app.apply(keys::Action::Last);
         assert_eq!(app.home_state.selected(), Some(Menu::ALL.len() - 1));
         app.apply(keys::Action::Down);
-        assert_eq!(app.home_state.selected(), Some(Menu::ALL.len() - 1), "到底不动");
+        assert_eq!(
+            app.home_state.selected(),
+            Some(Menu::ALL.len() - 1),
+            "到底不动"
+        );
         app.apply(keys::Action::First);
         assert_eq!(app.home_state.selected(), Some(0));
         app.apply(keys::Action::Up);
@@ -2840,7 +3278,10 @@ mod tests {
         app.go_home();
         let home_before = app.home_state.selected();
         app.queue = crate::tui::queue::Queue::new(
-            vec![crate::tui::test_support::test_song("a"), crate::tui::test_support::test_song("b")],
+            vec![
+                crate::tui::test_support::test_song("a"),
+                crate::tui::test_support::test_song("b"),
+            ],
             0,
             String::new(),
         );
@@ -2888,7 +3329,11 @@ mod tests {
         assert!(app.show_spectrum, "首页上也能开频谱区");
         app.apply(keys::Action::Home);
         assert!(!app.show_spectrum, "首页上的频谱区同样得收起来");
-        assert_eq!(app.home_state.selected(), Some(0), "已经在首页：`0` 是高亮无操作");
+        assert_eq!(
+            app.home_state.selected(),
+            Some(0),
+            "已经在首页：`0` 是高亮无操作"
+        );
     }
 
     /// 已经在首页时 `0` 是**无操作**：高亮是刚用 `j`/`k` 挪好的，别给弹回默认那一行。
@@ -2900,7 +3345,11 @@ mod tests {
         let moved = app.home_state.selected();
         assert_eq!(moved, Some(1), "先挪到第二项");
         app.apply(keys::Action::Home);
-        assert_eq!(app.home_state.selected(), moved, "首页上再按 `0` 高亮不该动");
+        assert_eq!(
+            app.home_state.selected(),
+            moved,
+            "首页上再按 `0` 高亮不该动"
+        );
     }
 
     /// 列表顶部（没进歌单、没开筛选）再按 `Esc` 回首页；首页上 `Esc` 连绑定都没有（Task 1 的
@@ -2920,8 +3369,12 @@ mod tests {
     fn going_home_leaves_the_other_screens_levels_alone() {
         let (mut app, _runtime) = crate::tui::test_support::test_app();
         app.nav.switch_menu(Menu::Playlists);
-        app.nav.push_tracks("1", "嗯", vec![crate::tui::test_support::test_song("a")]);
-        assert_eq!(app.nav.title_chain(), vec!["我的歌单".to_string(), "嗯".to_string()]);
+        app.nav
+            .push_tracks("1", "嗯", vec![crate::tui::test_support::test_song("a")]);
+        assert_eq!(
+            app.nav.title_chain(),
+            vec!["我的歌单".to_string(), "嗯".to_string()]
+        );
 
         app.apply(keys::Action::Home);
         assert!(matches!(app.screen, Screen::Home));
@@ -2971,7 +3424,9 @@ mod tests {
         app.nav.switch_menu(Menu::Favorites);
         app.nav.favorites.set_items(vec![test_song("a")]);
         app.nav.favorites.select_first();
-        app.nav.playlists.set_items(vec![crate::tui::test_support::test_playlist("1", "嗯")]);
+        app.nav
+            .playlists
+            .set_items(vec![crate::tui::test_support::test_playlist("1", "嗯")]);
         app.apply(keys::Action::AddToPlaylist);
         assert!(app.picker.is_some(), "p 打开歌单选择框");
         assert_eq!(app.context(), keys::Context::PlaylistPicker);
@@ -2984,7 +3439,9 @@ mod tests {
     fn appending_puts_the_picked_song_at_the_tail() {
         let (mut app, _runtime) = crate::tui::test_support::test_app();
         app.nav.switch_menu(Menu::Favorites);
-        app.nav.favorites.set_items(vec![test_song("a"), test_song("b")]);
+        app.nav
+            .favorites
+            .set_items(vec![test_song("a"), test_song("b")]);
         app.nav.favorites.select_first();
         app.queue = queue::Queue::new(Vec::new(), 0, String::new());
         app.queue.push_back(test_song("seed"));
@@ -3023,7 +3480,11 @@ mod tests {
         app.queue_state.select(Some(2));
         app.delete_queue_item();
         assert_eq!(app.queue.len(), 2);
-        assert_eq!(app.queue.items()[app.queue.index()].mid, "a", "当前这首没被换掉");
+        assert_eq!(
+            app.queue.items()[app.queue.index()].mid,
+            "a",
+            "当前这首没被换掉"
+        );
         assert_eq!(app.queue_state.selected(), Some(1), "高亮跟着收一格");
     }
 
@@ -3043,7 +3504,11 @@ mod tests {
         app.apply(keys::Action::QueueOverlay);
         assert!(app.queue_open);
         assert_eq!(app.context(), keys::Context::QueueOverlay);
-        assert_eq!(app.queue_state.selected(), Some(1), "高亮落在正在播的那首上");
+        assert_eq!(
+            app.queue_state.selected(),
+            Some(1),
+            "高亮落在正在播的那首上"
+        );
         app.apply(keys::Action::Back);
         assert!(!app.queue_open);
     }
@@ -3096,7 +3561,11 @@ mod tests {
         assert_eq!(songs.len(), 3);
         assert_eq!(songs[index].mid, "b");
         assert_eq!(origin, "历史");
-        assert_eq!(app.nav.title_chain(), ["历史"], "导航链只报屏名，条数是绘制时现算的");
+        assert_eq!(
+            app.nav.title_chain(),
+            ["历史"],
+            "导航链只报屏名，条数是绘制时现算的"
+        );
     }
 
     #[test]
@@ -3142,7 +3611,9 @@ mod tests {
     fn the_queue_overlay_moves_its_own_highlight() {
         let (mut app, _runtime) = crate::tui::test_support::test_app();
         app.nav.switch_menu(Menu::Favorites);
-        app.nav.favorites.set_items(vec![test_song("keep1"), test_song("keep2")]);
+        app.nav
+            .favorites
+            .set_items(vec![test_song("keep1"), test_song("keep2")]);
         app.nav.favorites.select_first();
         app.queue = queue::Queue::new(
             vec![test_song("a"), test_song("b"), test_song("c")],
@@ -3150,11 +3621,19 @@ mod tests {
             "嗯",
         );
         app.apply(keys::Action::QueueOverlay);
-        assert_eq!(app.queue_state.selected(), Some(0), "打开时落在正在播的那首上");
+        assert_eq!(
+            app.queue_state.selected(),
+            Some(0),
+            "打开时落在正在播的那首上"
+        );
 
         app.apply(keys::Action::Down);
         assert_eq!(app.queue_state.selected(), Some(1), "j 该挪浮层的高亮");
-        assert_eq!(app.nav.favorites.state.selected(), Some(0), "底下那份列表不许动");
+        assert_eq!(
+            app.nav.favorites.state.selected(),
+            Some(0),
+            "底下那份列表不许动"
+        );
 
         app.apply(keys::Action::Last);
         assert_eq!(app.queue_state.selected(), Some(2), "G 跳末尾");
@@ -3165,7 +3644,11 @@ mod tests {
         app.apply(keys::Action::Last);
         app.apply(keys::Action::QueueDelete);
         assert_eq!(app.queue.len(), 2);
-        assert_eq!(app.queue.items()[app.queue.index()].mid, "a", "当前这首没被换掉");
+        assert_eq!(
+            app.queue.items()[app.queue.index()].mid,
+            "a",
+            "当前这首没被换掉"
+        );
     }
 
     /// 歌单选择框（`p`）里有同一类问题：它的高亮也得自己走。
@@ -3190,7 +3673,11 @@ mod tests {
             panic!("选择框还开着");
         };
         assert_eq!(state.selected(), Some(1), "j 该挪选择框的高亮");
-        assert_eq!(app.nav.favorites.state.selected(), Some(0), "底下那份列表不许动");
+        assert_eq!(
+            app.nav.favorites.state.selected(),
+            Some(0),
+            "底下那份列表不许动"
+        );
     }
 
     // -- 状态行右侧的通知 ---------------------------------------------------
@@ -3277,7 +3764,11 @@ mod tests {
         app.notify("已插队：晴天");
 
         app.notify_progress("下载 40%…");
-        assert_eq!(app.notice_text(), Some("已插队：晴天"), "进度不许抢那条消息");
+        assert_eq!(
+            app.notice_text(),
+            Some("已插队：晴天"),
+            "进度不许抢那条消息"
+        );
 
         app.expire(after(5));
         app.notify_progress("下载 45%…");
