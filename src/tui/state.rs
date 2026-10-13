@@ -760,6 +760,10 @@ pub(super) struct App {
     pub(super) library_scanning: bool,
     /// 本地歌单的存储（启动读一次，改过就立刻落盘）。
     pub(super) playlists_store: playlists::Store,
+    /// `P` 弹出的本地歌单选择框（跟 QQ 那个分开：两套状态互踩最烦人）。
+    pub(super) local_picker: Option<(Vec<LocalPlaylist>, ListState, Song)>,
+    /// 选择框里选了「新建…」时先记着这首歌：输入完名字把它加进新歌单。
+    pub(super) pending_add_song: Option<Song>,
     /// 名字输入态（`N` 新建 / `R` 改名共用）。
     pub(super) local_input: Option<LocalInput>,
     /// `D` 第一次按下时记的是哪一张（第二次才真删；换一首 / 按别的键就作废）。
@@ -819,6 +823,8 @@ impl App {
             library: Vec::new(),
             library_scanning: false,
             playlists_store,
+            local_picker: None,
+            pending_add_song: None,
             local_input: None,
             pending_playlist_delete: None,
             quit: false,
@@ -1113,6 +1119,58 @@ impl App {
         });
     }
 
+    /// `P`：把当前选中的本地曲目加进本地歌单（选择框第一行固定是「新建…」）。
+    ///
+    /// 只在「本地曲库」屏认：别的屏上选中的歌不一定有本地身份（QQ 歌没有）。
+    fn open_local_picker(&mut self) {
+        if self.nav.menu != Menu::LocalLibrary {
+            return;
+        }
+        // 刚进这一屏还没挪过光标时拿第一首（不然 `P` 看着像坏了）。
+        let Some(song) = self.selected_song().or_else(|| {
+            self.nav
+                .local_view
+                .visible_rows()
+                .next()
+                .map(|(song, _)| song.clone())
+        }) else {
+            return;
+        };
+        let mut state = ListState::default();
+        // 默认停在「新建…」那一行（下标 0；歌单从 1 开始）。
+        state.select(Some(0));
+        self.local_picker = Some((self.playlists_store.playlists.clone(), state, song));
+    }
+
+    /// 选择框确认：第 0 行是「新建…」（转名字输入态），其余行是已有的歌单。
+    fn confirm_local_picker(&mut self) {
+        let Some((playlists, state, song)) = self.local_picker.take() else {
+            return;
+        };
+        let Some(row) = state.selected() else {
+            return;
+        };
+        if row == 0 {
+            self.pending_add_song = Some(song);
+            self.local_input = Some(LocalInput {
+                kind: LocalInputKind::Create,
+                text: String::new(),
+            });
+            return;
+        }
+        let index = row - 1;
+        let Some(playlist) = playlists.get(index) else {
+            return;
+        };
+        if playlist.songs.iter().any(|stored| stored.mid == song.mid) {
+            self.notify("已在歌单里");
+            return;
+        }
+        self.playlists_store.add(index, &song);
+        self.save_playlists();
+        self.notify(format!("已加入：{}", playlist.name));
+    }
+
     /// `p`：挑一个歌单把选中的歌加进去。
     fn open_picker(&mut self) {
         let Some(song) = self.selected_song() else {
@@ -1346,6 +1404,16 @@ impl App {
         };
         match outcome {
             Ok(what) => {
+                // 从「P → 新建…」进来的：刚建的那张在末尾，顺手把刚才那首加进去。
+                if matches!(input.kind, LocalInputKind::Create)
+                    && let Some(song) = self.pending_add_song.take()
+                    && let Some(index) = self.playlists_store.playlists.len().checked_sub(1)
+                {
+                    self.playlists_store.add(index, &song);
+                    self.save_playlists();
+                    self.notify(format!("已加入：{}（新建）", input.text.trim()));
+                    return;
+                }
                 self.save_playlists();
                 self.notify(format!("{what}：{}", input.text.trim()));
             }
@@ -1646,7 +1714,7 @@ impl App {
         if self.queue_open {
             return keys::Context::QueueOverlay;
         }
-        if self.picker.is_some() {
+        if self.picker.is_some() || self.local_picker.is_some() {
             return keys::Context::PlaylistPicker;
         }
         if self.local_input.is_some() {
@@ -1721,7 +1789,10 @@ impl App {
                 }
             }
             keys::Action::LocalInputSubmit => self.submit_local_input(),
-            keys::Action::LocalInputCancel => self.local_input = None,
+            keys::Action::LocalInputCancel => {
+                self.local_input = None;
+                self.pending_add_song = None;
+            }
             keys::Action::HistoryClear => {
                 // `D` 是「这一屏的破坏性动作」：历史屏清历史；本地歌单屏删整张歌单（双按确认）；
                 // 别的屏按了不做事（Esc 在没得返回时也一样）。
@@ -1757,6 +1828,10 @@ impl App {
             keys::Action::PageUp => self.nav.page_selection(-1),
             keys::Action::PageDown => self.nav.page_selection(1),
             keys::Action::Enter => {
+                if self.local_picker.is_some() {
+                    self.confirm_local_picker();
+                    return;
+                }
                 if self.picker.is_some() {
                     self.confirm_picker();
                     return;
@@ -1797,6 +1872,7 @@ impl App {
             }
             keys::Action::Download => self.download_selected(),
             keys::Action::AddToPlaylist => self.open_picker(),
+            keys::Action::LocalPlaylistAdd => self.open_local_picker(),
             keys::Action::RemoveFromPlaylist => self.remove_selected(),
             keys::Action::ToggleLyric => self.show_lyric = !self.show_lyric,
             keys::Action::ToggleSpectrum => self.show_spectrum = !self.show_spectrum,
@@ -1850,6 +1926,9 @@ impl App {
                     self.queue_open = false;
                 } else if self.picker.is_some() {
                     self.picker = None;
+                } else if self.local_picker.is_some() {
+                    self.local_picker = None;
+                    self.pending_add_song = None;
                 } else if self.nav.search_input {
                     self.nav.end_search_input();
                 } else if !self.nav.filter_text().is_empty() {
@@ -2165,6 +2244,11 @@ impl App {
             step_state(state, playlists.len(), delta);
             return;
         }
+        // 本地选择框比 QQ 那个多一行「新建…」（下标 0），所以长度是 歌单数 + 1。
+        if let Some((playlists, state, _)) = self.local_picker.as_mut() {
+            step_state(state, playlists.len() + 1, delta);
+            return;
+        }
         // 首页：挪它自己那一行选中。排在队列 / 选择框**之后**——首页上开着浮层时，
         // `j`/`k` 归浮层（跟 `context()` 同一个次序）。
         if matches!(self.screen, Screen::Home) {
@@ -2187,6 +2271,10 @@ impl App {
         }
         if let Some((playlists, state, _)) = self.picker.as_mut() {
             edge_state(state, playlists.len(), last);
+            return;
+        }
+        if let Some((playlists, state, _)) = self.local_picker.as_mut() {
+            edge_state(state, playlists.len() + 1, last);
             return;
         }
         if matches!(self.screen, Screen::Home) {
@@ -2776,6 +2864,74 @@ mod tests {
             album: String::new(),
             duration_secs: 0,
         })
+    }
+
+    /// `P`：选择框第一行是「新建…」；选它 → 输入名字 → 建好顺手把这首加进去。
+    #[test]
+    fn choosing_new_asks_for_a_name_then_adds_the_song() {
+        let (mut app, _runtime) = test_app();
+        app.library = vec![local_song("C:/m/a.wav")];
+        app.switch_menu(Menu::LocalLibrary);
+        app.apply(keys::Action::LocalPlaylistAdd);
+        assert!(app.local_picker.is_some(), "`P` 打开本地歌单选择框");
+        app.apply(keys::Action::Enter); // 光标默认在「新建…」那一行
+        assert!(app.local_input.is_some(), "接着问名字");
+        for character in "通勤".chars() {
+            app.apply(keys::Action::LocalInputChar(character));
+        }
+        app.apply(keys::Action::LocalInputSubmit);
+        assert_eq!(app.playlists_store.playlists[0].name, "通勤");
+        assert_eq!(app.playlists_store.playlists[0].songs.len(), 1, "建完顺手加进去");
+        assert!(
+            app.notice_text().is_some_and(|text| text.contains("已加入")),
+            "{:?}",
+            app.notice_text()
+        );
+    }
+
+    /// 选一张已有的：加进去；同一首再加一次只留一份，并说一句「已在歌单里」。
+    #[test]
+    fn choosing_an_existing_playlist_adds_once() {
+        let (mut app, _runtime) = test_app();
+        app.library = vec![local_song("C:/m/a.wav")];
+        app.playlists_store.create("通勤").expect("建歌单");
+        for _ in 0..2 {
+            app.switch_menu(Menu::LocalLibrary);
+            app.apply(keys::Action::LocalPlaylistAdd);
+            app.apply(keys::Action::Down); // 从「新建…」挪到「通勤」
+            app.apply(keys::Action::Enter);
+        }
+        assert_eq!(app.playlists_store.playlists[0].songs.len(), 1, "只留一份");
+        assert!(
+            app.notice_text().is_some_and(|text| text.contains("已在歌单里")),
+            "{:?}",
+            app.notice_text()
+        );
+    }
+
+    /// `P` 只认「本地曲库」屏（别的屏按了不做事，也不该冒出一个空选择框）。
+    #[test]
+    fn the_local_picker_only_opens_on_the_local_library_screen() {
+        let (mut app, _runtime) = test_app();
+        app.library = vec![local_song("C:/m/a.wav")];
+        app.switch_menu(Menu::Favorites);
+        app.apply(keys::Action::LocalPlaylistAdd);
+        assert!(app.local_picker.is_none(), "收藏屏上按 `P` 不做事");
+        app.switch_menu(Menu::LocalLibrary);
+        app.apply(keys::Action::LocalPlaylistAdd);
+        assert!(app.local_picker.is_some(), "曲库屏上才开");
+    }
+
+    /// `Esc` 关掉本地选择框，什么也不加。
+    #[test]
+    fn escape_closes_the_local_picker_without_adding() {
+        let (mut app, _runtime) = test_app();
+        app.library = vec![local_song("C:/m/a.wav")];
+        app.switch_menu(Menu::LocalLibrary);
+        app.apply(keys::Action::LocalPlaylistAdd);
+        app.apply(keys::Action::Back);
+        assert!(app.local_picker.is_none(), "关掉了");
+        assert!(app.playlists_store.playlists.is_empty(), "什么也没建");
     }
 
     /// 本地歌单屏：两级（歌单 → 曲目），`Esc` 退回来。

@@ -14,6 +14,28 @@ use super::format_duration;
 use super::highlight;
 
 impl App {
+    /// `P` 的本地歌单选择框：第一行固定是「新建…」，下面才是已有的歌单。
+    pub(super) fn draw_local_picker(&mut self, frame: &mut Frame, area: Rect) {
+        let Some((playlists, state, song)) = self.local_picker.as_mut() else {
+            return;
+        };
+        let width = area.width.saturating_sub(4).min(56);
+        let height = playlists.len() as u16 + 3;
+        let popup = super::overlay_rect(area, width, height);
+        frame.render_widget(Clear, popup);
+        // 第一行是「新建…」，跟歌单行同样的缩进宽度（`{:>5}  ` = 7 列）。
+        let mut items = vec![ListItem::new("       新建…")];
+        items.extend(playlists.iter().map(|playlist| {
+            ListItem::new(format!("{:>5}  {}", playlist.songs.len(), playlist.name))
+        }));
+        let list = List::new(items)
+            .block(Block::bordered().title(format!(" 把《{}》加进本地歌单 ", song.title)))
+            .highlight_style(highlight())
+            .highlight_symbol("▶ ");
+        frame.render_stateful_widget(list, popup, state);
+    }
+
+    /// `p`：加入歌单的选择框（QQ 那套）。
     pub(super) fn draw_picker(&mut self, frame: &mut Frame, area: Rect) {
         let Some((playlists, state, song)) = self.picker.as_mut() else {
             return;
@@ -200,6 +222,7 @@ fn help_rows(screen: Option<Menu>, hotkeys: &HotkeyConfig) -> Vec<Row> {
             Row::Section("歌曲"),
             Row::Keys { keys: "Enter", help: "播放选中" },
             Row::Keys { keys: "a / A", help: "追加到队尾 / 插到下一首" },
+            Row::Keys { keys: "P", help: "加进本地歌单" },
             Row::Keys { keys: "r", help: "重扫曲库" },
         ]);
     } else if matches!(screen, Some(Menu::LocalPlaylists)) {
@@ -208,7 +231,6 @@ fn help_rows(screen: Option<Menu>, hotkeys: &HotkeyConfig) -> Vec<Row> {
             Row::Keys { keys: "Enter", help: "播放选中" },
             Row::Keys { keys: "a / A", help: "追加到队尾 / 插到下一首" },
             Row::Keys { keys: "x", help: "移出这张歌单" },
-            Row::Keys { keys: "P", help: "把曲库里的歌加进来" },
         ]);
     } else if list {
         rows.extend([

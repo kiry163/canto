@@ -56,6 +56,8 @@ pub enum Action {
     LocalPlaylistCreate,
     /// `R`：给选中的本地歌单改名（本地歌单屏）。
     LocalPlaylistRename,
+    /// `P`：把选中的本地曲目加进本地歌单（本地曲库屏）。
+    LocalPlaylistAdd,
     /// 本地歌单名字输入态里打的字。
     LocalInputChar(char),
     LocalInputBackspace,
@@ -254,6 +256,8 @@ fn common(key: KeyEvent) -> Option<Action> {
         // 小写 `n` 是「下一首」，别抢。
         KeyCode::Char('N') => Some(Action::LocalPlaylistCreate),
         KeyCode::Char('R') => Some(Action::LocalPlaylistRename),
+        // `P`（大写）：把本地曲目加进本地歌单（只有「本地曲库」屏认，见 `state.rs` 的分岔）。
+        KeyCode::Char('P') => Some(Action::LocalPlaylistAdd),
         KeyCode::Char('d') => Some(Action::Download),
         KeyCode::Char('y') => Some(Action::ToggleLyric),
         // `v` = 频谱区。两个开关独立：`y` 管歌词栏、`v` 管频谱区。
@@ -543,6 +547,12 @@ mod tests {
         );
         assert_eq!(press(Context::LocalInput, KeyCode::Enter), Some(Action::LocalInputSubmit));
         assert_eq!(press(Context::LocalInput, KeyCode::Esc), Some(Action::LocalInputCancel));
+        // `P` 只绑在「本地曲库」屏（状态层按 menu 分岔）。
+        assert_eq!(press(Context::Content, KeyCode::Char('P')), Some(Action::LocalPlaylistAdd));
+        // 选择框（本地那套跟 QQ 那套共用同一个上下文）：上下移、回车确认、Esc 取消。
+        assert_eq!(press(Context::PlaylistPicker, KeyCode::Char('j')), Some(Action::Down));
+        assert_eq!(press(Context::PlaylistPicker, KeyCode::Enter), Some(Action::Enter));
+        assert_eq!(press(Context::PlaylistPicker, KeyCode::Esc), Some(Action::Back));
     }
 
     #[test]

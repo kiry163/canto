@@ -121,8 +121,6 @@ impl Store {
     }
 
     /// 加一首：同一 `mid` 只留一份，顺序就是加入顺序。
-    /// Task 11 的 `P` 会把曲库里的歌加进来;本任务先只有测试在用。
-    #[allow(dead_code)]
     pub fn add(&mut self, index: usize, song: &Song) {
         let Some(playlist) = self.playlists.get_mut(index) else {
             return;

@@ -149,6 +149,8 @@ impl App {
             self.draw_help(frame, area);
         } else if self.queue_open {
             self.draw_queue(frame, areas.content);
+        } else if self.local_picker.is_some() {
+            self.draw_local_picker(frame, area);
         } else if self.picker.is_some() {
             self.draw_picker(frame, area);
         }
