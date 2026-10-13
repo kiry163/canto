@@ -111,7 +111,17 @@ impl App {
             } else {
                 spectrum_title(self.engine.snapshot().title.as_deref())
             };
-            self.draw_spectrum_area(frame, areas.content, &title);
+            // 频谱区替掉列表，但**筛选输入行照旧**：输入态不属于列表（`/` 在频谱区开着时
+            // 也能按），它就占内容区顶上那一行——不画出来的话打进去的字看不见。
+            let area = if self.filter_input {
+                let rows =
+                    Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(areas.content);
+                self.draw_filter_input(frame, rows[0]);
+                rows[1]
+            } else {
+                areas.content
+            };
+            self.draw_spectrum_area(frame, area, &title);
         } else if matches!(self.screen, Screen::Home) {
             self.draw_home(frame, areas.content);
         } else {
@@ -875,6 +885,21 @@ mod tests {
         app.apply(crate::tui::keys::Action::QueueOverlay);
         // 曲子标题只在浮层里出现（频谱开着时列表不画；测试里引擎没有曲名）。
         assert!(frame_text(&mut app, 120, 40).contains("歌a"), "浮层该压得住频谱区");
+    }
+
+    /// 频谱区开着时 `/` 照样能用：筛选输入行得看得见——它不属于列表，是内容区顶上那一行。
+    #[test]
+    fn the_filter_input_stays_visible_over_the_spectrum() {
+        let (mut app, _runtime) = test_app();
+        app.engine.force_phase(crate::player::Phase::Playing);
+        app.show_spectrum = true;
+        app.apply(crate::tui::keys::Action::Filter);
+        assert!(app.filter_input, "`/` 该进输入态");
+        for character in "ab".chars() {
+            app.apply(crate::tui::keys::Action::FilterChar(character));
+        }
+        let text = frame_text(&mut app, 120, 40);
+        assert!(text.contains("筛选：ab"), "输入行得画在频谱区上面：{text}");
     }
 
     /// 歌词栏里当前句是高亮的（黄 + 粗），别的行不是——看真实单元格的颜色。

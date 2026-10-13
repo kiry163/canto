@@ -116,7 +116,7 @@ impl App {
     }
 
     /// `/` 打开的筛选输入行。
-    fn draw_filter_input(&self, frame: &mut Frame, area: Rect) {
+    pub(super) fn draw_filter_input(&self, frame: &mut Frame, area: Rect) {
         let line = Line::from(vec![
             Span::styled("筛选：", Style::new().fg(Color::Yellow)),
             Span::raw(self.nav.filter_text().to_string()),
