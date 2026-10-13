@@ -1468,8 +1468,10 @@ impl App {
                 } else if !self.nav.filter_text().is_empty() {
                     // 筛选也算一层：Esc 先清掉它，再按才退上一层视图。
                     self.nav.set_filter("");
-                } else {
-                    self.nav.pop_tracks();
+                } else if !self.nav.pop_tracks() {
+                    // 到头了：退一层就是回首页（首页自己不在 `Context::Home` 里绑 `Esc`，
+                    // 所以这条链在首页上根本不会进——不用再挡一次）。
+                    self.go_home();
                 }
             }
         }
@@ -2452,6 +2454,57 @@ mod tests {
         assert_eq!(app.context(), keys::Context::NowPlaying);
         app.apply(keys::Action::ToggleNowPlaying);
         assert_eq!(app.context(), keys::Context::Home, "退回来还是首页");
+    }
+
+    /// 列表顶部（没进歌单、没开筛选）再按 `Esc` 回首页；首页上 `Esc` 连绑定都没有（Task 1 的
+    /// `the_home_screen_has_its_own_keys` 已钉）。
+    #[test]
+    fn esc_at_the_top_of_a_list_goes_home() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.screen = Screen::Main;
+        app.nav.switch_menu(Menu::Favorites);
+        app.apply(keys::Action::Back);
+        assert!(matches!(app.screen, Screen::Home), "顶层 Esc 该回首页");
+    }
+
+    /// 回首页**不许**动别的屏记住的层级：先进「我的歌单 › 某歌单」再回首页，
+    /// 那个屏仍是曲目那一层（`nav.shown` 留着）。
+    #[test]
+    fn going_home_leaves_the_other_screens_levels_alone() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.nav.switch_menu(Menu::Playlists);
+        app.nav.push_tracks("1", "嗯", vec![crate::tui::test_support::test_song("a")]);
+        assert_eq!(app.nav.title_chain(), vec!["我的歌单".to_string(), "嗯".to_string()]);
+
+        app.apply(keys::Action::Home);
+        assert!(matches!(app.screen, Screen::Home));
+        assert!(app.nav.shown.is_some(), "回首页不该把别人的层级弹掉");
+
+        app.apply(keys::Action::Menu(1));
+        assert_eq!(
+            app.nav.title_chain(),
+            vec!["我的歌单".to_string(), "嗯".to_string()],
+            "回到歌单屏还在原来那一层"
+        );
+    }
+
+    /// 首页上没有「选中的歌」：列表专属键按下去什么都不发生（不弹通知、不换屏）。
+    #[test]
+    fn the_home_ignores_song_keys() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.screen = Screen::Home;
+        for action in [
+            keys::Action::Download,
+            keys::Action::AddToPlaylist,
+            keys::Action::RemoveFromPlaylist,
+            keys::Action::AppendQueue,
+            keys::Action::InsertQueue,
+            keys::Action::Filter,
+        ] {
+            app.apply(action);
+            assert!(matches!(app.screen, Screen::Home), "{action:?} 不该换屏");
+            assert!(app.notice_text().is_none(), "{action:?} 不该弹通知");
+        }
     }
 
     #[test]
