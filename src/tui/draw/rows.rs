@@ -11,11 +11,14 @@
 #![allow(dead_code)]
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
+
+use crate::model::{Quality, Song};
 
 use super::truncate_to_cols;
 
@@ -310,6 +313,69 @@ pub(super) fn group(inner: Rect) -> (Option<Rect>, Rect) {
     }
 }
 
+/// 行上「本地已有那份」的解析结果（spec §3：**已有那份就报那一份**）。
+pub(super) struct LocalCopy<'a> {
+    pub tier: Cow<'a, str>,
+    pub size: Option<u64>,
+    pub cached: bool,
+    pub downloaded: bool,
+}
+
+/// 口径：缓存 > 下载 > 曲库文件 > 按配置下限预估。
+///
+/// - 缓存那份的档位能从文件名精确读出（`<mid>.<档位>.<ext>`），体积取真实字节；
+/// - 下载那份与本地文件只读得出**容器**（扩展名）与字节数，不猜 128/320；
+/// - 本地歌（`Source::Local`）直接报自己的容器与 `local_bytes`；
+/// - 都没有才按配置下限算「新取流会取哪一档」（今天的行为）。
+///
+/// 本地有缓存与下载两份时两个标记都亮，但档位/体积报缓存那份——播放也是先命中缓存。
+pub(super) fn copy_of<'a>(
+    song: &'a Song,
+    cached: &'a HashMap<String, (Quality, u64)>,
+    downloads: &'a HashMap<String, (String, u64)>,
+    want: Quality,
+) -> LocalCopy<'a> {
+    if song.is_local() {
+        let tier = song
+            .path()
+            .and_then(|path| path.extension())
+            .map_or_else(
+                || "—".to_string(),
+                |ext| crate::download::container_label(&ext.to_string_lossy()),
+            );
+        return LocalCopy {
+            tier: tier.into(),
+            size: (song.local_bytes > 0).then_some(song.local_bytes),
+            cached: false,
+            downloaded: false,
+        };
+    }
+    let stem = crate::download::file_stem(song);
+    if let Some((quality, bytes)) = cached.get(&song.mid) {
+        return LocalCopy {
+            tier: quality.label().into(),
+            size: Some(*bytes),
+            cached: true,
+            downloaded: downloads.contains_key(&stem),
+        };
+    }
+    if let Some((container, bytes)) = downloads.get(&stem) {
+        return LocalCopy {
+            tier: container.clone().into(),
+            size: Some(*bytes),
+            cached: false,
+            downloaded: true,
+        };
+    }
+    let (quality, size) = song.sizes.at_or_below(want);
+    LocalCopy {
+        tier: quality.label().into(),
+        size,
+        cached: false,
+        downloaded: false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -601,5 +667,64 @@ mod tests {
 
         let short = Rect::new(0, 0, 60, MIN_FOR_HEADER - 1);
         assert_eq!(group(short), (None, short), "矮屏把那一行还给数据");
+    }
+
+    fn cached_index(entries: &[(&str, Quality, u64)]) -> HashMap<String, (Quality, u64)> {
+        entries
+            .iter()
+            .map(|(mid, quality, bytes)| ((*mid).to_string(), (*quality, *bytes)))
+            .collect()
+    }
+
+    fn downloaded_index(entries: &[(&str, &str, u64)]) -> HashMap<String, (String, u64)> {
+        entries
+            .iter()
+            .map(|(stem, container, bytes)| {
+                ((*stem).to_string(), ((*container).to_string(), *bytes))
+            })
+            .collect()
+    }
+
+    /// 四种状态：缓存命中 > 下载命中 > 都没有（按配置下限预估）；本地歌报自己的容器与大小。
+    #[test]
+    fn the_tier_and_size_report_whatever_is_already_on_disk() {
+        let mut song = crate::tui::test_support::titled_song("a", "成全", "刘若英");
+        song.sizes.mp3_128 = 4_400_000;
+        let cached = cached_index(&[("a", Quality::High320, 9_800_000)]);
+        let downloads = downloaded_index(&[("刘若英 - 成全", "MP3", 9_900_000)]);
+        // 空的表要先绑成变量：`copy` 借着它们，临时值活不到断言那里。
+        let nothing_cached = cached_index(&[]);
+        let nothing_downloaded = downloaded_index(&[]);
+
+        // ① 有缓存：报缓存那份（播放也是先命中缓存），两个标记都亮。
+        let copy = copy_of(&song, &cached, &downloads, Quality::Low128);
+        assert_eq!(copy.tier, "MP3 320k");
+        assert_eq!(copy.size, Some(9_800_000));
+        assert!(copy.cached && copy.downloaded);
+
+        // ② 只下载过：报磁盘那份的容器与真实大小。
+        let copy = copy_of(&song, &nothing_cached, &downloads, Quality::Low128);
+        assert_eq!(copy.tier, "MP3");
+        assert_eq!(copy.size, Some(9_900_000));
+        assert!(!copy.cached && copy.downloaded);
+
+        // ③ 都没有：按配置下限预估（今天的行为）。
+        let copy = copy_of(&song, &nothing_cached, &nothing_downloaded, Quality::Low128);
+        assert_eq!(copy.tier, "MP3 128k");
+        assert_eq!(copy.size, Some(4_400_000));
+        assert!(!copy.cached && !copy.downloaded);
+
+        // ④ 本地歌：容器取自扩展名，大小来自曲库扫描；缓存/下载两列不适用。
+        let mut local = crate::tui::test_support::local_song("C:/Music/canto/曲终人散.flac");
+        local.local_bytes = 31_457_280;
+        let copy = copy_of(&local, &cached, &downloads, Quality::Low128);
+        assert_eq!(copy.tier, "FLAC");
+        assert_eq!(copy.size, Some(31_457_280));
+        assert!(!copy.cached && !copy.downloaded);
+
+        // ⑤ 本地歌读不出大小：体积未知，仍是 `—`。
+        let mut unknown = crate::tui::test_support::local_song("C:/Music/canto/没时长的.wav");
+        unknown.local_bytes = 0;
+        assert_eq!(copy_of(&unknown, &cached, &downloads, Quality::Low128).size, None);
     }
 }

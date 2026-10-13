@@ -1142,6 +1142,9 @@ git commit -m "feat(tui): App 维护下载目录索引(启动/下载完成/r 三
     }
 ```
 
+> **实施记录（2026-10-13）**：② 与 ③ 里的空索引要先绑成变量（`nothing_cached` / `nothing_downloaded`）
+> 再传——`copy` 借着它们，`&cached_index(&[])` 这种临时值活不到断言那里（E0716）。
+
 - [ ] **Step 2: 跑测试确认失败**
 
 Run: `cargo test --locked rows::tests::the_tier_and_size_report_whatever_is_already_on_disk`
