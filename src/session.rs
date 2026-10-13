@@ -134,13 +134,8 @@ impl Jar {
         Ok(state)
     }
 
-    /// 落盘到默认位置。
-    pub fn save(&self) -> Result<()> {
-        self.save_to(&paths::session_path())
-    }
-
     /// 落盘：`cookie_store` 自带的 JSON 序列化。
-    fn save_to(&self, path: &Path) -> Result<()> {
+    pub(crate) fn save_to(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("创建配置目录失败：{}", parent.display()))?;
@@ -162,10 +157,13 @@ impl Jar {
     }
 
     /// 清空会话（含磁盘文件）。
-    pub fn clear(&self) -> Result<()> {
+    ///
+    /// 路径**必须由调用方给**：以前这里写死 `paths::session_path()`，于是跑一次测试
+    /// （`sign_out` 的那条用例）就把使用者真实的 `session.json` 删了——跟本地歌单当年那坑
+    /// 一模一样（见 `tui::test_support` 的 `playlists_path`）。
+    pub(crate) fn clear_at(&self, path: &Path) -> Result<()> {
         self.with_store(|store| store.clear());
-        let path = paths::session_path();
-        match std::fs::remove_file(&path) {
+        match std::fs::remove_file(path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => {

@@ -227,10 +227,12 @@ pub(super) fn context(input: bool) -> keys::Context {
 }
 
 /// 把粘贴的 cookie 写进会话并落盘。失败就原样报出来（就地显示，不留到日志里）。
-pub(super) fn login_with_cookie(raw: &str) -> Result<String, String> {
+///
+/// 落盘路径由调用方给（同 `sign_out`）：测试不该往使用者真实的 `~/.config/canto/session.json` 里写。
+pub(super) fn login_with_cookie(raw: &str, path: &std::path::Path) -> Result<String, String> {
     let jar = session::jar();
     let state = jar.login_with_cookie(raw).map_err(|error| format!("{error:#}"))?;
-    jar.save().map_err(|error| format!("{error:#}"))?;
+    jar.save_to(path).map_err(|error| format!("{error:#}"))?;
     Ok(state.identity.unwrap_or_default())
 }
 

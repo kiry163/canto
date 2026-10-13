@@ -38,6 +38,12 @@ pub(super) fn test_app() -> (App, tokio::runtime::Runtime) {
             "canto-test-{}-{unique}-local_playlists.json",
             std::process::id()
         )),
+        // 会话文件同样各用各的：`sign_out` 会**删这个文件**，写死默认路径那次跑一遍测试
+        // 就把使用者的登录态清了（同上面那条坑的第二个版本）。
+        std::env::temp_dir().join(format!(
+            "canto-test-{}-{unique}-session.json",
+            std::process::id()
+        )),
         tx,
     );
     // 大多数测试跑在「已登录」的世界里（未登录那几条自己把这个置回 false）：

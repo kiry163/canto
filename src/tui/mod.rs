@@ -56,6 +56,7 @@ pub fn run(
         config,
         history_path,
         crate::paths::local_playlists_path(),
+        crate::paths::session_path(),
         tx,
     );
     let (hotkeys, report) = hotkeys::install(&bindings);

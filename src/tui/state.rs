@@ -734,6 +734,9 @@ pub(super) struct App {
     pub(super) history_path: std::path::PathBuf,
     /// 本地歌单文件路径（同上：测试注入临时路径，别去动使用者真实的 `~/.config/canto`）。
     pub(super) playlists_path: std::path::PathBuf,
+    /// 会话文件路径（同上。登出 / 会话失效会**删这个文件**——写死默认路径那次，跑一遍测试
+    /// 就把使用者的登录态删了）。
+    pub(super) session_path: std::path::PathBuf,
 
     /// 正在看哪一屏、四屏各自的列表与选中位置。
     pub(super) nav: Nav,
@@ -820,6 +823,7 @@ impl App {
         config: Config,
         history_path: std::path::PathBuf,
         playlists_path: std::path::PathBuf,
+        session_path: std::path::PathBuf,
         tx: Sender<Msg>,
     ) -> Self {
         // 先读存储（下面 `playlists_path` 会被 move 进字段）。
@@ -839,6 +843,7 @@ impl App {
             history: History::default(),
             history_path,
             playlists_path,
+            session_path,
             nav: Nav::new(),
             queue: queue::Queue::new(Vec::new(), 0, String::new()),
             request: 0,
@@ -1650,7 +1655,7 @@ impl App {
             }
             Msg::LoggedIn(identity) => {
                 // 扫码成功后 cookie 已经在 jar 里，落盘才算登录完成。
-                match session::jar().save() {
+                match session::jar().save_to(&self.session_path) {
                     Ok(()) => self.finish_login(identity),
                     Err(error) => {
                         if let Screen::Login(state) = &mut self.screen {
@@ -2123,7 +2128,7 @@ impl App {
                     // 首页 / 列表屏走不到这条（登录屏只会产出上面那些动作）。
                     Screen::Home | Screen::Main => return,
                 };
-                match login::login_with_cookie(&raw) {
+                match login::login_with_cookie(&raw, &self.session_path) {
                     Ok(identity) => self.finish_login(identity),
                     Err(error) => {
                         if let Screen::Login(state) = &mut self.screen {
@@ -2177,7 +2182,7 @@ impl App {
     }
 
     pub(super) fn sign_out(&mut self, reason: &str) {
-        if let Err(error) = session::jar().clear() {
+        if let Err(error) = session::jar().clear_at(&self.session_path) {
             tracing::warn!("清本地会话失败：{error:#}");
         }
         // **不动队列**：本地歌接着放，轮到 QQ 歌时才提示需要登录（以前这里会 `queue.clear()`
@@ -3474,6 +3479,15 @@ mod tests {
 
         app.sign_out("测试");
         assert!(matches!(app.screen, Screen::Home), "登出回首页");
+
+        // 登出删的是**注入的那个**会话文件：以前这里写死 `paths::session_path()`，
+        // 于是跑一遍 `cargo test` 就把使用者真实的登录态删了（真机踩过）。
+        std::fs::write(&app.session_path, "canary").expect("写一份假会话");
+        app.sign_out("测试");
+        assert!(
+            !app.session_path.exists(),
+            "登出要清掉 App 拿到的那个会话文件"
+        );
     }
 
     /// 本地曲目进历史时带上路径；从历史还原时还是本地曲目（重播不再去要 vkey）。
