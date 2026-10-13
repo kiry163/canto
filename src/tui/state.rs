@@ -487,20 +487,23 @@ impl Nav {
     /// 返回上一层。返回 `true` 表示这次的 Esc 被吃掉了。
     ///
     /// 两层是**各屏各自**的（`shown` 管 QQ 歌单、`local_shown` 管本地歌单），所以退哪一层
-    /// 看当前屏——不然在本地歌单屏按 `Esc` 会把 QQ 那一层悄悄吃掉，画面还不动。
+    /// 看当前屏：在别的屏（收藏 / 搜索 / 本地曲库 / 历史）上按 `Esc` 时，那两层一层都不该动
+    /// ——以前这里不看屏，于是「我的歌单 › 某歌单」那一层会被那些屏的 `Esc` 悄悄吃掉、
+    /// 画面一动不动（连「回首页」这一步也被顶掉），同一个坑的镜像版本见本地歌单那条。
     pub fn pop_tracks(&mut self) -> bool {
-        if self.menu == Menu::LocalPlaylists {
-            if self.local_shown.take().is_none() {
-                return false;
+        match self.menu {
+            Menu::Playlists if self.shown.is_some() => {
+                self.shown = None;
+                self.tracks = ListView::songs();
+                true
             }
-            self.local_tracks = ListView::songs();
-            return true;
+            Menu::LocalPlaylists if self.local_shown.is_some() => {
+                self.local_shown = None;
+                self.local_tracks = ListView::songs();
+                true
+            }
+            _ => false,
         }
-        if self.shown.take().is_none() {
-            return false;
-        }
-        self.tracks = ListView::songs();
-        true
     }
 
     /// 当前这一屏的筛选词（歌单列表在最上层时就是它自己的）。
@@ -3741,6 +3744,60 @@ mod tests {
         app.nav.switch_menu(Menu::Favorites);
         app.apply(keys::Action::Back);
         assert!(matches!(app.screen, Screen::Home), "顶层 Esc 该回首页");
+    }
+
+    /// 别的屏记住的层级不许吃掉这一屏的 `Esc`：在「本地曲库」上按 `Esc` 就该回首页，
+    /// 「我的歌单 › 某歌单」那一层既不该被退掉、也不该把回首页这一步挡下来。
+    ///
+    /// （回首页保留其它屏层级是刻意的，见 `going_home_leaves_the_other_screens_levels_alone`；
+    /// 「退一层」只退**当前屏**那一层。）
+    #[test]
+    fn escape_on_a_list_ignores_another_screens_level() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.screen = Screen::Main;
+        app.switch_menu(Menu::Playlists);
+        app.nav
+            .push_tracks("1", "嗯", vec![crate::tui::test_support::test_song("a")]);
+
+        // 搜索屏进屏就在输入态：第一下 Esc 退的是输入（既有分层），第二下才回首页。
+        for (menu, presses) in [
+            (Menu::LocalLibrary, 1),
+            (Menu::Favorites, 1),
+            (Menu::History, 1),
+            (Menu::Search, 2),
+        ] {
+            app.switch_menu(menu);
+            for _ in 0..presses {
+                app.apply(keys::Action::Back);
+            }
+            assert!(
+                matches!(app.screen, Screen::Home),
+                "{menu:?} 上按 Esc（{presses} 下）该回首页"
+            );
+            assert!(
+                app.nav.shown.is_some(),
+                "{menu:?} 上的 Esc 不该把「我的歌单›某歌单」那一层退掉"
+            );
+            app.screen = Screen::Main;
+        }
+    }
+
+    /// 本地歌单那一层同理：在本地曲库上按 `Esc` 不该动它（只有「本地歌单」屏自己退它）。
+    #[test]
+    fn escape_on_the_local_library_ignores_the_local_playlist_level() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.screen = Screen::Main;
+        app.switch_menu(Menu::LocalPlaylists);
+        app.nav
+            .push_local_tracks(0, "通勤", vec![crate::tui::test_support::test_song("a")]);
+
+        app.switch_menu(Menu::LocalLibrary);
+        app.apply(keys::Action::Back);
+        assert!(matches!(app.screen, Screen::Home), "本地曲库上 Esc 该回首页");
+        assert!(
+            app.nav.local_shown.is_some(),
+            "本地歌单那一层该留着（Esc 退的是本地曲库，不是它）"
+        );
     }
 
     /// 回首页**不许**动别的屏记住的层级：先进「我的歌单 › 某歌单」再回首页，
