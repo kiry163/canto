@@ -50,6 +50,9 @@ fn edge_state(state: &mut ListState, len: usize, last: bool) {
 /// 当前在哪一屏。启动时看会话：没登录就先出登录屏。
 pub(super) enum Screen {
     Login(LoginState),
+    /// 首页（`0` 界面）：四行屏入口。它不是 `Menu` 的一员——`Menu` 的含义是「一份歌曲
+    /// 列表 + 选中位置 + 筛选」，首页不是列表，它自己只有一行选中位置（`home_state`）。
+    Home,
     Main,
 }
 
@@ -608,6 +611,8 @@ pub(super) struct App {
     pub(super) help_open: bool,
     /// 帮助浮层从表格第几行开始显示（`j`/`k` 滚；上限在绘制时按浮层实际高度回夹）。
     pub(super) help_scroll: u16,
+    /// 首页的选中位置（下标即 `Menu::ALL` 的下标）。跟各屏的选中位置一样不落盘。
+    pub(super) home_state: ListState,
     /// 队列浮层开着（`u`）。
     pub(super) queue_open: bool,
     /// 队列浮层里的高亮位置。
@@ -637,7 +642,8 @@ impl App {
             config,
             hotkeys: hotkeys::Hotkeys::none(),
             overlay: overlay::DesktopLyrics::none(),
-            // 默认主界面；启动时由 `tui::run` 按会话状态决定，测试里也就不用管登录。
+            // 默认主界面：它只活到 `tui::run` 决定落屏之前（真启动落首页，测试里也就不用
+            // 管登录与会话）。
             screen: Screen::Main,
             history: History::default(),
             history_path,
@@ -659,6 +665,7 @@ impl App {
             filter_input: false,
             help_open: false,
             help_scroll: 0,
+            home_state: ListState::default(),
             queue_open: false,
             queue_state: ListState::default(),
             picker: None,
@@ -745,9 +752,19 @@ impl App {
         });
     }
 
-    /// 启动：停在「我的收藏」，并把它拉下来。
+    /// 启动：落在**首页**（原来停在「我的收藏」，并顺手把它拉下来）。
     pub(super) fn load_initial(&mut self) {
-        self.switch_menu(Menu::Favorites);
+        self.go_home();
+    }
+
+    /// 回首页：屏幕换成首页，高亮停在**刚离开的那一屏**。
+    ///
+    /// 只动这两样——别的屏记住的层级（`nav.shown`）、筛选、选中位置都不碰：首页是最外
+    /// 一层，不该顺手改动谁。
+    pub(super) fn go_home(&mut self) {
+        self.screen = Screen::Home;
+        let index = Menu::ALL.iter().position(|menu| *menu == self.nav.menu).unwrap_or(0);
+        self.home_state.select(Some(index));
     }
 
     /// 切屏。这一屏没拉过数据就顺手拉一次——每屏的选中位置由 `Nav` 留着，
@@ -1261,16 +1278,19 @@ impl App {
         };
         match self.screen {
             Screen::Login(_) => self.apply_login(action),
-            Screen::Main => self.apply(action),
+            // 首页与列表屏走同一条派发路径：差异靠键位表（`Context::Home`）与 `apply`
+            // 里那几处屏判断，不另立一套。
+            Screen::Home | Screen::Main => self.apply(action),
         }
     }
 
-    /// 全局热键落到哪：只有主界面有东西可控，登录屏直接丢。
+    /// 全局热键落到哪：主界面（含首页——它是进了主界面之后最外的那一层）有东西可控，
+    /// 登录屏直接丢。
     ///
     /// 刻意不走 `apply_login`：热键只有播放 / 音量这一类动作，它们跟登录屏上的
     /// cookie、二维码不是一码事。
     pub(super) fn dispatch_hotkey(&mut self, action: keys::Action) {
-        if let Screen::Main = self.screen {
+        if matches!(self.screen, Screen::Home | Screen::Main) {
             self.apply(action);
         }
     }
@@ -1294,6 +1314,10 @@ impl App {
         if self.now_playing_full {
             return keys::Context::NowPlaying;
         }
+        // 首页在模态与全屏之后：首页上开 `u` / `?` / `Y` 时上下文仍归它们。
+        if matches!(self.screen, Screen::Home) {
+            return keys::Context::Home;
+        }
         // 筛选框跟搜索框一样是文本输入，只是 Enter / Esc 落点不同。
         if self.filter_input {
             return keys::Context::FilterInput;
@@ -1313,6 +1337,7 @@ impl App {
                 self.help_scroll = 0;
             }
             keys::Action::QueueOverlay => self.toggle_queue_overlay(),
+            keys::Action::Home => self.go_home(),
             keys::Action::Logout => self.sign_out("已登出，请重新登录"),
             keys::Action::HistoryClear => {
                 // 只在历史屏有意义；别的屏按了不做事（Esc 在没得返回时也一样）。
@@ -1334,6 +1359,8 @@ impl App {
             }
             keys::Action::Menu(index) => {
                 if let Some(menu) = Menu::ALL.get(index).copied() {
+                    // 从首页按数字 = 进那一屏。
+                    self.screen = Screen::Main;
                     self.switch_menu(menu);
                 }
             }
@@ -1350,6 +1377,13 @@ impl App {
                 }
                 if self.queue_open {
                     self.jump_in_queue();
+                    return;
+                }
+                // 首页：Enter = 进选中那一屏（不是「播放选中」，首页没有选中的歌）。
+                if matches!(self.screen, Screen::Home) {
+                    let menu = Menu::ALL[self.home_state.selected().unwrap_or(0)];
+                    self.screen = Screen::Main;
+                    self.switch_menu(menu);
                     return;
                 }
                 self.enter_selected();
@@ -1489,7 +1523,8 @@ impl App {
             keys::Action::InputSubmit => {
                 let raw = match &mut self.screen {
                     Screen::Login(state) => state.input.take().unwrap_or_default(),
-                    Screen::Main => return,
+                    // 首页 / 列表屏走不到这条（登录屏只会产出上面那些动作）。
+                    Screen::Home | Screen::Main => return,
                 };
                 match login::login_with_cookie(&raw) {
                     Ok(identity) => self.finish_login(identity),
@@ -1505,12 +1540,14 @@ impl App {
         }
     }
 
-    /// 登录成功：进主界面，从「我的收藏」开始。
+    /// 登录成功：进主界面，落在**首页**上。
+    ///
+    /// 不顺手 `switch_menu(Menu::Favorites)`：那是替使用者预取收藏。谁进收藏屏谁拉，
+    /// 跟其它屏一个口径。
     fn finish_login(&mut self, identity: String) {
         tracing::info!("登录成功：{identity}");
-        self.screen = Screen::Main;
         self.notify(format!("已登录：{identity}"));
-        self.switch_menu(Menu::Favorites);
+        self.go_home();
     }
 
     /// 统一处理失败：会话失效就切回登录屏，其余写状态行。
@@ -1703,6 +1740,12 @@ impl App {
             step_state(state, playlists.len(), delta);
             return;
         }
+        // 首页：挪它自己那一行选中。排在队列 / 选择框**之后**——首页上开着浮层时，
+        // `j`/`k` 归浮层（跟 `context()` 同一个次序）。
+        if matches!(self.screen, Screen::Home) {
+            step_state(&mut self.home_state, Menu::ALL.len(), delta);
+            return;
+        }
         self.nav.move_selection(delta);
     }
 
@@ -1719,6 +1762,10 @@ impl App {
         }
         if let Some((playlists, state, _)) = self.picker.as_mut() {
             edge_state(state, playlists.len(), last);
+            return;
+        }
+        if matches!(self.screen, Screen::Home) {
+            edge_state(&mut self.home_state, Menu::ALL.len(), last);
             return;
         }
         self.nav.edge_selection(last);
@@ -2317,6 +2364,94 @@ mod tests {
         app.apply(keys::Action::Down);
         assert_eq!(app.help_scroll, 1, "帮助在最上层，滚动归它");
         assert_eq!(app.queue_state.selected(), queued, "队列的高亮不许动");
+    }
+
+    /// 登录成功后落首页——而且**没有**顺手预取收藏（原来落收藏并当场拉一遍）。
+    #[test]
+    fn logging_in_lands_on_the_home_screen_without_prefetching_favorites() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.finish_login("o123".to_string());
+        assert!(matches!(app.screen, Screen::Home), "落屏该是首页");
+        assert!(!app.nav.favorites_loaded, "首页不预取收藏");
+        assert_eq!(app.home_state.selected(), Some(0), "高亮在第一项");
+    }
+
+    /// 首页 `Enter` / 数字：进那一屏；`0` 回首页。
+    #[test]
+    fn the_home_enters_screens_and_comes_back() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.screen = Screen::Home;
+        app.home_state.select(Some(1));
+        app.apply(keys::Action::Enter);
+        assert!(matches!(app.screen, Screen::Main));
+        assert_eq!(app.nav.menu, Menu::Playlists, "进的是高亮那一项");
+
+        app.apply(keys::Action::Home);
+        assert!(matches!(app.screen, Screen::Home), "`0` 回首页");
+        app.apply(keys::Action::Menu(3));
+        assert!(matches!(app.screen, Screen::Main));
+        assert_eq!(app.nav.menu, Menu::History, "数字直达");
+    }
+
+    /// 首页上挪选中：`j`/`k` 到底 / 到顶都不越界（`step_state` 夹住）。
+    #[test]
+    fn the_home_moves_its_own_highlight() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.screen = Screen::Home;
+        app.go_home(); // 高亮 = nav.menu 那一项
+        let start = app.home_state.selected().expect("该有高亮");
+        app.apply(keys::Action::Down);
+        assert_eq!(app.home_state.selected(), Some(start + 1));
+        app.apply(keys::Action::Last);
+        assert_eq!(app.home_state.selected(), Some(Menu::ALL.len() - 1));
+        app.apply(keys::Action::Down);
+        assert_eq!(app.home_state.selected(), Some(Menu::ALL.len() - 1), "到底不动");
+        app.apply(keys::Action::First);
+        assert_eq!(app.home_state.selected(), Some(0));
+        app.apply(keys::Action::Up);
+        assert_eq!(app.home_state.selected(), Some(0), "到顶不动");
+    }
+
+    /// 首页上开队列浮层（`u`）时，`j`/`k` 挪的是**浮层**的高亮，不是首页的（次序：
+    /// 帮助 > 队列/选择框 > 首页 > 列表，跟 `context()` 一致）。
+    #[test]
+    fn the_home_queue_overlay_takes_the_arrow_keys() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.screen = Screen::Home;
+        app.go_home();
+        let home_before = app.home_state.selected();
+        app.queue = crate::tui::queue::Queue::new(
+            vec![crate::tui::test_support::test_song("a"), crate::tui::test_support::test_song("b")],
+            0,
+            String::new(),
+        );
+        app.apply(keys::Action::QueueOverlay);
+        assert!(app.queue_open);
+
+        app.apply(keys::Action::Down);
+        assert_eq!(app.queue_state.selected(), Some(1), "队列高亮该动");
+        assert_eq!(app.home_state.selected(), home_before, "首页的高亮不许动");
+    }
+
+    /// 首页算主界面：全局热键在那儿照样生效（原来只在 `Screen::Main`）。
+    #[test]
+    fn the_global_hotkeys_work_on_the_home_screen() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.screen = Screen::Home;
+        app.dispatch_hotkey(keys::Action::Help);
+        assert!(app.help_open, "首页也算主界面");
+    }
+
+    /// 首页上按 `Y` 之后是「全屏视图」的上下文（列表看不见那条规则不能破）。
+    #[test]
+    fn the_home_fullscreen_view_uses_the_now_playing_context() {
+        let (mut app, _runtime) = crate::tui::test_support::test_app();
+        app.screen = Screen::Home;
+        assert_eq!(app.context(), keys::Context::Home);
+        app.apply(keys::Action::ToggleNowPlaying);
+        assert_eq!(app.context(), keys::Context::NowPlaying);
+        app.apply(keys::Action::ToggleNowPlaying);
+        assert_eq!(app.context(), keys::Context::Home, "退回来还是首页");
     }
 
     #[test]

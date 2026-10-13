@@ -11,6 +11,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::Block;
 
 pub mod content;
+pub mod home;
 pub mod lyric;
 pub mod overlay;
 pub mod player;
@@ -109,6 +110,8 @@ impl App {
         let areas = layout(area, lyric_wanted);
         if self.now_playing_full {
             self.draw_now_playing(frame, areas.content);
+        } else if matches!(self.screen, Screen::Home) {
+            self.draw_home(frame, areas.content);
         } else {
             self.draw_content(frame, areas.content);
         }
@@ -189,6 +192,10 @@ pub fn hints(context: keys::Context) -> &'static str {
     match context {
         keys::Context::Content => {
             "Enter 播放 · Space 暂停 · n/b 切歌 · / 筛选 · p 加歌单 · ? 帮助"
+        }
+        // 首页没有「选中的歌」：提示里只给进屏 / 切屏与播放这几条。
+        keys::Context::Home => {
+            "Enter 进入 · 1-4 直跳 · Space 暂停 · n/b 切歌 · u 队列 · ? 帮助"
         }
         keys::Context::NowPlaying => {
             "Y/Esc 退出 · Space 暂停 · n/b 切歌 · ←/→ 10 秒 · +/- 音量 · ? 帮助"
@@ -544,6 +551,44 @@ mod tests {
             let _ = frame_raw(&mut app, width, height);
             assert_eq!(app.help_scroll, 1, "{width}x{height} 应该滚得动");
         }
+    }
+
+    /// 首页画出来：标题 + 四行「编号 名字」 + 选中高亮。
+    #[test]
+    fn the_home_screen_lists_the_four_screens_with_numbers() {
+        let (mut app, _runtime) = test_app();
+        app.screen = Screen::Home;
+        app.go_home();
+        let rows = frame_rows(&mut app, 120, 30);
+        assert!(rows.iter().any(|row| row.contains("┌首页")), "标题：{rows:?}");
+        for (number, title) in [(1, "我的收藏"), (2, "我的歌单"), (3, "搜索"), (4, "历史")] {
+            assert!(
+                rows.iter().any(|row| row.contains(&format!("{number}{title}"))),
+                "{number} {title} 那一行没画出来"
+            );
+        }
+        assert!(rows.iter().any(|row| row.contains("▶1我的收藏")), "高亮在第一项：{rows:?}");
+    }
+
+    /// 首页的状态行是首页那条提示，不是主界面的。
+    #[test]
+    fn the_home_screen_has_its_own_status_line_hint() {
+        let (mut app, _runtime) = test_app();
+        app.screen = Screen::Home;
+        let status = frame_rows(&mut app, 120, 30).pop().expect("状态行");
+        assert!(status.contains("Enter进入"), "{status:?}");
+        assert!(status.contains("1-4直跳"), "{status:?}");
+        assert!(!status.contains("Enter播放"), "不是主界面那条：{status:?}");
+    }
+
+    /// 最小窗口（内容区 10 行）里四行都在界内。
+    #[test]
+    fn the_home_screen_fits_the_smallest_window() {
+        let (mut app, _runtime) = test_app();
+        app.screen = Screen::Home;
+        let rows = frame_rows(&mut app, 60, 15);
+        assert!(rows.iter().any(|row| row.contains("1我的收藏")), "四行都得在：{rows:?}");
+        assert!(rows.iter().any(|row| row.contains("4历史")), "四行都得在：{rows:?}");
     }
 
     /// 全屏视图：歌词画在内容区，底部不再另开一块（同一份歌词不画两遍）。

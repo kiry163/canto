@@ -71,6 +71,8 @@ pub enum Action {
     /// 全局热键 `lyrics`：开 / 关桌面歌词窗口——关掉是把窗口**拆了**（不是藏起来），
     /// 状态记在 `desktop-lyrics.json`（界面上没有对应按键）。
     LyricsWindow,
+    /// `0`：回首页（屏幕层最外的那一层，各屏入口与编号都在它上面）。
+    Home,
 }
 
 /// 按键时的上下文：模态与输入态在这里体现，`resolve` 不再自己猜。
@@ -78,6 +80,8 @@ pub enum Action {
 pub enum Context {
     /// 主界面（菜单栏去掉后只剩这一块内容区）。
     Content,
+    /// 首页（`0` 界面）：四行屏入口，`Enter` 进屏。
+    Home,
     /// 全屏视图：内容区被它占满，只留「看得见」的那些键。
     NowPlaying,
     /// 搜索输入框正在吃键。
@@ -157,6 +161,7 @@ pub fn resolve(context: Context, key: KeyEvent) -> Option<Action> {
             KeyCode::Esc => Some(Action::Back),
             KeyCode::Char('Y') => Some(Action::ToggleNowPlaying),
             KeyCode::Char(digit @ '1'..='4') => Some(Action::Menu(digit as usize - '1' as usize)),
+            KeyCode::Char('0') => Some(Action::Home),
             KeyCode::Char('?') | KeyCode::F(1) => Some(Action::Help),
             KeyCode::Char('q') => Some(Action::Quit),
             KeyCode::Char('L') => Some(Action::Logout),
@@ -173,6 +178,32 @@ pub fn resolve(context: Context, key: KeyEvent) -> Option<Action> {
             _ => None,
         },
         Context::Content => common(key),
+        // 首页：没有「选中的歌」，所以列表专属键（`/`、`d`、`p`、`x`、`a`、`A`、`Shift+D`、
+        // `PgUp`/`PgDn`）一个都不绑；`Esc` 也没有上一层可退，同样不绑。
+        Context::Home => match key.code {
+            KeyCode::Char('j') | KeyCode::Down => Some(Action::Down),
+            KeyCode::Char('k') | KeyCode::Up => Some(Action::Up),
+            KeyCode::Char('g') | KeyCode::Home => Some(Action::First),
+            KeyCode::Char('G') | KeyCode::End => Some(Action::Last),
+            KeyCode::Enter => Some(Action::Enter),
+            KeyCode::Char('0') => Some(Action::Home),
+            KeyCode::Char(digit @ '1'..='4') => Some(Action::Menu(digit as usize - '1' as usize)),
+            // 播放控制跟主界面同一套键（含 `h`/`l`、`.`/`,` 这两个拼法）。
+            KeyCode::Char(' ') => Some(Action::PlayPause),
+            KeyCode::Char('n') => Some(Action::Next),
+            KeyCode::Char('b') => Some(Action::Prev),
+            KeyCode::Left | KeyCode::Char('h') => Some(Action::SeekBack),
+            KeyCode::Right | KeyCode::Char('l') => Some(Action::SeekForward),
+            KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Char('.') => Some(Action::VolumeUp),
+            KeyCode::Char('-') | KeyCode::Char(',') => Some(Action::VolumeDown),
+            KeyCode::Char('m') => Some(Action::CycleMode),
+            KeyCode::Char('u') => Some(Action::QueueOverlay),
+            KeyCode::Char('Y') => Some(Action::ToggleNowPlaying),
+            KeyCode::Char('?') | KeyCode::F(1) => Some(Action::Help),
+            KeyCode::Char('L') => Some(Action::Logout),
+            KeyCode::Char('q') => Some(Action::Quit),
+            _ => None,
+        },
     }
 }
 
@@ -182,6 +213,8 @@ fn common(key: KeyEvent) -> Option<Action> {
     match key.code {
         // 数字键切屏——菜单栏去掉后这是唯一的切屏入口，帮助浮层里有这张表。
         KeyCode::Char(digit @ '1'..='4') => Some(Action::Menu(digit as usize - '1' as usize)),
+        // `0` = 回首页（跟四屏同一套编号；首页自己也是 `0`）。
+        KeyCode::Char('0') => Some(Action::Home),
         KeyCode::Char('q') => Some(Action::Quit),
         // 登出：从帮助浮层里挪出来，主界面（含全屏视图）也能按。模态浮层另算——
         // 它们开着时是「一个小编辑器」，仍然吞键（见各自的 match）。
@@ -334,6 +367,7 @@ mod tests {
     fn ctrl_c_quits_from_every_context() {
         for context in [
             Context::Content,
+            Context::Home,
             Context::SearchInput,
             Context::PlaylistPicker,
             Context::QueueOverlay,
@@ -386,6 +420,69 @@ mod tests {
         assert_eq!(press(Context::FilterInput, KeyCode::Char('L')), Some(Action::FilterChar('L')));
         // 小写 `l` 还是快进 10 秒，别跟登出混了。
         assert_eq!(press(Context::Content, KeyCode::Char('l')), Some(Action::SeekForward));
+    }
+
+    /// 首页自己一套键位：`Enter` 进屏、`0` 回首页，列表专属键一个都不绑。
+    #[test]
+    fn the_home_screen_has_its_own_keys() {
+        for (key, action) in [
+            (KeyCode::Char('j'), Action::Down),
+            (KeyCode::Down, Action::Down),
+            (KeyCode::Char('k'), Action::Up),
+            (KeyCode::Up, Action::Up),
+            (KeyCode::Char('g'), Action::First),
+            (KeyCode::Home, Action::First),
+            (KeyCode::Char('G'), Action::Last),
+            (KeyCode::End, Action::Last),
+            (KeyCode::Enter, Action::Enter),
+            (KeyCode::Char('0'), Action::Home),
+            (KeyCode::Char('1'), Action::Menu(0)),
+            (KeyCode::Char('4'), Action::Menu(3)),
+            (KeyCode::Char(' '), Action::PlayPause),
+            (KeyCode::Char('n'), Action::Next),
+            (KeyCode::Char('b'), Action::Prev),
+            (KeyCode::Left, Action::SeekBack),
+            (KeyCode::Right, Action::SeekForward),
+            (KeyCode::Char('+'), Action::VolumeUp),
+            (KeyCode::Char('-'), Action::VolumeDown),
+            (KeyCode::Char('m'), Action::CycleMode),
+            (KeyCode::Char('u'), Action::QueueOverlay),
+            (KeyCode::Char('Y'), Action::ToggleNowPlaying),
+            (KeyCode::Char('?'), Action::Help),
+            (KeyCode::Char('L'), Action::Logout),
+            (KeyCode::Char('q'), Action::Quit),
+        ] {
+            assert_eq!(press(Context::Home, key), Some(action), "{key:?} 在首页该有绑定");
+        }
+        // 首页没有「选中的歌」，`Esc` 也没有上一层可退：这些一个都不绑。
+        for key in [
+            KeyCode::Esc,
+            KeyCode::Char('/'),
+            KeyCode::Char('d'),
+            KeyCode::Char('p'),
+            KeyCode::Char('x'),
+            KeyCode::Char('a'),
+            KeyCode::Char('A'),
+            KeyCode::Char('D'),
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+        ] {
+            assert_eq!(press(Context::Home, key), None, "{key:?} 不该在首页有绑定");
+        }
+    }
+
+    /// `0` 回首页：主界面与全屏视图都能按，模态浮层与输入态不抢。
+    #[test]
+    fn zero_goes_home_from_the_main_screen() {
+        assert_eq!(press(Context::Content, KeyCode::Char('0')), Some(Action::Home));
+        assert_eq!(press(Context::NowPlaying, KeyCode::Char('0')), Some(Action::Home));
+        assert_eq!(press(Context::QueueOverlay, KeyCode::Char('0')), None, "模态浮层里 0 不抢");
+        assert_eq!(press(Context::PlaylistPicker, KeyCode::Char('0')), None);
+        assert_eq!(
+            press(Context::SearchInput, KeyCode::Char('0')),
+            Some(Action::InputChar('0')),
+            "输入框里 0 是打字"
+        );
     }
 
     #[test]
