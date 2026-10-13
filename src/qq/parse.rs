@@ -54,6 +54,8 @@ pub fn parse_song(item: &Value) -> Option<Song> {
             flac: value_u64(&file["size_flac"]),
             hires: value_u64(&file["size_hires"]),
         },
+        // 接口来的歌没有本地文件。
+        local_bytes: 0,
         source: Source::Qq,
     })
 }
@@ -88,6 +90,7 @@ pub fn parse_search_song(item: &Value) -> Option<Song> {
             flac: value_u64(&item["sizeflac"]),
             hires: 0,
         },
+        local_bytes: 0,
         source: Source::Qq,
     })
 }
@@ -162,6 +165,7 @@ mod tests {
         let song = parse_song(&song_item()).expect("有效条目要解析出来");
         assert_eq!(song.source, crate::model::Source::Qq);
         assert!(!song.is_local());
+        assert_eq!(song.local_bytes, 0, "接口来的歌没有本地文件");
     }
 
     #[test]

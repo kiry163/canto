@@ -222,6 +222,8 @@ pub fn entry_to_song(entry: &Entry) -> Song {
         album_name: entry.album.clone(),
         duration_secs: entry.duration_secs,
         sizes: FileSizes::default(),
+        // 本地文件的大小：列表那一列报「磁盘上那份」，它是扫描时就 stat 到的那一份。
+        local_bytes: entry.size,
     }
 }
 
@@ -535,5 +537,22 @@ mod tests {
     #[cfg(windows)]
     fn make_symlink(link: &Path, target: &Path) -> std::io::Result<()> {
         std::os::windows::fs::symlink_dir(target, link)
+    }
+
+    /// 本地文件的字节数要跟着 `Song` 走：列表那一列报的是磁盘上那份的大小。
+    #[test]
+    fn entry_to_song_carries_the_file_size() {
+        let entry = Entry {
+            path: std::path::PathBuf::from("C:/Music/canto/曲终人散.flac"),
+            mtime: 1,
+            size: 31_457_280,
+            title: "曲终人散".to_string(),
+            artist: "张宇".to_string(),
+            album: "消息".to_string(),
+            duration_secs: 270,
+        };
+        let song = entry_to_song(&entry);
+        assert_eq!(song.local_bytes, 31_457_280);
+        assert!(song.is_local());
     }
 }

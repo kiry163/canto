@@ -2217,6 +2217,8 @@ impl App {
                 album_name: String::new(),
                 duration_secs: 0,
                 sizes: crate::model::FileSizes::default(),
+                // 历史还原的 `Song` 先不带本地大小（Task 8 让记录带上时长/体积，那时一起补）。
+                local_bytes: 0,
                 // 本地条目带得回自己的路径（重播不再经过 vkey）；QQ 老条目照旧。
                 source: match &entry.local_path {
                     Some(path) => crate::model::Source::Local(path.clone()),

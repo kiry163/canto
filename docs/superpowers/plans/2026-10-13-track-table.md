@@ -728,12 +728,16 @@ git commit -m "feat(tui): 表头与行的绘制(列宽补齐/显示宽度截断/
         assert!(song.is_local());
     }
 
-    /// QQ 歌（接口来的）没有本地文件，是 0。
-    #[test]
-    fn a_network_song_has_no_local_size() {
-        assert_eq!(crate::tui::test_support::test_song("a").local_bytes, 0);
-    }
+    /// QQ 歌（接口来的）没有本地文件，是 0——这条钉在 `qq/parse.rs` 的
+    /// `parsed_songs_are_qq_sourced` 里（见实施记录）。
 ```
+
+> **实施记录（2026-10-13）**：`test_support::test_song` 对 `library::tests` 是私有的，所以
+> 「QQ 歌是 0」那条断言没有写成独立测试，而是**加进了 `src/qq/parse.rs::parsed_songs_are_qq_sourced`**
+> 的现有断言里（`assert_eq!(song.local_bytes, 0, "接口来的歌没有本地文件")`）——钉在真正产出
+> QQ `Song` 的地方比钉在测试辅助上更有意义。
+> 另外 `src/qq/parse.rs:42` / `:76` 两处生产构造点补的是 `local_bytes: 0,`（带一行注释「接口来的歌
+> 没有本地文件」），`src/tui/state.rs:2210` 那处也填 0 并留了注释（Task 8 会一起补上真实值）。
 
 - [ ] **Step 2: 跑测试确认失败**
 

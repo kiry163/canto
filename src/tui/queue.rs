@@ -323,6 +323,7 @@ mod tests {
             album_name: String::new(),
             duration_secs: 200,
             sizes: FileSizes::default(),
+            local_bytes: 0,
             source: crate::model::Source::Qq,
         }
     }
