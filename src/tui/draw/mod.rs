@@ -594,14 +594,20 @@ mod tests {
         assert!(!status.contains("Enter播放"), "不是主界面那条：{status:?}");
     }
 
-    /// 最小窗口（内容区 10 行）里四行都在界内。
+    /// 最小窗口（内容区 10 行）与常规 80×24 里，四行都在界内。
     #[test]
-    fn the_home_screen_fits_the_smallest_window() {
+    fn the_home_screen_fits_the_smallest_windows() {
         let (mut app, _runtime) = test_app();
         app.screen = Screen::Home;
-        let rows = frame_rows(&mut app, 60, 15);
-        assert!(rows.iter().any(|row| row.contains("1我的收藏")), "四行都得在：{rows:?}");
-        assert!(rows.iter().any(|row| row.contains("4历史")), "四行都得在：{rows:?}");
+        for (width, height) in [(60, 15), (80, 24)] {
+            let rows = frame_rows(&mut app, width, height);
+            for row in ["1我的收藏", "4历史"] {
+                assert!(
+                    rows.iter().any(|line| line.contains(row)),
+                    "{width}×{height} 四行都得在，缺 `{row}`：{rows:?}"
+                );
+            }
+        }
     }
 
     /// 全屏视图：歌词画在内容区，底部不再另开一块（同一份歌词不画两遍）。

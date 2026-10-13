@@ -205,6 +205,13 @@ impl Engine {
             .clone()
     }
 
+    /// 测试用：把相位直接推到某个状态。哑引擎（`silent`）不碰音频设备、也不会自己走到
+    /// `Playing`，界面里那几条「正在播」的分支就靠它造出来。
+    #[cfg(test)]
+    pub(crate) fn force_phase(&self, phase: Phase) {
+        update(&self.state, |snapshot| snapshot.phase = phase);
+    }
+
     /// 频谱分析用的采样通道。`Clone` 只是克隆几个 `Arc`，界面拿一份长期持有即可。
     pub fn levels(&self) -> Levels {
         self.levels.clone()

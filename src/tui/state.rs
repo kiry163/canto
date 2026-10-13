@@ -1796,9 +1796,10 @@ impl App {
     /// 频谱是不是正在动——界面刷新据此把间隔提到 ~30fps。
     ///
     /// 只在全屏视图开着**且**正在播时为真：别的屏不显示频谱（不提速），暂停时那几格
-    /// 不会动（也不需要重绘）。
+    /// 不会动（也不需要重绘）。全屏视图能从首页或四屏开出来（登录屏不算：那儿的
+    /// `screen` 不是这两个，正好被挡掉）。
     pub(super) fn spectrum_animating(&self) -> bool {
-        self.spectrum_wanted() && matches!(self.screen, Screen::Main)
+        self.spectrum_wanted() && matches!(self.screen, Screen::Main | Screen::Home)
     }
 
     /// 取一次频谱：采样窗口 → 频段能量。`Levels` 里没有数据时 `spectrum_raw` 会是空的。
@@ -2144,6 +2145,22 @@ mod tests {
         assert!(!app.spectrum_animating(), "没在播不提速");
     }
 
+    /// 全屏视图能盖在主界面哪儿，刷新就在哪儿提速：首页也算主界面（不提速的话频谱
+    /// ~6.7fps，一格一跳）；登录屏不算——那个 `matches!` 拦的就是它。
+    #[test]
+    fn a_fullscreen_view_over_the_home_raises_the_frame_rate_too() {
+        let (mut app, _runtime) = test_app();
+        app.engine.force_phase(crate::player::Phase::Playing);
+        app.now_playing_full = true;
+        assert!(app.spectrum_animating(), "四屏上开全屏、正在播：提速");
+
+        app.screen = Screen::Home;
+        assert!(app.spectrum_animating(), "首页上开全屏：同样提速");
+
+        app.screen = Screen::Login(LoginState::default());
+        assert!(!app.spectrum_animating(), "登录屏不算数");
+    }
+
     #[test]
     fn a_single_frame_of_sound_does_not_jump_to_the_top() {
         // 静音中突然来一记鼓点：一帧就该走完的话，块字符会在 ▁ 与 █ 之间跳变
@@ -2396,6 +2413,7 @@ mod tests {
 
         app.apply(keys::Action::Home);
         assert!(matches!(app.screen, Screen::Home), "`0` 回首页");
+        assert_eq!(app.home_state.selected(), Some(1), "高亮停在刚离开的那一屏（我的歌单）");
         app.apply(keys::Action::Menu(3));
         assert!(matches!(app.screen, Screen::Main));
         assert_eq!(app.nav.menu, Menu::History, "数字直达");
