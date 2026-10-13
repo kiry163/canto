@@ -1759,6 +1759,12 @@ Run: `cargo test --locked draw::tests::the_queue_overlay_has_a_header`
 Run: `cargo test --locked draw::tests` —— 预期全过；`the_queue_overlay_draws_the_highlight_on_the_selected_row`
 （`draw/mod.rs:1173-1191`）会因为多了一行而需要重算期望，按原判据（`▶` 落在两行之间）核对后调整。
 
+> **实施记录（2026-10-13）**：`group` 多收一个 `min_height`——spec 的「可用高 ≥ 6 才画表头」
+> 是针对**全屏**列表的（矮屏里一行数据比一行表头值钱）；队列浮层的高度是照着内容算的，
+> 表头那一行不多占谁的位置，所以它传 `1`（等于总是画）。另外队列浮层的「同一首出现两次」
+> 那条顾虑落实成：`Row.playing` 直接按队列下标赋，不经过 mid 比对。既有那条
+> `the_queue_overlay_draws_the_highlight_on_the_selected_row` 不用改（它比的是同一行里的字符位置）。
+
 - [ ] **Step 4b: 摘掉 `rows.rs` 顶部那行 `#![allow(dead_code)]`**
 
 到这一步 `rows.rs` 的东西全都有生产消费者了（`fit`/`header`/`line`/`group`/各列集都在三处绘制里用上）。

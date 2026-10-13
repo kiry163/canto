@@ -225,7 +225,7 @@ impl App {
             self.library.iter().map(|song| (song.mid.as_str(), song)).collect();
 
         let inner = block.inner(area);
-        let (head, list_area) = rows::group(inner);
+        let (head, list_area) = rows::group(inner, rows::MIN_FOR_HEADER);
         let columns = rows::fit(&rows::history_columns(), rows::row_width(list_area.width));
 
         let items: Vec<ListItem> = self
@@ -278,7 +278,7 @@ impl App {
 
         let block = panel_block(title);
         let inner = block.inner(area);
-        let (head, list_area) = rows::group(inner);
+        let (head, list_area) = rows::group(inner, rows::MIN_FOR_HEADER);
         let columns = rows::fit(&columns, rows::row_width(list_area.width));
 
         let items: Vec<ListItem> = self
@@ -305,7 +305,7 @@ impl App {
     ///
     /// `library` 是「按 mid 查当前曲库」的表（本地条目用得上，查不到就是已丢失）。
     /// 备注那一列按屏分岔（本地歌单写「已丢失」；历史写「时间 · 来源」，由调用方覆盖）。
-    fn song_row<'a>(
+    pub(super) fn song_row<'a>(
         &'a self,
         song: &'a Song,
         library: &HashMap<&'a str, &'a Song>,

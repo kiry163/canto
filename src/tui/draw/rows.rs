@@ -6,10 +6,6 @@
 //!
 //! 宽度：`Fixed` 列永不让位；`Fill` 列吃剩余、分不到 `min` 就按 [`DROP_ORDER`] 出局。
 
-// 三处绘制接线在后面的任务里（Task 7/9/10 才用上）：在那之前只有单测在用这一堆类型，
-// 先压住 dead_code，Task 10 落地时摘掉这一行。
-#![allow(dead_code)]
-
 use std::borrow::Cow;
 use std::collections::HashMap;
 
@@ -305,11 +301,14 @@ fn pad_owned(text: String, width: usize, align: Align) -> String {
     format!("{}{}{}", " ".repeat(left), text, " ".repeat(right))
 }
 
-/// 在列表块**内部**切出表头那一行。够高才切（见 [`MIN_FOR_HEADER`]）。
+/// 在列表块**内部**切出表头那一行：可用高 `>= min_height` 才切。
 ///
 /// 块的边框由调用方先画（拿 `Block::inner(area)` 之后再调这里），所以表头落在框里、不是框外。
-pub(super) fn group(inner: Rect) -> (Option<Rect>, Rect) {
-    if inner.height >= MIN_FOR_HEADER {
+///
+/// - 全屏列表传 [`MIN_FOR_HEADER`]：矮屏里一行数据比一行表头值钱。
+/// - 队列浮层传 `1`（等于「总是画」）：它的高度是**照着内容算的**，表头那一行不多占谁的位置。
+pub(super) fn group(inner: Rect, min_height: u16) -> (Option<Rect>, Rect) {
+    if inner.height >= min_height {
         let head = Rect { height: 1, ..inner };
         let list = Rect { y: inner.y + 1, height: inner.height - 1, ..inner };
         (Some(head), list)
@@ -676,12 +675,21 @@ mod tests {
     #[test]
     fn the_header_is_only_cut_when_there_is_room() {
         let tall = Rect::new(0, 0, 60, 10);
-        let (head, list) = group(tall);
+        let (head, list) = group(tall, MIN_FOR_HEADER);
         assert_eq!(head, Some(Rect::new(0, 0, 60, 1)));
         assert_eq!(list, Rect::new(0, 1, 60, 9));
 
         let short = Rect::new(0, 0, 60, MIN_FOR_HEADER - 1);
-        assert_eq!(group(short), (None, short), "矮屏把那一行还给数据");
+        assert_eq!(group(short, MIN_FOR_HEADER), (None, short), "矮屏把那一行还给数据");
+    }
+
+    /// 队列浮层那种「高度照着内容算」的写法：门槛给 1，等于总是切表头。
+    #[test]
+    fn a_floor_of_one_always_cuts_the_header() {
+        let tight = Rect::new(0, 0, 40, 3);
+        let (head, list) = group(tight, 1);
+        assert_eq!(head, Some(Rect::new(0, 0, 40, 1)));
+        assert_eq!(list, Rect::new(0, 1, 40, 2));
     }
 
     fn cached_index(entries: &[(&str, Quality, u64)]) -> HashMap<String, (Quality, u64)> {

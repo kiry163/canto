@@ -1,4 +1,6 @@
-//! 浮层：帮助浮层与歌单选择框（队列浮层在 Task 12 加在这里）。
+//! 浮层：帮助浮层、歌单选择框与队列浮层。
+
+use std::collections::HashMap;
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -8,10 +10,10 @@ use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use crate::config::HotkeyConfig;
+use crate::model::Song;
 
 use super::super::state::{App, Menu, Screen};
-use super::format_duration;
-use super::highlight;
+use super::{highlight, rows};
 
 impl App {
     /// `P` 的本地歌单选择框：第一行固定是「新建…」，下面才是已有的歌单。
@@ -323,39 +325,51 @@ fn pretty_key(key: &str) -> String {
 
 impl App {
     /// 队列浮层：能看到接下来播什么，也能跳播 / 删除 / 清空。
+    /// 队列浮层：跟别的曲目列表同一副表（列集少「音质/体积/备注」，见 `rows::queue_columns`）。
+    ///
+    /// `♪` 按**队列下标**标，不按 mid：队列里同一首可能出现两次，按 mid 会两行一起亮。
+    /// 表头那一行总是画——浮层高度是照着内容算的，不存在「抢矮屏里那一行数据」的问题。
     pub(super) fn draw_queue(&mut self, frame: &mut Frame, area: Rect) {
-        let playing = self.queue.index();
+        let current = self.queue.index();
+        // 标题只报「看到第几首 / 队列多长」和播放模式；来源（来自《某歌单》）不写，
+        // 队列里可能混着好几个来源，写了反而误导。
+        let title = format!(
+            " 队列 {}/{} · {} ",
+            current + 1,
+            self.queue.len(),
+            self.queue.mode().label()
+        );
+        let block = Block::bordered().title(title);
+        let height = self.queue.len() as u16 + 3;
+        let popup = super::overlay_rect(area, area.width.saturating_sub(8).min(72), height);
+        let inner = block.inner(popup);
+        let (head, list_area) = rows::group(inner, 1);
+        let columns = rows::fit(&rows::queue_columns(), rows::row_width(list_area.width));
+
+        let want = self.config.quality;
+        let library: HashMap<&str, &Song> =
+            self.library.iter().map(|song| (song.mid.as_str(), song)).collect();
         let items: Vec<ListItem> = self
             .queue
             .items()
             .iter()
             .enumerate()
             .map(|(index, song)| {
-                let marker = if index == playing { "♪" } else { " " };
-                ListItem::new(format!(
-                    "{marker} {:>5}  {} — {}",
-                    format_duration(std::time::Duration::from_secs(song.duration_secs)),
-                    song.title,
-                    song.singers,
-                ))
+                let mut row = self.song_row(song, &library, None, want);
+                row.playing = index == current;
+                ListItem::new(rows::line(&columns, &row))
             })
             .collect();
-        // 标题只报「看到第几首 / 队列多长」和播放模式；来源（来自《某歌单》）不写，
-        // 队列里可能混着好几个来源，写了反而误导。
-        let title = format!(
-            " 队列 {}/{} · {} ",
-            playing + 1,
-            self.queue.len(),
-            self.queue.mode().label()
-        );
-        let height = items.len() as u16 + 2;
-        let popup = super::overlay_rect(area, area.width.saturating_sub(8).min(72), height);
+
         frame.render_widget(Clear, popup);
+        frame.render_widget(block, popup);
+        if let Some(head) = head {
+            frame.render_widget(Paragraph::new(rows::header(&columns)), head);
+        }
         let list = List::new(items)
-            .block(Block::bordered().title(title))
             .highlight_style(highlight())
             .highlight_symbol("▶ ");
-        frame.render_stateful_widget(list, popup, &mut self.queue_state);
+        frame.render_stateful_widget(list, list_area, &mut self.queue_state);
     }
 }
 

@@ -1389,6 +1389,54 @@ mod tests {
         assert!(!text.contains("标题"), "空态不画表头：{text}");
     }
 
+    /// 队列浮层也有表头（高度跟着 +1），缓存/下载两列在。
+    #[test]
+    fn the_queue_overlay_has_a_header() {
+        let (mut app, _runtime) = test_app();
+        app.config.download_dir =
+            std::env::temp_dir().join(format!("canto-draw-queue-{}", std::process::id()));
+        std::fs::remove_dir_all(&app.config.download_dir).ok();
+        std::fs::create_dir_all(&app.config.download_dir).expect("建下载目录");
+        app.refresh_downloads();
+        app.queue = crate::tui::queue::Queue::new(
+            vec![
+                crate::tui::test_support::titled_song("a", "成全", "刘若英"),
+                crate::tui::test_support::titled_song("b", "后来", "刘若英"),
+            ],
+            0,
+            "嗯",
+        );
+        app.apply(crate::tui::keys::Action::QueueOverlay);
+
+        let rows = frame_raw(&mut app, 160, 40);
+        let at = rows
+            .iter()
+            .position(|row| row.contains("队列 1/2"))
+            .expect("浮层标题还在");
+        // 标题挂在框线上，表头是它下面那一行。
+        let header = &rows[at + 1];
+        assert!(
+            header.contains("缓存") && header.contains("下载") && header.contains("标题"),
+            "表头紧跟在框线下面：{header:?}"
+        );
+        let data = rows
+            .iter()
+            .find(|row| row.contains("成全") && row.contains("刘若英"))
+            .expect("有数据行");
+        assert_eq!(
+            column_of(header, "时长") + unicode_width::UnicodeWidthStr::width("时长"),
+            column_of(data, "03:20") + unicode_width::UnicodeWidthStr::width("03:20"),
+            "时长列右端对齐：\n{header:?}\n{data:?}"
+        );
+        assert!(
+            !data.contains("成全 — 刘若英"),
+            "不该再拼「标题 — 歌手」：{data:?}"
+        );
+
+        app.apply(crate::tui::keys::Action::QueueOverlay);
+        std::fs::remove_dir_all(&app.config.download_dir).ok();
+    }
+
     /// 曲目列表有表头，且与数据同列；缓存/下载两个标记按数据落在正确的列上。
     #[test]
     fn song_lists_have_a_header_aligned_with_the_rows() {
