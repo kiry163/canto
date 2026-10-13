@@ -10,11 +10,15 @@
 // 现在是「模块先落地、消费者还没来」的中间态。
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use anyhow::{Context, Result};
 use lofty::file::{AudioFile, TaggedFileExt};
 use lofty::prelude::Accessor;
 use serde::{Deserialize, Serialize};
+
+use crate::model::{local_mid, FileSizes, Song, Source};
 
 /// 认得的扩展名。**等于现有解码器能解的那套**（mp3 / flac / m4a-AAC / ogg-Vorbis / wav），
 /// 见 spec §8：白名单外的一律不进曲库。
@@ -110,6 +114,120 @@ pub fn read_entry(path: &Path, mtime: u64, size: u64) -> Entry {
     }
 }
 
+/// 索引格式版本。字段含义变了就 +1：旧文件整份丢弃重扫，不做迁移。
+pub const INDEX_VERSION: u32 = 1;
+
+/// 曲库索引：扫过的目录 + 每首的 tag 快照。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Index {
+    pub version: u32,
+    pub dirs: Vec<PathBuf>,
+    pub entries: Vec<Entry>,
+}
+
+/// 一次扫描的结果。`added` 含「新增」与「mtime/size 变了要重读」两种。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanOutcome {
+    pub index: Index,
+    pub added: usize,
+    pub removed: usize,
+    pub skipped_unsupported: usize,
+}
+
+/// 读索引。**任何不对劲都按「没有索引」处理**（文件缺失 / 坏了 / 版本或目录表不符）：
+/// 调用方于是走一次全量扫，比带着半份旧数据强。
+pub fn load_index(path: &Path, dirs: &[PathBuf]) -> Index {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Index::default();
+    };
+    let Ok(index) = serde_json::from_str::<Index>(&text) else {
+        tracing::warn!("曲库索引解析失败（按空处理，重扫一次）：{}", path.display());
+        return Index::default();
+    };
+    if index.version != INDEX_VERSION || index.dirs != dirs {
+        return Index::default();
+    }
+    index
+}
+
+/// 写索引（临时文件 + rename，中途失败不留坏文件）。
+pub fn save_index(path: &Path, index: &Index) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("创建缓存目录失败：{}", parent.display()))?;
+    }
+    let text = serde_json::to_string_pretty(index).context("序列化曲库索引失败")?;
+    let temp = path.with_extension("json.tmp");
+    std::fs::write(&temp, text).with_context(|| format!("写 {} 失败", temp.display()))?;
+    std::fs::rename(&temp, path)
+        .with_context(|| format!("把 {} 换成 {} 失败", temp.display(), path.display()))?;
+    Ok(())
+}
+
+/// 增量扫描：`mtime`/`size` 都没变的沿用旧 `Entry`（不重读 tag），变了的重读，这次没扫到的丢掉。
+pub fn rescan(previous: &Index, dirs: &[PathBuf]) -> ScanOutcome {
+    let (files, skipped_unsupported) = walk(dirs);
+    let mut known: HashMap<PathBuf, Entry> = previous
+        .entries
+        .iter()
+        .cloned()
+        .map(|entry| (entry.path.clone(), entry))
+        .collect();
+    let mut entries = Vec::with_capacity(files.len());
+    let mut added = 0;
+    for (path, mtime, size) in files {
+        match known.remove(&path) {
+            Some(entry) if entry.mtime == mtime && entry.size == size => entries.push(entry),
+            _ => {
+                entries.push(read_entry(&path, mtime, size));
+                added += 1;
+            }
+        }
+    }
+    let removed = known.len(); // 旧表里没被这次扫到的：文件没了或改了名
+    ScanOutcome {
+        index: Index {
+            version: INDEX_VERSION,
+            dirs: dirs.to_vec(),
+            entries,
+        },
+        added,
+        removed,
+        skipped_unsupported,
+    }
+}
+
+/// 索引 → 可直接播放的曲目，排序 **歌手 → 专辑 → 标题 → 路径**（同专辑天然相邻，
+/// 不用做两级界面；路径兜底保证顺序稳定）。
+pub fn index_songs(index: &Index) -> Vec<Song> {
+    let mut entries: Vec<&Entry> = index.entries.iter().collect();
+    entries.sort_by(|left, right| {
+        (&left.artist, &left.album, &left.title, &left.path).cmp(&(
+            &right.artist,
+            &right.album,
+            &right.title,
+            &right.path,
+        ))
+    });
+    entries.into_iter().map(entry_to_song).collect()
+}
+
+/// 一条索引记录 → 一首歌。`sizes` 留全 0：本地文件没有接口报的体积，列表那一列渲染成 `—`。
+pub fn entry_to_song(entry: &Entry) -> Song {
+    Song {
+        source: Source::Local(entry.path.clone()),
+        mid: local_mid(&entry.path),
+        song_id: None,
+        media_mid: None,
+        title: entry.title.clone(),
+        singers: entry.artist.clone(),
+        album_mid: String::new(),
+        album_name: entry.album.clone(),
+        duration_secs: entry.duration_secs,
+        sizes: FileSizes::default(),
+    }
+}
+
 fn is_hidden(path: &Path) -> bool {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -139,6 +257,7 @@ fn mtime_secs(metadata: &std::fs::Metadata) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Quality;
 
     /// 一棵测试用的目录树：`canto/{a.mp3, b.FLAC, c.txt, .hidden/d.mp3, sub/e.wav}`。
     fn temp_tree(name: &str) -> PathBuf {
@@ -157,6 +276,81 @@ mod tests {
             std::fs::write(path, bytes).expect("写文件");
         }
         root
+    }
+
+    /// 三首带 tag 的 WAV：排序（歌手 → 专辑 → 标题）与「本地曲目」映射要按真 tag 走。
+    fn temp_tagged_tree(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("canto-library-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let canto = root.join("canto");
+        std::fs::create_dir_all(&canto).expect("建树");
+        fixture_with_tags(&canto.join("a.wav"), "明天", "张宇", "消息");
+        fixture_with_tags(&canto.join("b.wav"), "曲终人散", "张宇", "消息");
+        fixture_with_tags(&canto.join("c.wav"), "晴天", "周杰伦", "叶惠美");
+        root
+    }
+
+    #[test]
+    fn the_index_round_trips_and_mismatches_are_thrown_away() {
+        let dir = temp_tree("index-roundtrip");
+        let index_path = dir.join("library.json");
+        let dirs = [dir.join("canto")];
+        let outcome = rescan(&Index::default(), &dirs);
+        save_index(&index_path, &outcome.index).expect("写索引");
+        assert_eq!(load_index(&index_path, &dirs).entries.len(), 3, "读得回来");
+        assert!(
+            load_index(&index_path, &[dir.join("别的目录")]).entries.is_empty(),
+            "dirs 变了整份丢"
+        );
+        std::fs::write(&index_path, "{ 半个 json").expect("写坏文件");
+        assert!(load_index(&index_path, &dirs).entries.is_empty(), "坏了按空处理");
+        assert!(load_index(&dir.join("没有这个文件.json"), &dirs).entries.is_empty());
+    }
+
+    #[test]
+    fn only_changed_files_are_re_read() {
+        let dir = temp_tree("index-unchanged");
+        let dirs = [dir.join("canto")];
+        let first = rescan(&Index::default(), &dirs);
+        assert_eq!((first.added, first.removed, first.skipped_unsupported), (3, 0, 0));
+        let again = rescan(&first.index, &dirs);
+        assert_eq!((again.added, again.removed), (0, 0));
+        assert_eq!(again.index.entries, first.index.entries, "整套 Entry 原样沿用，没重读 tag");
+    }
+
+    #[test]
+    fn changed_and_removed_files_are_noticed() {
+        let dir = temp_tree("index-changed");
+        let dirs = [dir.join("canto")];
+        let first = rescan(&Index::default(), &dirs);
+        std::fs::write(dir.join("canto/a.mp3"), "完全不同的内容，长度也不一样").expect("改文件");
+        std::fs::remove_file(dir.join("canto/b.FLAC")).expect("删文件");
+        let second = rescan(&first.index, &dirs);
+        assert_eq!(second.removed, 1);
+        assert_eq!(second.added, 1, "变过的那首算重读");
+        assert!(
+            !second.index.entries.iter().any(|entry| entry.path.ends_with("b.FLAC")),
+            "消失的条目要被删掉：{:?}",
+            second.index.entries
+        );
+    }
+
+    #[test]
+    fn index_songs_sorts_by_artist_album_title_and_marks_them_local() {
+        let dir = temp_tagged_tree("index-sort");
+        let songs = index_songs(&rescan(&Index::default(), &[dir.join("canto")]).index);
+        assert_eq!(songs.len(), 3);
+        let key = |song: &Song| (song.singers.clone(), song.album_name.clone(), song.title.clone());
+        assert!(
+            songs.windows(2).all(|pair| key(&pair[0]) <= key(&pair[1])),
+            "排序：歌手 → 专辑 → 标题：{:?}",
+            songs.iter().map(key).collect::<Vec<_>>()
+        );
+        assert!(songs.iter().all(|song| song.is_local() && song.mid.starts_with("local:")));
+        assert!(
+            songs.iter().all(|song| song.sizes.at_or_below(Quality::Low128).1.is_none()),
+            "本地曲目没有体积信息（列表渲染成 —）"
+        );
     }
 
     fn file_name(path: &Path) -> String {
