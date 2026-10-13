@@ -131,8 +131,12 @@ impl App {
     /// 历史那屏的条数是现算的派生信息，不进导航状态——以前它存在标题里，
     /// 记录一条播放历史就会把**别的屏**的标题改写成「历史（N 条）」。
     fn title_and_count(&self) -> (String, usize, &'static str) {
-        // 第二项是「有没有进到下一层」：QQ 歌单看 `shown`，本地歌单看 `local_shown`。
-        let nested = self.nav.shown.is_some() || self.nav.local_shown.is_some();
+        // 第二项是「有没有进到下一层」：两个屏各有各的那一层，别拿串了（在 `6` 上看到
+        // 「本地歌单 0 首」而下面画着 N 张就是这么来的）。
+        let nested = match self.nav.menu {
+            Menu::LocalPlaylists => self.nav.local_shown.is_some(),
+            _ => self.nav.shown.is_some(),
+        };
         match (self.nav.menu, nested) {
             (Menu::Playlists, true) => (
                 self.nav.title_chain().join(" › "),
@@ -294,8 +298,10 @@ impl App {
                 ));
                 line.push(Span::raw(format!("{} — {}", song.title, song.singers)));
                 // 本地歌单里的条目：文件被移走 / 改名之后也留着（不然歌单会被一次扫描清空），
-                // 认不出来就标一句，免得让人以为还能播。
+                // 认不出来就标一句，免得让人以为还能播。扫描途中曲库还是空的，这时候别标
+                // ——不然满屏「（已丢失）」，扫完又全好了。
                 if self.nav.menu == Menu::LocalPlaylists
+                    && !self.library_scanning
                     && !self.library.iter().any(|kept| kept.mid == song.mid)
                 {
                     line.push(Span::styled("（已丢失）", Style::new().fg(Color::DarkGray)));

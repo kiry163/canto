@@ -151,6 +151,20 @@ impl Menu {
         Menu::LocalPlaylists,
     ];
 
+    /// 首页上真正画出来、也真能按数字键进的那几屏。
+    ///
+    /// `[library] dirs = []` 是「本地功能整体关闭」（规格 §7）：首页不画第 5/6 格，数字键进不去
+    /// ——只剩 QQ 那四屏。
+    pub fn menus(local_on: bool) -> Vec<Menu> {
+        Menu::ALL
+            .iter()
+            .copied()
+            .filter(|menu| {
+                local_on || !matches!(menu, Menu::LocalLibrary | Menu::LocalPlaylists)
+            })
+            .collect()
+    }
+
     pub fn title(self) -> &'static str {
         match self {
             Menu::Favorites => "我的收藏",
@@ -437,6 +451,10 @@ impl Nav {
     pub fn origin_name(&self) -> String {
         match (self.menu, &self.shown) {
             (Menu::Playlists, Some((_, name))) => name.clone(),
+            (Menu::LocalPlaylists, _) => match &self.local_shown {
+                Some((_, name)) => name.clone(),
+                None => Menu::LocalPlaylists.title().to_string(),
+            },
             (menu, _) => menu.title().to_string(),
         }
     }
@@ -467,13 +485,19 @@ impl Nav {
     }
 
     /// 返回上一层。返回 `true` 表示这次的 Esc 被吃掉了。
+    ///
+    /// 两层是**各屏各自**的（`shown` 管 QQ 歌单、`local_shown` 管本地歌单），所以退哪一层
+    /// 看当前屏——不然在本地歌单屏按 `Esc` 会把 QQ 那一层悄悄吃掉，画面还不动。
     pub fn pop_tracks(&mut self) -> bool {
-        if self.shown.take().is_none() {
+        if self.menu == Menu::LocalPlaylists {
             if self.local_shown.take().is_none() {
                 return false;
             }
             self.local_tracks = ListView::songs();
             return true;
+        }
+        if self.shown.take().is_none() {
+            return false;
         }
         self.tracks = ListView::songs();
         true
@@ -573,6 +597,11 @@ impl Nav {
             self.playlists.move_by(delta);
             return;
         }
+        // 本地歌单列表那一级挪的是歌单，不是曲目（`active_songs_mut()` 在这一级是 `None`）。
+        if self.menu == Menu::LocalPlaylists && self.local_shown.is_none() {
+            self.local_playlists.move_by(delta);
+            return;
+        }
         if let Some(view) = self.active_songs_mut() {
             view.move_by(delta);
         }
@@ -581,6 +610,10 @@ impl Nav {
     pub fn edge_selection(&mut self, last: bool) {
         if self.menu == Menu::Playlists && self.shown.is_none() {
             self.playlists.edge(last);
+            return;
+        }
+        if self.menu == Menu::LocalPlaylists && self.local_shown.is_none() {
+            self.local_playlists.edge(last);
             return;
         }
         if let Some(view) = self.active_songs_mut() {
@@ -954,7 +987,7 @@ impl App {
             return;
         }
         self.screen = Screen::Home;
-        let index = Menu::ALL
+        let index = Menu::menus(self.local_features_on())
             .iter()
             .position(|menu| *menu == self.nav.menu)
             .unwrap_or(0);
@@ -967,6 +1000,14 @@ impl App {
         // 要登录的屏：未登录时**只给一句提示、不跳屏**（本地两屏与历史照进）。
         if !self.qq_screen_available(menu) {
             self.notify("需要登录：按 L");
+            return;
+        }
+        // 本地功能整体关掉时（`dirs = []`）那两屏进不去：进去也只会看到「曲库是空的」，
+        // 对着刚把目录清空的人说反话。
+        if !self.local_features_on()
+            && matches!(menu, Menu::LocalLibrary | Menu::LocalPlaylists)
+        {
+            self.notify("本地功能已关闭：config.toml 的 [library] dirs 是空的");
             return;
         }
         // 切屏就是离开这一屏：频谱区跟着收起来。
@@ -1215,7 +1256,8 @@ impl App {
             let Some((index, _)) = self.nav.local_shown else {
                 return;
             };
-            let Some(song) = self.nav.local_tracks.state.selected() else {
+            // 全量下标：这一级能筛选，可见行号 ≠ 歌单里的位置（拿错会删掉另一首）。
+            let Some(song) = self.nav.local_tracks.selected_index() else {
                 return;
             };
             self.playlists_store.remove(index, song);
@@ -1351,7 +1393,14 @@ impl App {
     /// （别指着一个不存在的下标接着画）。
     fn refresh_local_playlists_view(&mut self) {
         let items = self.playlists_store.playlists.clone();
+        let previous = self.nav.local_playlists.state.selected();
         self.nav.local_playlists.set_items(items);
+        // 选中位置留着；还没选过（第一次进来）就落在第一张上——不然 `j` 得按两下才动，
+        // 看着像坏了。
+        match previous {
+            Some(index) => self.nav.local_playlists.state.select(Some(index)),
+            None => self.nav.local_playlists.select_first(),
+        }
         match self.nav.local_shown {
             Some((index, _)) if index < self.playlists_store.playlists.len() => {
                 self.open_local_playlist(index)
@@ -1425,8 +1474,11 @@ impl App {
     }
 
     /// `D` 第一次：记下要删哪张、提示再按一次；第二次：真删。
+    ///
+    /// 记的是**全量下标**（`selected_index()`）：这一级能筛选，可见行号 ≠ 歌单下标，
+    /// 拿错下标会删掉另一张（连着里面的曲目一起，落了盘就回不来）。
     fn ask_delete_local_playlist(&mut self) {
-        let Some(index) = self.nav.local_playlists.state.selected() else {
+        let Some(index) = self.nav.local_playlists.selected_index() else {
             return;
         };
         if self.pending_playlist_delete != Some(index) {
@@ -1770,7 +1822,7 @@ impl App {
                 // 只有站在本地歌单列表上才理会（别的屏按 `R` 不做事）。
                 if self.nav.menu == Menu::LocalPlaylists
                     && self.nav.local_shown.is_none()
-                    && let Some(index) = self.nav.local_playlists.state.selected()
+                    && let Some(index) = self.nav.local_playlists.selected_index()
                 {
                     self.local_input = Some(LocalInput {
                         kind: LocalInputKind::Rename(index),
@@ -1815,7 +1867,7 @@ impl App {
                 self.notify("队列已清空（当前这首不受影响）");
             }
             keys::Action::Menu(index) => {
-                if let Some(menu) = Menu::ALL.get(index).copied() {
+                if let Some(menu) = Menu::menus(self.local_features_on()).get(index).copied() {
                     // 从首页按数字 = 进那一屏。
                     self.screen = Screen::Main;
                     self.switch_menu(menu);
@@ -1842,7 +1894,11 @@ impl App {
                 }
                 // 首页：Enter = 进选中那一屏（不是「播放选中」，首页没有选中的歌）。
                 if matches!(self.screen, Screen::Home) {
-                    let menu = Menu::ALL[self.home_state.selected().unwrap_or(0)];
+                    let menus = Menu::menus(self.local_features_on());
+                    let menu = menus
+                        .get(self.home_state.selected().unwrap_or(0))
+                        .copied()
+                        .unwrap_or(Menu::Favorites);
                     self.screen = Screen::Main;
                     self.switch_menu(menu);
                     return;
@@ -2043,6 +2099,11 @@ impl App {
         self.logged_in() || !matches!(menu, Menu::Favorites | Menu::Playlists | Menu::Search)
     }
 
+    /// 本地功能开着吗（规格 §7：`[library] dirs = []` = 整体关闭，首页不画那两格）。
+    pub(super) fn local_features_on(&self) -> bool {
+        !matches!(&self.config.library.dirs, Some(dirs) if dirs.is_empty())
+    }
+
     pub(super) fn sign_out(&mut self, reason: &str) {
         if let Err(error) = session::jar().clear() {
             tracing::warn!("清本地会话失败：{error:#}");
@@ -2187,7 +2248,7 @@ impl App {
     fn enter_selected(&mut self) {
         if self.nav.can_enter_depth() {
             if self.nav.menu == Menu::LocalPlaylists {
-                if let Some(index) = self.nav.local_playlists.state.selected() {
+                if let Some(index) = self.nav.local_playlists.selected_index() {
                     self.open_local_playlist(index);
                 }
                 return;
@@ -2252,7 +2313,8 @@ impl App {
         // 首页：挪它自己那一行选中。排在队列 / 选择框**之后**——首页上开着浮层时，
         // `j`/`k` 归浮层（跟 `context()` 同一个次序）。
         if matches!(self.screen, Screen::Home) {
-            step_state(&mut self.home_state, Menu::ALL.len(), delta);
+            let local_on = self.local_features_on();
+            step_state(&mut self.home_state, Menu::menus(local_on).len(), delta);
             return;
         }
         self.nav.move_selection(delta);
@@ -2278,7 +2340,8 @@ impl App {
             return;
         }
         if matches!(self.screen, Screen::Home) {
-            edge_state(&mut self.home_state, Menu::ALL.len(), last);
+            let local_on = self.local_features_on();
+            edge_state(&mut self.home_state, Menu::menus(local_on).len(), last);
             return;
         }
         self.nav.edge_selection(last);
@@ -2932,6 +2995,123 @@ mod tests {
         app.apply(keys::Action::Back);
         assert!(app.local_picker.is_none(), "关掉了");
         assert!(app.playlists_store.playlists.is_empty(), "什么也没建");
+    }
+
+    /// 歌单列表那一级：`j` 真挪得动，`R`/`D`/`Enter` 作用在**挪到的那一张**上。
+    #[test]
+    fn the_local_playlist_list_moves_and_acts_on_the_selected_one() {
+        let (mut app, _runtime) = test_app();
+        app.playlists_store.create("甲").expect("建歌单");
+        app.playlists_store.create("乙").expect("建歌单");
+        app.switch_menu(Menu::LocalPlaylists);
+        app.apply(keys::Action::Down);
+        app.apply(keys::Action::LocalPlaylistRename);
+        for character in "丙".chars() {
+            app.apply(keys::Action::LocalInputChar(character));
+        }
+        app.apply(keys::Action::LocalInputSubmit);
+        assert_eq!(app.playlists_store.playlists[0].name, "甲", "改的是第二张");
+        assert_eq!(app.playlists_store.playlists[1].name, "丙");
+    }
+
+    /// 删整张歌单记的是**全量下标**：筛到只剩一张时，删的就该是那一张。
+    #[test]
+    fn deleting_with_a_filter_deletes_the_visible_playlist() {
+        let (mut app, _runtime) = test_app();
+        app.playlists_store.create("甲").expect("建歌单");
+        app.playlists_store.create("乙").expect("建歌单");
+        app.switch_menu(Menu::LocalPlaylists);
+        app.apply(keys::Action::Filter);
+        for character in "乙".chars() {
+            app.apply(keys::Action::FilterChar(character));
+        }
+        app.apply(keys::Action::FilterSubmit);
+        app.apply(keys::Action::HistoryClear);
+        app.apply(keys::Action::HistoryClear);
+        let names: Vec<&str> = app
+            .playlists_store
+            .playlists
+            .iter()
+            .map(|playlist| playlist.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["甲"], "删的是筛出来那张（乙）");
+    }
+
+    /// 移出一首歌也按**歌单里的位置**算：筛过之后不能拿可见行号去删。
+    #[test]
+    fn removing_a_song_uses_the_playlist_position() {
+        let (mut app, _runtime) = test_app();
+        app.playlists_store.create("通勤").expect("建歌单");
+        for (path, title) in [("C:/m/a.wav", "甲"), ("C:/m/b.wav", "乙"), ("C:/m/c.wav", "丙")] {
+            let mut song = local_song(path);
+            song.title = title.to_string();
+            app.playlists_store.add(0, &song);
+        }
+        app.switch_menu(Menu::LocalPlaylists);
+        app.apply(keys::Action::Enter);
+        app.apply(keys::Action::Filter);
+        for character in "丙".chars() {
+            app.apply(keys::Action::FilterChar(character));
+        }
+        app.apply(keys::Action::FilterSubmit);
+        assert_eq!(app.nav.local_tracks.len(), 1, "只剩一首可见");
+        app.apply(keys::Action::RemoveFromPlaylist);
+        let left: Vec<String> = app.playlists_store.playlists[0]
+            .songs
+            .iter()
+            .map(|stored| stored.mid.clone())
+            .collect();
+        assert_eq!(left.len(), 2, "移出一首");
+        assert!(
+            !left.iter().any(|mid| mid.ends_with("c.wav")),
+            "删的是筛出来那首：{left:?}"
+        );
+    }
+
+    /// `Esc` 只退**当前屏**那一层：本地歌单屏上的 `Esc` 不该悄悄把 QQ 那一层吃掉。
+    #[test]
+    fn escape_on_the_local_screen_leaves_the_qq_layer_alone() {
+        let (mut app, _runtime) = test_app();
+        app.nav.push_tracks("id", "QQ 歌单", vec![local_song("C:/m/a.wav")]);
+        app.playlists_store.create("通勤").expect("建歌单");
+        app.switch_menu(Menu::LocalPlaylists);
+        app.apply(keys::Action::Enter);
+        app.apply(keys::Action::Back);
+        assert_eq!(app.nav.local_shown, None, "本地那一层退了");
+        assert!(app.nav.shown.is_some(), "QQ 那一层没被动");
+    }
+
+    /// 进本地歌单后开队列，「来自」那一栏写的是歌单名（不是屏名）。
+    #[test]
+    fn the_queue_origin_inside_a_local_playlist_is_its_name() {
+        let (mut app, _runtime) = test_app();
+        app.playlists_store.create("通勤").expect("建歌单");
+        app.playlists_store.add(0, &local_song("C:/m/a.wav"));
+        app.switch_menu(Menu::LocalPlaylists);
+        app.apply(keys::Action::Enter);
+        assert_eq!(app.nav.origin_name(), "通勤");
+    }
+
+    /// `[library] dirs = []`：首页只剩四格，本地两屏进不去，数字键也直跳不到。
+    #[test]
+    fn clearing_the_library_dirs_switches_the_local_half_off() {
+        let (mut app, _runtime) = test_app();
+        app.config.library.dirs = Some(Vec::new());
+        app.switch_menu(Menu::LocalLibrary);
+        assert_eq!(app.nav.menu, Menu::Favorites, "进不去，停在原地");
+        assert!(
+            app.notice_text()
+                .is_some_and(|text| text.contains("本地功能已关闭")),
+            "{:?}",
+            app.notice_text()
+        );
+        app.screen = Screen::Home;
+        app.apply(keys::Action::Menu(5));
+        assert_eq!(app.nav.menu, Menu::Favorites, "`6` 直跳不到本地歌单");
+        // 开着的时候照旧（默认配置里 `dirs` 是 `None` = 用下载目录）。
+        app.config.library.dirs = None;
+        app.switch_menu(Menu::LocalPlaylists);
+        assert_eq!(app.nav.menu, Menu::LocalPlaylists);
     }
 
     /// 本地歌单屏：两级（歌单 → 曲目），`Esc` 退回来。

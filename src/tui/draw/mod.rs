@@ -184,14 +184,19 @@ impl App {
 }
 
 /// 状态行左侧的键位提示：按当前上下文给三到五个，只写**真的接了行为**的键。
-pub fn hints(context: keys::Context) -> &'static str {
+pub fn hints(context: keys::Context, local_on: bool) -> &'static str {
     match context {
         keys::Context::Content => {
             "Enter 播放 · Space 暂停 · n/b 切歌 · / 筛选 · p 加歌单 · ? 帮助"
         }
-        // 首页没有「选中的歌」：提示里只给进屏 / 切屏与播放这几条。
+        // 首页没有「选中的歌」：提示里只给进屏 / 切屏与播放这几条。数字直跳的上限跟着
+        // 「本地功能开没开」走（`dirs = []` 时只有四屏）。
         keys::Context::Home => {
-            "Enter 进入 · 1-6 直跳 · Space 暂停 · n/b 切歌 · u 队列 · ? 帮助"
+            if local_on {
+                "Enter 进入 · 1-6 直跳 · Space 暂停 · n/b 切歌 · u 队列 · ? 帮助"
+            } else {
+                "Enter 进入 · 1-4 直跳 · Space 暂停 · n/b 切歌 · u 队列 · ? 帮助"
+            }
         }
         keys::Context::SearchInput => "输入关键词 · Enter 搜索 · Esc 退出输入",
         keys::Context::FilterInput => "输入即筛选 · Enter 确认 · Esc 清空",
@@ -307,6 +312,33 @@ mod tests {
         let lost = frame_rows(&mut app, 100, 24).join("\n");
         assert!(lost.contains("走远了"), "{lost:?}");
         assert!(lost.contains("（已丢失）"), "{lost:?}");
+    }
+
+    /// `dirs = []` 时首页只有四格，提示里的直跳上限也跟着退到 `1-4`。
+    #[test]
+    fn the_home_grid_drops_the_local_cells_when_they_are_off() {
+        let (mut app, _runtime) = test_app();
+        app.config.library.dirs = Some(Vec::new());
+        app.go_home();
+        let text = frame_rows(&mut app, 120, 40).join("\n");
+        assert!(text.contains("1我的收藏"), "{text:?}");
+        assert!(text.contains("4历史"), "{text:?}");
+        assert!(!text.contains("本地曲库"), "第 5 格不该画：{text:?}");
+        assert!(!text.contains("本地歌单"), "第 6 格不该画：{text:?}");
+        assert!(text.contains("1-4直跳"), "{text:?}");
+    }
+
+    /// 标题的层级判断按**当前屏**取：在 `6` 上不该拿 QQ 那一层的状态当自己的层级。
+    #[test]
+    fn the_local_playlist_title_ignores_the_qq_layer() {
+        let (mut app, _runtime) = test_app();
+        app.playlists_store.create("通勤").expect("建歌单");
+        app.nav
+            .push_tracks("id", "QQ 歌单", vec![test_song("m1")]);
+        app.switch_menu(Menu::LocalPlaylists);
+        let text = frame_rows(&mut app, 100, 24).join("\n");
+        assert!(text.contains("本地歌单1张"), "{text:?}");
+        assert!(!text.contains("本地歌单0首"), "别把 QQ 那一层当成本地层级：{text:?}");
     }
 
     /// 把一帧按行铺开（每行去空白），要比较「谁在上面」时用得上。

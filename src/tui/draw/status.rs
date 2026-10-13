@@ -50,7 +50,10 @@ impl App {
             Constraint::Length(NOTICE_COLS),
         ])
         .split(area);
-        frame.render_widget(Paragraph::new(hints(self.context())), columns[0]);
+        frame.render_widget(
+            Paragraph::new(hints(self.context(), self.local_features_on())),
+            columns[0],
+        );
         if let Some(text) = self.notice_text() {
             // 常见情况（没超宽）不拷贝：`Cow` 借的就是通知本身。
             let line = match truncate_to_cols(text, NOTICE_COLS) {
