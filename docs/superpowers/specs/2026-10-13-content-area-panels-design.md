@@ -147,7 +147,8 @@
 `fullscreen_lyric_toggles_and_is_left_by_esc_or_switching`、`esc_leaves_the_fullscreen_before_popping_a_level`、
 `the_home_fullscreen_view_uses_the_now_playing_context`、`home_key_in_the_fullscreen_view_collapses_it`；
 `draw/mod.rs`：`fullscreen_lyric_takes_over_the_content_area`、
-`the_now_playing_view_splits_into_spectrum_above_lyric`、`the_content_area_takes_the_full_width_at_any_window_size`（布局区块变了）；
+`the_now_playing_view_splits_into_spectrum_above_lyric`（标题与拆分比例都变了）；
+`the_content_area_takes_the_full_width_at_any_window_size` **不用动**（`Areas` 与 `layout` 签名都没变）；
 `keys.rs`：`Context::NowPlaying` 的键位表与「全屏里该没绑定」那两条（`press(Context::NowPlaying, …)` 的
 各处）整段删；`uppercase_y_opens_the_fullscreen_view_and_hides_list_keys`、`the_home_screen_has_its_own_keys`
 与 `Content` 的键位表里 `Y` 那两条要改。
