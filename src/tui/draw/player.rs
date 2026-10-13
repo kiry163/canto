@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, Gauge, Paragraph};
 use crate::player::Phase;
 
 use super::super::state::App;
-use super::{format_duration, format_size};
+use super::format_duration;
 
 impl App {
     /// 播放条。四行：边框 + 信息行 + 进度条 + 边框。
@@ -22,17 +22,8 @@ impl App {
             Phase::Paused => "已暂停".to_string(),
             Phase::Failed(message) => format!("失败：{message}"),
         };
-        // 档位后面跟实际文件的字节数：同一档位不同歌、不同 CDN 文件大小差很多，
-        // 一眼能看出「这首为什么大」。本地那份读不出档位（`.mp3` 是 128 还是 320，文件本身
-        // 不说），那时就只报体积，不瞎报一个档位。
-        let quality = match (snapshot.quality, snapshot.size) {
-            (Some(quality), Some(size)) => {
-                format!("[{} {}]", quality.label(), format_size(size))
-            }
-            (Some(quality), None) => format!("[{}]", quality.label()),
-            (None, Some(size)) => format!("[{}]", format_size(size)),
-            (None, None) => String::new(),
-        };
+        // 那一格是「这份字节从哪来 + 什么档位 + 多大」：知道几样写几样。
+        let copy = copy_label(&snapshot);
         let queue = if self.queue.is_empty() {
             format!("  ·  {}  ·  无队列", self.queue.mode().label())
         } else {
@@ -49,7 +40,7 @@ impl App {
         let line = Line::from(vec![
             Span::styled("♪ ", colors),
             Span::styled(title, colors.add_modifier(Modifier::BOLD)),
-            Span::raw(format!("  {quality} {state_text}{queue}")),
+            Span::raw(format!("  {copy} {state_text}{queue}")),
         ]);
         let gauge = Gauge::default()
             .ratio(snapshot.progress())
@@ -74,5 +65,78 @@ impl App {
         if let Some(row) = rows.get(1) {
             frame.render_widget(gauge, *row);
         }
+    }
+}
+
+/// 播放条上那一格：`[来源 档位 体积]`，知道几样写几样；一样都不知道就整格不画。
+///
+/// 来源（在线 / 缓存 / 下载 / 曲库）由 [`crate::player::open`] 按**实际打开的**那一份填，
+/// 所以「缓存文件解不开、退回网络」那次报的是「在线」。档位只有缓存与 CDN 那份知道，
+/// 本地文件读不出来就不写（只报体积），不瞎报一个。
+fn copy_label(snapshot: &crate::player::Snapshot) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(source) = snapshot.source {
+        parts.push(source.label().to_string());
+    }
+    if let Some(quality) = snapshot.quality {
+        parts.push(quality.label().to_string());
+    }
+    if let Some(size) = snapshot.size {
+        parts.push(super::format_size(size));
+    }
+    if parts.is_empty() {
+        return String::new();
+    }
+    format!("[{}]", parts.join(" "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Quality;
+    use crate::player::{PlaySource, Snapshot};
+
+    fn snapshot(
+        source: Option<PlaySource>,
+        quality: Option<Quality>,
+        size: Option<u64>,
+    ) -> Snapshot {
+        Snapshot {
+            source,
+            quality,
+            size,
+            ..Snapshot::default()
+        }
+    }
+
+    /// 四种来源都写得出人话，档位/体积知道几样写几样。
+    #[test]
+    fn the_copy_label_says_where_the_bytes_came_from() {
+        assert_eq!(
+            copy_label(&snapshot(Some(PlaySource::Cache), Some(Quality::High320), Some(10_485_760))),
+            "[缓存 MP3 320k 10.0MB]",
+            "缓存那份：来源 + 档位（文件名里带）+ 真实大小"
+        );
+        assert_eq!(
+            copy_label(&snapshot(Some(PlaySource::Download), None, Some(3_774_873))),
+            "[下载 3.6MB]",
+            "下载那份读不出档位，就别瞎报一个"
+        );
+        assert_eq!(
+            copy_label(&snapshot(Some(PlaySource::Online), Some(Quality::Low128), Some(4_404_019))),
+            "[在线 MP3 128k 4.2MB]"
+        );
+        assert_eq!(
+            copy_label(&snapshot(Some(PlaySource::Library), None, Some(31_457_280))),
+            "[曲库 30.0MB]"
+        );
+    }
+
+    /// 空态：起播前（`Buffering`）一样都没有，那一格整格不画（不是画一对空方括号）。
+    #[test]
+    fn an_empty_copy_draws_nothing() {
+        assert_eq!(copy_label(&snapshot(None, None, None)), "");
+        // 少见但合法：只拿到大小（比如以后有源不报档位又还没定来源）。
+        assert_eq!(copy_label(&snapshot(None, None, Some(1_048_576))), "[1.0MB]");
     }
 }

@@ -1522,6 +1522,7 @@ mod tests {
         Snapshot {
             title: None,
             mid: None,
+            source: None,
             quality: None,
             size: None,
             phase,

@@ -35,6 +35,34 @@ pub struct Track {
     pub source: TrackSource,
 }
 
+/// 这份字节是从哪来的。播放条上那一格就报它——所以四种都得说得出人话。
+///
+/// 判定跟着**实际打开的那一份**走（`open` 里填），不是跟着「理论上该用哪份」走：缓存文件
+/// 解不开、退回网络的那次报的就是 [`PlaySource::Online`]。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaySource {
+    /// CDN 取流（含「缓存那份打不开，改走网络」）。
+    Online,
+    /// 播放缓存（`~/.cache/canto`，完整听完才会转正）。
+    Cache,
+    /// 下载目录里那份（`歌手 - 标题` 这个文件名认出来的）。
+    Download,
+    /// 本地曲库（`[library] dirs` 扫出来的曲目，路径就写在 `Song` 上）。
+    Library,
+}
+
+impl PlaySource {
+    /// 播放条上那两个汉字（四种等宽，长短一致才不会把后面挤来挤去）。
+    pub fn label(self) -> &'static str {
+        match self {
+            PlaySource::Online => "在线",
+            PlaySource::Cache => "缓存",
+            PlaySource::Download => "下载",
+            PlaySource::Library => "曲库",
+        }
+    }
+}
+
 /// 字节的来源。两支互斥，所以用枚举而不是「候选 + 可选路径」（后者能造出两种都没有的非法状态）。
 ///
 /// 「本地已有这份吗」由 [`local_copy`] **一处**判定，命中就不再取流——一个请求都不发。
@@ -46,9 +74,11 @@ pub enum TrackSource {
     ///
     /// `quality` 只在知道时才有值：缓存文件名里带着档位；曲库与下载目录那份读不出来
     /// （`.mp3` 是 128 还是 320，文件本身不说），播放条就只报体积、不瞎报档位。
+    /// `from` 是那三种本地来源里的一种——线上不会出现在这里，它是 [`TrackSource::Cdn`]。
     Local {
         path: std::path::PathBuf,
         quality: Option<Quality>,
+        from: PlaySource,
     },
 }
 
@@ -65,6 +95,7 @@ pub fn local_copy(
         return Some(TrackSource::Local {
             path: path.to_path_buf(),
             quality: None,
+            from: PlaySource::Library,
         });
     }
     if let Some(dir) = cache_dir
@@ -73,12 +104,14 @@ pub fn local_copy(
         return Some(TrackSource::Local {
             path,
             quality: Some(quality),
+            from: PlaySource::Cache,
         });
     }
     let downloaded = downloads.get(&crate::download::file_stem(song))?;
     Some(TrackSource::Local {
         path: downloaded.path.clone(),
         quality: None,
+        from: PlaySource::Download,
     })
 }
 
@@ -119,6 +152,8 @@ pub struct Snapshot {
     pub title: Option<String>,
     /// 正在播那首的 mid（界面用来在列表里标 `♪`；mid 全局唯一，比标题可靠）。
     pub mid: Option<String>,
+    /// 这份字节从哪来（在线 / 缓存 / 下载 / 曲库）。`Buffering` 时还是 `None`。
+    pub source: Option<PlaySource>,
     /// 实际开出来的档位（`Buffering` 时还是 `None`）。
     pub quality: Option<Quality>,
     /// 实际开出来的那份文件的字节数（拿不到 `Content-Length` 就是 `None`）。
@@ -138,6 +173,7 @@ impl Default for Snapshot {
         Self {
             title: None,
             mid: None,
+            source: None,
             quality: None,
             size: None,
             phase: Phase::Idle,
@@ -397,6 +433,7 @@ fn handle(
             update(state, |snapshot| {
                 snapshot.title = Some(title);
                 snapshot.mid = Some(track.song.mid.clone());
+                snapshot.source = None;
                 snapshot.quality = None;
                 snapshot.size = None;
                 snapshot.phase = Phase::Buffering;
@@ -415,6 +452,7 @@ fn handle(
                         opened.quality.map_or("本地文件（读不出档位）", Quality::label)
                     );
                     update(state, |snapshot| {
+                        snapshot.source = Some(opened.source);
                         snapshot.quality = opened.quality;
                         snapshot.size = opened.size;
                         snapshot.phase = Phase::Playing;
@@ -519,9 +557,11 @@ fn update(state: &Arc<Mutex<Snapshot>>, act: impl FnOnce(&mut Snapshot)) {
     act(&mut snapshot);
 }
 
-/// 开出来的那份流：解码器 + 它是哪个档位、多大、多长。
+/// 开出来的那份流：解码器 + 它是从哪来的、哪个档位、多大、多长。
 struct Opened {
     decoder: Decoder<MediaSource>,
+    /// 这份字节从哪来（播放条上第一格就是它）。
+    source: PlaySource,
     /// CDN 与缓存那份知道档位（缓存文件名里带着）；本地文件读不出来就是 `None`。
     quality: Option<Quality>,
     size: Option<u64>,
@@ -538,7 +578,12 @@ fn open(
     promoted: &cache::Promoted,
 ) -> Result<Opened> {
     // 本地文件（曲库 / 缓存 / 下载目录）：直接开，**不碰缓存也不碰网络**。
-    if let TrackSource::Local { path, quality } = &track.source {
+    if let TrackSource::Local {
+        path,
+        quality,
+        from,
+    } = &track.source
+    {
         let file = File::open(path).with_context(|| format!("打不开：{}", path.display()))?;
         let size = file.metadata().ok().map(|metadata| metadata.len());
         let decoder = Decoder::new(MediaSource::File(file))
@@ -546,6 +591,7 @@ fn open(
         let duration = decoder.total_duration();
         return Ok(Opened {
             decoder,
+            source: *from,
             quality: *quality,
             size,
             duration,
@@ -568,6 +614,7 @@ fn open(
                         tracing::info!("命中缓存：{}", path.display());
                         return Ok(Opened {
                             decoder,
+                            source: PlaySource::Cache,
                             quality: Some(quality),
                             size,
                             duration,
@@ -608,6 +655,7 @@ fn open(
                 let duration = decoder.total_duration();
                 return Ok(Opened {
                     decoder,
+                    source: PlaySource::Online,
                     quality: Some(candidate.quality),
                     size,
                     duration,
@@ -700,28 +748,28 @@ mod tests {
         std::fs::write(&cached, vec![0_u8; 9800]).expect("写缓存文件");
 
         let local = |source: Option<TrackSource>| match source {
-            Some(TrackSource::Local { path, quality }) => Some((path, quality)),
+            Some(TrackSource::Local { path, quality, from }) => Some((path, quality, from)),
             Some(TrackSource::Cdn(_)) => panic!("本地判定不该给出线上源"),
             None => None,
         };
 
         assert_eq!(
             local(local_copy(&song, Some(&cache_dir), &downloads)),
-            Some((cached.clone(), Some(Quality::High320))),
+            Some((cached.clone(), Some(Quality::High320), PlaySource::Cache)),
             "有缓存就用缓存，档位从文件名读"
         );
 
         std::fs::remove_file(&cached).expect("删缓存");
         assert_eq!(
             local(local_copy(&song, Some(&cache_dir), &downloads)),
-            Some((downloaded.clone(), None)),
+            Some((downloaded.clone(), None, PlaySource::Download)),
             "缓存没了就看下载目录；下载那份读不出档位"
         );
 
         std::fs::write(&cached, vec![0_u8; 9800]).expect("写回缓存");
         assert_eq!(
             local(local_copy(&song, None, &downloads)),
-            Some((downloaded.clone(), None)),
+            Some((downloaded.clone(), None, PlaySource::Download)),
             "`cache_mb = 0` 时缓存不算数，仍走下载目录"
         );
 
@@ -741,7 +789,7 @@ mod tests {
         };
         assert_eq!(
             local(local_copy(&local_song, Some(&cache_dir), &nothing)),
-            Some((path, None)),
+            Some((path, None, PlaySource::Library)),
             "曲库歌用自己的路径"
         );
 
@@ -763,9 +811,15 @@ mod tests {
             source: TrackSource::Local {
                 path: path.clone(),
                 quality: None,
+                from: PlaySource::Library,
             },
         };
         let opened = open(&track, false, &cache::Promoted::default()).expect("本地 WAV 要能开");
+        assert_eq!(
+            opened.source,
+            PlaySource::Library,
+            "播放条要报得出这份是曲库来的"
+        );
         assert!(
             opened.quality.is_none(),
             "本地文件读不出档位，不许瞎报一个：{:?}",
