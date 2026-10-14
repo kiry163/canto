@@ -651,6 +651,132 @@ pub(super) struct Transfer {
     outcome: Option<String>,
     /// 下好的那份 → 索引里的一条登记（界面线程负责 upsert 与落盘，后台线程只带回数据）。
     track: Option<download::Track>,
+    /// 下好之后还要把它加进哪张本地歌单（`p` 那条路；`d` 是 `None`）。
+    ///
+    /// 记**名字**不记位置：从按下 `Enter` 到下载完成有几秒钟，这几秒里使用者可能新建 / 删掉 /
+    /// 改名前面的歌单，位置就飘了（旧写法记下标，实测能加错歌单、或者下标越界静默丢掉）。
+    /// 名字在 `Store` 里唯一，按名字找没有这个窗口；名字真被改掉 / 删掉就报一句不加。
+    add_to: Option<String>,
+}
+
+/// `p` 的选择框：上段「在线歌单」、下段「本地歌单」。
+///
+/// 段与行都是**数据**（`open_picker` 按歌的来源拼好），光标只有一份 `cur`：`j`/`k` 连续穿过
+/// 两段（在线那段没数据就整段跳过），`Enter` 按所在段分岔。
+pub(super) struct Picker {
+    /// 要加进去的那首歌（浮层标题用它，来源决定画几段）。
+    pub song: Song,
+    /// 在线歌单那一段：`None` = 这首歌是本地歌，不画这一段；`Some(vec![])` = 这一段要画但还
+    /// 没数据（正在拉 / 没登录 / 拉失败）。
+    pub online: Option<Vec<Playlist>>,
+    /// 本地歌单那一段（永远非空——「默认」那张保证至少一行）。
+    pub local: Vec<LocalPlaylist>,
+    /// 光标：在哪一段的第几行（行号是那一段自己的下标）。
+    pub cur: (PickSection, usize),
+    /// 用户自己挪过光标没有（在线那段是懒加载的：数据回来时还没挪过就把光标交给它，
+    /// 挪过就别抢——不然按 `k` 按到一半列表突然跳一下）。
+    pub moved: bool,
+}
+
+/// 选择框里的两段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PickSection {
+    Online,
+    Local,
+}
+
+impl Picker {
+    /// 在线那段有几行可选（不画这一段 / 还没数据都是 0）。
+    pub fn online_rows(&self) -> usize {
+        self.online.as_ref().map_or(0, Vec::len)
+    }
+
+    /// 本地那段有几行可选（「默认」保证 ≥ 1）。
+    pub fn local_rows(&self) -> usize {
+        self.local.len()
+    }
+
+    fn rows_of(&self, section: PickSection) -> usize {
+        match section {
+            PickSection::Online => self.online_rows(),
+            PickSection::Local => self.local_rows(),
+        }
+    }
+
+    /// 这一段画不画（本地歌只有本地那一段）。
+    pub fn shows(&self, section: PickSection) -> bool {
+        match section {
+            PickSection::Online => self.online.is_some(),
+            PickSection::Local => true,
+        }
+    }
+
+    pub fn selected_online(&self) -> Option<&Playlist> {
+        if self.cur.0 != PickSection::Online {
+            return None;
+        }
+        self.online.as_ref()?.get(self.cur.1)
+    }
+
+    pub fn selected_local(&self) -> Option<&LocalPlaylist> {
+        if self.cur.0 != PickSection::Local {
+            return None;
+        }
+        self.local.get(self.cur.1)
+    }
+
+    /// 往下挪一行：这一段到底就跨到下一段的第一行；整段整段都没得选就停在原地。
+    pub fn down(&mut self) {
+        self.moved = true;
+        if self.cur.1 + 1 < self.rows_of(self.cur.0) {
+            self.cur.1 += 1;
+            return;
+        }
+        let next = match self.cur.0 {
+            PickSection::Online => PickSection::Local,
+            PickSection::Local => return,
+        };
+        if self.rows_of(next) > 0 {
+            self.cur = (next, 0);
+        }
+    }
+
+    /// 往上挪一行：这一段到顶就跨到上一段的最后一行。
+    pub fn up(&mut self) {
+        self.moved = true;
+        if self.cur.1 > 0 {
+            self.cur.1 -= 1;
+            return;
+        }
+        let previous = match self.cur.0 {
+            PickSection::Online => return,
+            PickSection::Local => PickSection::Online,
+        };
+        let rows = self.rows_of(previous);
+        if rows > 0 {
+            self.cur = (previous, rows - 1);
+        }
+    }
+
+    /// `g`（首）：整体第一行——在线那段有得选就是它，否则本地那段的第一行。
+    pub fn first(&mut self) {
+        self.moved = true;
+        if self.online_rows() > 0 {
+            self.cur = (PickSection::Online, 0);
+        } else if self.local_rows() > 0 {
+            self.cur = (PickSection::Local, 0);
+        }
+    }
+
+    /// `G`（尾）：整体最后一行（本地那段永远在，所以就是它最后一行）。
+    pub fn last(&mut self) {
+        self.moved = true;
+        if self.local_rows() > 0 {
+            self.cur = (PickSection::Local, self.local_rows() - 1);
+        } else if self.online_rows() > 0 {
+            self.cur = (PickSection::Online, self.online_rows() - 1);
+        }
+    }
 }
 
 /// 刚下好的那份 → 索引里的一条登记。
@@ -825,8 +951,8 @@ pub(super) struct App {
     pub(super) queue_open: bool,
     /// 队列浮层里的高亮位置。
     pub(super) queue_state: ListState,
-    /// `Some` 表示正在挑歌单（`p` 键）：候选歌单、高亮、要加进去的歌。
-    pub(super) picker: Option<(Vec<Playlist>, ListState, Song)>,
+    /// `Some` 表示正在挑歌单（`p` 键）：上段在线歌单、下段本地歌单（见 [`Picker`]）。
+    pub(super) picker: Option<Picker>,
     /// 正在跑的下载。
     pub(super) transfer: Option<Arc<Mutex<Transfer>>>,
 
@@ -844,10 +970,6 @@ pub(super) struct App {
     pub(super) library_scanning: bool,
     /// 本地歌单的存储（启动读一次，改过就立刻落盘）。
     pub(super) playlists_store: playlists::Store,
-    /// `P` 弹出的本地歌单选择框（跟 QQ 那个分开：两套状态互踩最烦人）。
-    pub(super) local_picker: Option<(Vec<LocalPlaylist>, ListState, Song)>,
-    /// 选择框里选了「新建…」时先记着这首歌：输入完名字把它加进新歌单。
-    pub(super) pending_add_song: Option<Song>,
     /// 名字输入态（`N` 新建 / `R` 改名共用）。
     pub(super) local_input: Option<LocalInput>,
     /// `D` 第一次按下时记的是哪一张（第二次才真删；换一首 / 按别的键就作废）。
@@ -866,7 +988,13 @@ impl App {
         tx: Sender<Msg>,
     ) -> Self {
         // 先读存储（下面 `playlists_path` 会被 move 进字段）。
-        let playlists_store = playlists::Store::load(&playlists_path);
+        let mut playlists_store = playlists::Store::load(&playlists_path);
+        // 固定那张「默认」：没有就补一张并立刻落盘（老文件也一样，别的歌单一个不动）。
+        if playlists_store.ensure_default()
+            && let Err(error) = playlists_store.save(&playlists_path)
+        {
+            tracing::warn!("补「默认」歌单后落盘失败：{error:#}");
+        }
         // 下载索引：`↓` 标记、体积报磁盘那份、本地命中都用它（配置还没被 move 进字段）。
         let downloads = load_downloads(&config.paths.download_dir);
         Self {
@@ -913,8 +1041,6 @@ impl App {
             scanned: Vec::new(),
             library_scanning: false,
             playlists_store,
-            local_picker: None,
-            pending_add_song: None,
             local_input: None,
             pending_playlist_delete: None,
             quit: false,
@@ -1117,23 +1243,39 @@ impl App {
         });
     }
 
-    /// 下载选中的那首（含歌词），进度走状态栏。
+    /// `d`：下载选中的那首（含歌词），进度走状态栏。
     fn download_selected(&mut self) {
+        let Some(song) = self.selected_song() else {
+            return;
+        };
+        self.start_download(song, None);
+    }
+
+    /// 起一次下载。`add_to` = 下好之后把它加进哪张本地歌单（**按名字**；`p` 那条路用，`d` 给 `None`）。
+    ///
+    /// 两条入口共用这一条链路：已经在下载索引里、文件还在的那首**不再下一遍**（给歌单加就直接加），
+    /// 其余的交后台线程；下好后 `poll_transfer` 登记索引，要加歌单的接着加。
+    fn start_download(&mut self, song: Song, add_to: Option<String>) {
         if self.transfer.is_some() {
             self.notify("已经有一个下载在跑");
             return;
         }
-        let Some(song) = self.selected_song() else {
-            return;
-        };
         // 索引里登记过、文件也还在：不再下一遍。旧实现看到同名文件就报「已下载」——那是猜的，
         // 同歌手同标题的另一首会被误判。判定归 `by_mid`（见规格 §5）。
         let download_dir = self.config.paths.download_dir.clone();
         if let Some(track) = self.downloads.by_mid(&song.mid)
             && self.downloads.path_of(track, &download_dir).is_file()
         {
-            let file = track.file.clone();
-            self.notify(format!("已下载：{file}"));
+            match add_to {
+                Some(name) => {
+                    let entry = track.to_song(&download_dir);
+                    self.push_into_playlist(&name, &entry);
+                }
+                None => {
+                    let file = track.file.clone();
+                    self.notify(format!("已下载：{file}"));
+                }
+            }
             return;
         }
         let dir = download_dir;
@@ -1147,6 +1289,7 @@ impl App {
             total: total.clone(),
             outcome: None,
             track: None,
+            add_to,
         }));
         self.transfer = Some(transfer.clone());
         self.notify_progress(format!("下载《{}》…", song.title));
@@ -1244,93 +1387,107 @@ impl App {
         });
     }
 
-    /// `P`：把当前选中的本地曲目加进本地歌单（选择框第一行固定是「新建…」）。
-    ///
-    /// 只在「本地歌曲」屏认：别的屏上选中的歌不一定有本地身份（QQ 歌没有）。
-    fn open_local_picker(&mut self) {
-        if self.nav.menu != Menu::LocalLibrary {
-            return;
-        }
-        // 刚进这一屏还没挪过光标时拿第一首（不然 `P` 看着像坏了）。
-        let Some(song) = self.selected_song().or_else(|| {
-            self.nav
-                .local_view
-                .visible_rows()
-                .next()
-                .map(|(song, _)| song.clone())
-        }) else {
-            return;
-        };
-        let mut state = ListState::default();
-        // 默认停在「新建…」那一行（下标 0；歌单从 1 开始）。
-        state.select(Some(0));
-        self.local_picker = Some((self.playlists_store.playlists.clone(), state, song));
-    }
-
-    /// 选择框确认：第 0 行是「新建…」（转名字输入态），其余行是已有的歌单。
-    fn confirm_local_picker(&mut self) {
-        let Some((playlists, state, song)) = self.local_picker.take() else {
-            return;
-        };
-        let Some(row) = state.selected() else {
-            return;
-        };
-        if row == 0 {
-            self.pending_add_song = Some(song);
-            self.local_input = Some(LocalInput {
-                kind: LocalInputKind::Create,
-                text: String::new(),
-            });
-            return;
-        }
-        let index = row - 1;
-        let Some(playlist) = playlists.get(index) else {
-            return;
-        };
-        if playlist.songs.iter().any(|stored| stored.mid == song.mid) {
-            self.notify("已在歌单里");
-            return;
-        }
-        self.playlists_store.add(index, &song);
-        self.save_playlists();
-        self.notify(format!("已加入：{}", playlist.name));
-    }
-
     /// `p`：挑一个歌单把选中的歌加进去。
+    ///
+    /// 两段：上「在线歌单」（**QQ 歌才有**）、下「本地歌单」。在线那段没加载过就顺手拉一次
+    /// （拉回来在 `Msg::Playlists` 里填上），没登录 / 没网就那一句提示，本地那段照常可用。
     fn open_picker(&mut self) {
         let Some(song) = self.selected_song() else {
             return;
         };
-        if self.nav.playlists.is_empty() {
-            self.notify("歌单还没加载出来");
-            return;
+        let online = if song.is_local() {
+            // 本地歌没有 QQ 身份：只画本地那段（以前 `p` 在这里弹的是在线歌单框，白搭）。
+            None
+        } else {
+            Some(self.picker_online_items())
+        };
+        let local = self.playlists_store.playlists.clone();
+        let mut picker = Picker {
+            cur: (PickSection::Online, 0),
+            online,
+            local,
+            song,
+            moved: false,
+        };
+        // 光标落在**第一个能选的行**上：在线那段没数据就直接落到「默认」。
+        if picker.online_rows() == 0 {
+            picker.cur = (PickSection::Local, 0);
         }
-        let mut state = ListState::default();
-        state.select(Some(0));
-        self.picker = Some((self.nav.playlists.items.clone(), state, song));
+        self.picker = Some(picker);
+    }
+
+    /// 在线那一段现在能列出什么：没加载过就顺手拉一次（这一次先给空表，拉回来再填）。
+    fn picker_online_items(&mut self) -> Vec<Playlist> {
+        if self.nav.playlists_loaded || self.nav.playlists.error.is_some() {
+            return self.nav.playlists.items.clone();
+        }
+        self.reload_playlists();
+        Vec::new()
     }
 
     fn confirm_picker(&mut self) {
-        let Some((playlists, state, song)) = self.picker.take() else {
+        let Some(picker) = self.picker.take() else {
             return;
         };
-        let Some(playlist) = state
-            .selected()
-            .and_then(|index| playlists.get(index))
-            .cloned()
+        match picker.cur.0 {
+            PickSection::Online => {
+                let Some(playlist) = picker.selected_online().cloned() else {
+                    return;
+                };
+                let song = picker.song;
+                let request = WriteRequest {
+                    busy: format!("加进《{}》…", playlist.name),
+                    done: format!("已把《{}》加进《{}》", song.title, playlist.name),
+                    refresh: None,
+                    song,
+                    dir_id: playlist.dir_id,
+                    tid: playlist.id.parse().unwrap_or(0),
+                    add: true,
+                };
+                self.write_song(request);
+            }
+            PickSection::Local => {
+                let Some(playlist) = picker.selected_local() else {
+                    return;
+                };
+                let name = playlist.name.clone();
+                let song = picker.song;
+                // 本地歌：直接进歌单。QQ 歌：先保证本地有那份（已下过就直接加，没有就下完再加）。
+                if song.is_local() {
+                    self.push_into_playlist(&name, &song);
+                } else {
+                    self.start_download(song, Some(name));
+                }
+            }
+        }
+    }
+
+    /// 落进叫 `name` 的那张本地歌单：同一 `mid` 只留一份，报一句结果。
+    ///
+    /// 按名字找而不是按位置：`p` 那条路中间隔着一次下载（几秒钟），这几秒里歌单列表可能
+    /// 被改过（新建 / 删 / 改名都会让下标飘）。名字在 `Store` 里唯一，所以按名字不会有歧义；
+    /// 真被删 / 改名了就报一句，不静默丢。
+    fn push_into_playlist(&mut self, name: &str, song: &Song) {
+        let Some(index) = self
+            .playlists_store
+            .playlists
+            .iter()
+            .position(|playlist| playlist.name == name)
         else {
+            self.notify(format!("歌单《{name}》不在了，没加进去"));
             return;
         };
-        let request = WriteRequest {
-            busy: format!("加进《{}》…", playlist.name),
-            done: format!("已把《{}》加进《{}》", song.title, playlist.name),
-            refresh: None,
-            song,
-            dir_id: playlist.dir_id,
-            tid: playlist.id.parse().unwrap_or(0),
-            add: true,
+        let Some(playlist) = self.playlists_store.playlists.get(index) else {
+            return;
         };
-        self.write_song(request);
+        let name = playlist.name.clone();
+        if playlist.songs.iter().any(|stored| stored.mid == song.mid) {
+            self.notify("已在歌单里");
+            return;
+        }
+        self.playlists_store.add(index, song);
+        self.save_playlists();
+        self.notify(format!("已加入：{name}"));
     }
 
     /// `x`：从右栏当前显示的歌单里移除选中的歌。
@@ -1584,16 +1741,6 @@ impl App {
         };
         match outcome {
             Ok(what) => {
-                // 从「P → 新建…」进来的：刚建的那张在末尾，顺手把刚才那首加进去。
-                if matches!(input.kind, LocalInputKind::Create)
-                    && let Some(song) = self.pending_add_song.take()
-                    && let Some(index) = self.playlists_store.playlists.len().checked_sub(1)
-                {
-                    self.playlists_store.add(index, &song);
-                    self.save_playlists();
-                    self.notify(format!("已加入：{}（新建）", input.text.trim()));
-                    return;
-                }
                 self.save_playlists();
                 self.notify(format!("{what}：{}", input.text.trim()));
             }
@@ -1612,6 +1759,15 @@ impl App {
         let Some(index) = self.nav.local_playlists.selected_index() else {
             return;
         };
+        // 固定那张「默认」删不掉（`p` 的选择框里永远得有个地方可放歌）：一句话说清，
+        // 不用走那个「再按一次」的确认。
+        if self.playlists_store.is_default(index) {
+            self.notify(format!(
+                "「{}」这张删不掉（p 加歌要用它）",
+                playlists::DEFAULT_NAME
+            ));
+            return;
+        }
         if self.pending_playlist_delete != Some(index) {
             self.pending_playlist_delete = Some(index);
             self.notify("再按一次 D 删掉这张歌单");
@@ -1758,6 +1914,17 @@ impl App {
                         self.note_error(&error);
                     }
                 }
+                // 选择框开着、在线那段还空着（`p` 顺手拉的那次）：填上。
+                if let Some(picker) = self.picker.as_mut()
+                    && picker.online.as_ref().is_some_and(Vec::is_empty)
+                {
+                    picker.online = Some(self.nav.playlists.items.clone());
+                    // 用户自己还没挪过光标就把第一行交给在线那段（QQ 歌的主场就是它，
+                    // 否则「按 p → Enter」会把歌加进「默认」并顺手下一遍）；挪过就别抢。
+                    if !picker.moved && picker.online_rows() > 0 {
+                        picker.cur = (PickSection::Online, 0);
+                    }
+                }
             }
             Msg::Tracks {
                 playlist_id,
@@ -1900,7 +2067,7 @@ impl App {
         if self.queue_open {
             return keys::Context::QueueOverlay;
         }
-        if self.picker.is_some() || self.local_picker.is_some() {
+        if self.picker.is_some() {
             return keys::Context::PlaylistPicker;
         }
         if self.local_input.is_some() {
@@ -1958,6 +2125,14 @@ impl App {
                     && self.nav.local_shown.is_none()
                     && let Some(index) = self.nav.local_playlists.selected_index()
                 {
+                    // 固定那张「默认」名字不能改：直接说一句，别开输入框让人白打一遍。
+                    if self.playlists_store.is_default(index) {
+                        self.notify(format!(
+                            "「{}」这张改不了名",
+                            playlists::DEFAULT_NAME
+                        ));
+                        return;
+                    }
                     self.local_input = Some(LocalInput {
                         kind: LocalInputKind::Rename(index),
                         text: String::new(),
@@ -1977,7 +2152,6 @@ impl App {
             keys::Action::LocalInputSubmit => self.submit_local_input(),
             keys::Action::LocalInputCancel => {
                 self.local_input = None;
-                self.pending_add_song = None;
             }
             keys::Action::HistoryClear => {
                 // `D` 是「这一屏的破坏性动作」：历史屏清历史；本地歌单屏删整张歌单（双按确认）；
@@ -2016,10 +2190,6 @@ impl App {
             keys::Action::PageUp => self.nav.page_selection(-1),
             keys::Action::PageDown => self.nav.page_selection(1),
             keys::Action::Enter => {
-                if self.local_picker.is_some() {
-                    self.confirm_local_picker();
-                    return;
-                }
                 if self.picker.is_some() {
                     self.confirm_picker();
                     return;
@@ -2064,7 +2234,6 @@ impl App {
             }
             keys::Action::Download => self.download_selected(),
             keys::Action::AddToPlaylist => self.open_picker(),
-            keys::Action::LocalPlaylistAdd => self.open_local_picker(),
             keys::Action::RemoveFromPlaylist => self.remove_selected(),
             keys::Action::ToggleLyric => self.show_lyric = !self.show_lyric,
             keys::Action::ToggleSpectrum => self.show_spectrum = !self.show_spectrum,
@@ -2120,9 +2289,6 @@ impl App {
                     self.queue_open = false;
                 } else if self.picker.is_some() {
                     self.picker = None;
-                } else if self.local_picker.is_some() {
-                    self.local_picker = None;
-                    self.pending_add_song = None;
                 } else if self.nav.search_input {
                     self.nav.end_search_input();
                 } else if !self.nav.filter_text().is_empty() {
@@ -2453,13 +2619,12 @@ impl App {
             step_state(&mut self.queue_state, self.queue.len(), delta);
             return;
         }
-        if let Some((playlists, state, _)) = self.picker.as_mut() {
-            step_state(state, playlists.len(), delta);
-            return;
-        }
-        // 本地选择框比 QQ 那个多一行「新建…」（下标 0），所以长度是 歌单数 + 1。
-        if let Some((playlists, state, _)) = self.local_picker.as_mut() {
-            step_state(state, playlists.len() + 1, delta);
+        if let Some(picker) = self.picker.as_mut() {
+            if delta > 0 {
+                picker.down();
+            } else if delta < 0 {
+                picker.up();
+            }
             return;
         }
         // 首页：挪格走 `Tab`（`Action::NextMenuItem`/`PreviousMenuItem`，见 `cycle_home`）。
@@ -2498,12 +2663,12 @@ impl App {
             edge_state(&mut self.queue_state, self.queue.len(), last);
             return;
         }
-        if let Some((playlists, state, _)) = self.picker.as_mut() {
-            edge_state(state, playlists.len(), last);
-            return;
-        }
-        if let Some((playlists, state, _)) = self.local_picker.as_mut() {
-            edge_state(state, playlists.len() + 1, last);
+        if let Some(picker) = self.picker.as_mut() {
+            if last {
+                picker.last();
+            } else {
+                picker.first();
+            }
             return;
         }
         if matches!(self.screen, Screen::Home) {
@@ -2645,18 +2810,30 @@ impl App {
         if let Some(outcome) = &state.outcome {
             let outcome = outcome.clone();
             let track = state.track.clone();
+            let add_to = state.add_to.clone();
             drop(state);
             self.transfer = None;
             self.clear_progress();
             // 下好的那份先登记：索引只在界面线程写（后台线程只把那条记录带回来）。
             if let Some(track) = track {
-                self.downloads.upsert(track);
+                self.downloads.upsert(track.clone());
                 if let Err(error) = self.downloads.save(&self.config.paths.download_dir) {
                     tracing::warn!("下载索引落盘失败：{error:#}");
                 }
+                // 然后跟磁盘对一遍（体积校准、幽灵清理），第 5 屏与 `↓` 都跟着更新。
+                self.refresh_downloads();
+                if let Some(name) = add_to {
+                    // `p` 那条路：下好了接着进歌单（条目用**实际落盘**那份的路径）。
+                    // 结果文案由 `push_into_playlist` 给（歌单被删/改名的话它也会说一句）。
+                    let dir = self.config.paths.download_dir.clone();
+                    let entry = track.to_song(&dir);
+                    self.push_into_playlist(&name, &entry);
+                    return;
+                }
+            } else {
+                // 没下成：也刷一下（进度文案之后要落回「已停止」那一套，索引本身没变）。
+                self.refresh_downloads();
             }
-            // 然后跟磁盘对一遍（体积校准、幽灵清理），第 5 屏与 `↓` 都跟着更新。
-            self.refresh_downloads();
             self.notify(outcome);
             return;
         }
@@ -3106,22 +3283,25 @@ mod tests {
         })
     }
 
-    /// `P`：选择框第一行是「新建…」；选它 → 输入名字 → 建好顺手把这首加进去。
+    /// `p` + 本地歌：**只有本地那段**（本地歌没有 QQ 身份），默认那张「默认」就在第一行。
     #[test]
-    fn choosing_new_asks_for_a_name_then_adds_the_song() {
+    fn p_on_a_local_song_offers_only_the_local_playlists() {
         let (mut app, _runtime) = test_app();
         app.library = vec![local_song("C:/m/a.wav")];
         app.switch_menu(Menu::LocalLibrary);
-        app.apply(keys::Action::LocalPlaylistAdd);
-        assert!(app.local_picker.is_some(), "`P` 打开本地歌单选择框");
-        app.apply(keys::Action::Enter); // 光标默认在「新建…」那一行
-        assert!(app.local_input.is_some(), "接着问名字");
-        for character in "通勤".chars() {
-            app.apply(keys::Action::LocalInputChar(character));
-        }
-        app.apply(keys::Action::LocalInputSubmit);
-        assert_eq!(app.playlists_store.playlists[0].name, "通勤");
-        assert_eq!(app.playlists_store.playlists[0].songs.len(), 1, "建完顺手加进去");
+        app.apply(keys::Action::AddToPlaylist);
+        let picker = app.picker.as_ref().expect("`p` 打开选择框");
+        assert!(picker.online.is_none(), "本地歌不画在线那段");
+        assert_eq!(picker.local[0].name, playlists::DEFAULT_NAME, "第一行是「默认」");
+        assert_eq!(
+            picker.cur,
+            (PickSection::Local, 0),
+            "光标落在唯一那段的第一行"
+        );
+
+        app.apply(keys::Action::Enter);
+        assert_eq!(app.playlists_store.playlists[0].songs.len(), 1, "直接进歌单");
+        assert!(app.transfer.is_none(), "本地歌不用下载");
         assert!(
             app.notice_text().is_some_and(|text| text.contains("已加入")),
             "{:?}",
@@ -3129,16 +3309,14 @@ mod tests {
         );
     }
 
-    /// 选一张已有的：加进去；同一首再加一次只留一份，并说一句「已在歌单里」。
+    /// 同一首再加一次只留一份，并说一句「已在歌单里」。
     #[test]
-    fn choosing_an_existing_playlist_adds_once() {
+    fn adding_the_same_song_twice_only_keeps_one() {
         let (mut app, _runtime) = test_app();
         app.library = vec![local_song("C:/m/a.wav")];
-        app.playlists_store.create("通勤").expect("建歌单");
         for _ in 0..2 {
             app.switch_menu(Menu::LocalLibrary);
-            app.apply(keys::Action::LocalPlaylistAdd);
-            app.apply(keys::Action::Down); // 从「新建…」挪到「通勤」
+            app.apply(keys::Action::AddToPlaylist);
             app.apply(keys::Action::Enter);
         }
         assert_eq!(app.playlists_store.playlists[0].songs.len(), 1, "只留一份");
@@ -3149,29 +3327,267 @@ mod tests {
         );
     }
 
-    /// `P` 只认「本地歌曲」屏（别的屏按了不做事，也不该冒出一个空选择框）。
+    /// `p` + QQ 歌（在线歌单已经加载过）：两段都在，`j` 能从在线段跨到本地段，
+    /// 选本地那张时**不下载**（索引里已经有那份）直接进歌单。
     #[test]
-    fn the_local_picker_only_opens_on_the_local_library_screen() {
+    fn p_on_a_qq_song_offers_both_sections() {
         let (mut app, _runtime) = test_app();
-        app.library = vec![local_song("C:/m/a.wav")];
-        app.switch_menu(Menu::Favorites);
-        app.apply(keys::Action::LocalPlaylistAdd);
-        assert!(app.local_picker.is_none(), "收藏屏上按 `P` 不做事");
-        app.switch_menu(Menu::LocalLibrary);
-        app.apply(keys::Action::LocalPlaylistAdd);
-        assert!(app.local_picker.is_some(), "曲库屏上才开");
+        let dir = std::env::temp_dir().join(format!("canto-picker-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("建目录");
+        app.config.paths.download_dir = dir.clone();
+        std::fs::write(dir.join("同一人 - 同一首歌.flac"), vec![0_u8; 8]).expect("写文件");
+        app.downloads.upsert(crate::download::Track {
+            mid: "m1".to_string(),
+            file: "同一人 - 同一首歌.flac".to_string(),
+            quality: crate::model::Quality::Flac,
+            container: "FLAC".to_string(),
+            bytes: 8,
+            title: "同一首歌".to_string(),
+            singers: "同一人".to_string(),
+            album: String::new(),
+            duration_secs: 0,
+            at: 0,
+        });
+        app.downloads.save(&dir).expect("落盘");
+        app.refresh_downloads();
+
+        app.nav.switch_menu(Menu::Favorites);
+        app.nav
+            .favorites
+            .set_items(vec![titled_song("m1", "同一首歌", "同一人")]);
+        app.nav.favorites.select_first();
+        app.nav
+            .playlists
+            .set_items(vec![playlist("1", "嗯")]);
+        app.nav.playlists_loaded = true;
+
+        app.apply(keys::Action::AddToPlaylist);
+        let picker = app.picker.as_ref().expect("打开选择框");
+        assert_eq!(picker.online.as_ref().map(Vec::len), Some(1), "在线那段有一张");
+        assert_eq!(picker.local.len(), 1, "本地那段有「默认」");
+        assert_eq!(picker.cur, (PickSection::Online, 0), "光标先落在在线那段");
+
+        app.apply(keys::Action::Down); // 在线段只有一行 → 跨到本地段
+        assert_eq!(app.picker.as_ref().unwrap().cur, (PickSection::Local, 0));
+        app.apply(keys::Action::Up); // 再跨回去
+        assert_eq!(app.picker.as_ref().unwrap().cur, (PickSection::Online, 0));
+        app.apply(keys::Action::Down);
+
+        app.apply(keys::Action::Enter);
+        assert!(app.transfer.is_none(), "索引里有那份，不重下");
+        let stored = &app.playlists_store.playlists[0].songs[0];
+        assert_eq!(stored.mid, crate::model::local_mid(&dir.join("同一人 - 同一首歌.flac")));
+        assert_eq!(stored.title, "同一首歌");
+        assert!(
+            app.notice_text().is_some_and(|text| text.contains("已加入")),
+            "{:?}",
+            app.notice_text()
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// `Esc` 关掉本地选择框，什么也不加。
+    /// 在线那段没加载过：`p` 顺手拉一次（这一段先空着、给一句「加载中」），拉回来填上；
+    /// **用户还没挪过光标**就把光标交给在线那段（QQ 歌的主场），挪过就不抢。
     #[test]
-    fn escape_closes_the_local_picker_without_adding() {
+    fn the_online_section_loads_lazily_and_takes_the_cursor_only_if_untouched() {
+        let (mut app, _runtime) = test_app();
+        app.nav.switch_menu(Menu::Favorites);
+        app.nav
+            .favorites
+            .set_items(vec![test_song("a")]);
+        app.nav.favorites.select_first();
+        assert!(!app.nav.playlists_loaded, "前提：还没加载过在线歌单");
+
+        app.apply(keys::Action::AddToPlaylist);
+        let picker = app.picker.as_ref().expect("打开选择框");
+        assert_eq!(picker.online.as_deref(), Some(&[][..]), "这一段先空着");
+        assert_eq!(
+            picker.cur,
+            (PickSection::Local, 0),
+            "在线段没数据 → 光标先落在本地那段"
+        );
+        assert!(
+            app.notice_text().is_some_and(|text| text.contains("加载歌单")),
+            "顺手拉一次：{:?}",
+            app.notice_text()
+        );
+
+        app.on_msg(Msg::Playlists(Ok(vec![
+            playlist("1", "嗯"),
+        ])));
+        let picker = app.picker.as_ref().expect("选择框还开着");
+        assert_eq!(picker.online.as_ref().map(Vec::len), Some(1), "填上了");
+        assert_eq!(
+            picker.cur,
+            (PickSection::Online, 0),
+            "没挪过 → 光标交给在线那段"
+        );
+
+        // 再开一次：这次用户先自己挪了一格，数据回来不许抢。
+        app.apply(keys::Action::Back);
+        app.nav.playlists_loaded = false;
+        app.nav.playlists.set_items(Vec::new());
+        app.apply(keys::Action::AddToPlaylist);
+        app.apply(keys::Action::Up); // 用户自己动了
+        app.on_msg(Msg::Playlists(Ok(vec![
+            playlist("1", "嗯"),
+        ])));
+        assert_eq!(
+            app.picker.as_ref().expect("还开着").cur,
+            (PickSection::Local, 0),
+            "挪过了就不抢"
+        );
+    }
+
+    /// 下载完成后进歌单：`Transfer` 带着那首歌与目标歌单，条目用**实际落盘**那份的路径。
+    #[test]
+    fn a_finished_download_lands_in_the_chosen_local_playlist() {
+        let (mut app, _runtime) = test_app();
+        let dir = std::env::temp_dir().join(format!("canto-picker-done-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("建目录");
+        let file = dir.join("歌手 - 有了 (2).flac");
+        std::fs::write(&file, vec![0_u8; 8]).expect("写文件");
+        app.config.paths.download_dir = dir.clone();
+
+        let track = crate::download::Track {
+            mid: "m1".to_string(),
+            file: "歌手 - 有了 (2).flac".to_string(),
+            quality: crate::model::Quality::Flac,
+            container: "FLAC".to_string(),
+            bytes: 8,
+            title: "有了".to_string(),
+            singers: "歌手".to_string(),
+            album: "专辑".to_string(),
+            duration_secs: 12,
+            at: 0,
+        };
+        app.transfer = Some(std::sync::Arc::new(std::sync::Mutex::new(Transfer {
+            title: "有了".to_string(),
+            received: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(8)),
+            total: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(8)),
+            outcome: Some("已下载：有了".to_string()),
+            track: Some(track),
+            add_to: Some(playlists::DEFAULT_NAME.to_string()),
+        })));
+        app.poll_transfer();
+
+        let stored = &app.playlists_store.playlists[0].songs[0];
+        assert_eq!(stored.mid, crate::model::local_mid(&file), "身份是实际落盘那份");
+        assert_eq!(
+            (stored.title.as_str(), stored.album.as_str(), stored.duration_secs),
+            ("有了", "专辑", 12),
+            "快照跟着索引里那几项"
+        );
+        assert!(app.downloads.by_mid("m1").is_some(), "索引也登记了");
+        assert_eq!(
+            app.notice_text(),
+            Some(format!("已加入：{}", playlists::DEFAULT_NAME).as_str()),
+            "报的是「已加入」而不是「已下载」"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 下载那几秒里歌单被删 / 改名了：按名字找不着 → 报一句、不静默丢、也不加错歌单。
+    #[test]
+    fn a_finished_download_into_a_vanished_playlist_says_so() {
+        let (mut app, _runtime) = test_app();
+        let dir = std::env::temp_dir().join(format!("canto-picker-gone-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("建目录");
+        let file = dir.join("歌手 - 有了.flac");
+        std::fs::write(&file, vec![0_u8; 8]).expect("写文件");
+        app.config.paths.download_dir = dir.clone();
+        app.playlists_store.create("通勤").expect("建歌单");
+
+        app.transfer = Some(std::sync::Arc::new(std::sync::Mutex::new(Transfer {
+            title: "有了".to_string(),
+            received: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(8)),
+            total: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(8)),
+            outcome: Some("已下载：有了".to_string()),
+            track: Some(crate::download::Track {
+                mid: "m1".to_string(),
+                file: "歌手 - 有了.flac".to_string(),
+                quality: crate::model::Quality::Flac,
+                container: "FLAC".to_string(),
+                bytes: 8,
+                title: "有了".to_string(),
+                singers: "歌手".to_string(),
+                album: "专辑".to_string(),
+                duration_secs: 12,
+                at: 0,
+            }),
+            add_to: Some("通勤".to_string()),
+        })));
+        // 下载还没回来，歌单先被删了（`D` 连按两次那条路）。
+        assert!(app.playlists_store.delete(1), "删掉「通勤」");
+        app.poll_transfer();
+
+        assert_eq!(app.playlists_store.playlists[0].songs.len(), 0, "不许乱加");
+        assert_eq!(
+            app.notice_text(),
+            Some("歌单《通勤》不在了，没加进去"),
+            "得说一句"
+        );
+        assert!(app.downloads.by_mid("m1").is_some(), "下载本身照旧登记");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 下载失败：歌单一个条目都不加，只报一句。
+    #[test]
+    fn a_failed_download_adds_nothing() {
+        let (mut app, _runtime) = test_app();
+        app.transfer = Some(std::sync::Arc::new(std::sync::Mutex::new(Transfer {
+            title: "没有版权".to_string(),
+            received: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            total: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            outcome: Some("下载失败：没有版权".to_string()),
+            track: None,
+            add_to: Some(playlists::DEFAULT_NAME.to_string()),
+        })));
+        app.poll_transfer();
+        assert!(app.playlists_store.playlists[0].songs.is_empty(), "什么都不加");
+        assert_eq!(app.notice_text(), Some("下载失败：没有版权"));
+    }
+
+    /// 「默认」那张：`R` 不开输入框、`D` 不删（各给一句说明）。
+    #[test]
+    fn the_default_playlist_refuses_rename_and_delete() {
+        let (mut app, _runtime) = test_app();
+        app.playlists_store.create("通勤").expect("建歌单");
+        app.switch_menu(Menu::LocalPlaylists);
+        app.nav.local_playlists.select_first(); // 「默认」在第一张
+
+        app.apply(keys::Action::LocalPlaylistRename);
+        assert!(app.local_input.is_none(), "`R` 不该开输入框");
+        assert!(
+            app.notice_text().is_some_and(|text| text.contains("改不了名")),
+            "{:?}",
+            app.notice_text()
+        );
+
+        for _ in 0..2 {
+            app.apply(keys::Action::HistoryClear); // 就是本地歌单屏的 `D`
+        }
+        assert_eq!(app.playlists_store.playlists.len(), 2, "两张都还在");
+        assert!(
+            app.notice_text().is_some_and(|text| text.contains("删不掉")),
+            "{:?}",
+            app.notice_text()
+        );
+    }
+
+    /// `Esc` 关掉选择框，什么也不加。
+    #[test]
+    fn escape_closes_the_picker_without_adding() {
         let (mut app, _runtime) = test_app();
         app.library = vec![local_song("C:/m/a.wav")];
         app.switch_menu(Menu::LocalLibrary);
-        app.apply(keys::Action::LocalPlaylistAdd);
+        app.apply(keys::Action::AddToPlaylist);
         app.apply(keys::Action::Back);
-        assert!(app.local_picker.is_none(), "关掉了");
-        assert!(app.playlists_store.playlists.is_empty(), "什么也没建");
+        assert!(app.picker.is_none(), "关掉了");
+        assert!(app.playlists_store.playlists[0].songs.is_empty(), "什么也没加");
     }
 
     /// 歌单列表那一级：`j` 真挪得动，`R`/`D`/`Enter` 作用在**挪到的那一张**上。
@@ -3181,14 +3597,16 @@ mod tests {
         app.playlists_store.create("甲").expect("建歌单");
         app.playlists_store.create("乙").expect("建歌单");
         app.switch_menu(Menu::LocalPlaylists);
+        // 「默认」在第一张，往下挪一格才是「甲」。
         app.apply(keys::Action::Down);
         app.apply(keys::Action::LocalPlaylistRename);
         for character in "丙".chars() {
             app.apply(keys::Action::LocalInputChar(character));
         }
         app.apply(keys::Action::LocalInputSubmit);
-        assert_eq!(app.playlists_store.playlists[0].name, "甲", "改的是第二张");
-        assert_eq!(app.playlists_store.playlists[1].name, "丙");
+        assert_eq!(app.playlists_store.playlists[0].name, crate::playlists::DEFAULT_NAME);
+        assert_eq!(app.playlists_store.playlists[1].name, "丙", "改的是挪到的那张");
+        assert_eq!(app.playlists_store.playlists[2].name, "乙");
     }
 
     /// 删整张歌单记的是**全量下标**：筛到只剩一张时，删的就该是那一张。
@@ -3211,7 +3629,11 @@ mod tests {
             .iter()
             .map(|playlist| playlist.name.as_str())
             .collect();
-        assert_eq!(names, vec!["甲"], "删的是筛出来那张（乙）");
+        assert_eq!(
+            names,
+            vec![crate::playlists::DEFAULT_NAME, "甲"],
+            "删的是筛出来那张（乙）"
+        );
     }
 
     /// 移出一首歌也按**歌单里的位置**算：筛过之后不能拿可见行号去删。
@@ -3263,8 +3685,9 @@ mod tests {
     fn the_queue_origin_inside_a_local_playlist_is_its_name() {
         let (mut app, _runtime) = test_app();
         app.playlists_store.create("通勤").expect("建歌单");
-        app.playlists_store.add(0, &local_song("C:/m/a.wav"));
+        app.playlists_store.add(1, &local_song("C:/m/a.wav"));
         app.switch_menu(Menu::LocalPlaylists);
+        app.apply(keys::Action::Down);
         app.apply(keys::Action::Enter);
         assert_eq!(app.nav.origin_name(), "通勤");
     }
@@ -3347,14 +3770,15 @@ mod tests {
     fn the_local_playlist_screen_lists_playlists_then_tracks() {
         let (mut app, _runtime) = test_app();
         app.playlists_store.create("通勤").expect("建歌单");
-        app.playlists_store.add(0, &local_song("C:/m/a.wav"));
+        app.playlists_store.add(1, &local_song("C:/m/a.wav"));
         app.switch_menu(Menu::LocalPlaylists);
         assert_eq!(app.nav.menu, Menu::LocalPlaylists);
-        assert_eq!(app.nav.local_playlists.items().len(), 1, "左列表是歌单");
+        assert_eq!(app.nav.local_playlists.items().len(), 2, "「默认」+ 通勤");
+        app.apply(keys::Action::Down); // 挪到「通勤」
         app.apply(keys::Action::Enter);
         assert_eq!(
             app.nav.local_shown,
-            Some((0, "通勤".to_string())),
+            Some((1, "通勤".to_string())),
             "进去看曲目"
         );
         assert_eq!(app.nav.local_tracks.items().len(), 1);
@@ -3374,18 +3798,20 @@ mod tests {
             app.apply(keys::Action::LocalInputChar(character));
         }
         app.apply(keys::Action::LocalInputSubmit);
-        assert_eq!(app.playlists_store.playlists[0].name, "通勤");
+        assert_eq!(app.playlists_store.playlists[1].name, "通勤", "新建的排在最后");
         assert!(app.local_input.is_none(), "提交完退出输入态");
 
+        // 挪到刚建的那张再改名（第一张是固定的「默认」，它不让改）。
+        app.apply(keys::Action::Down);
         app.apply(keys::Action::LocalPlaylistRename);
         for character in "路上".chars() {
             app.apply(keys::Action::LocalInputChar(character));
         }
         app.apply(keys::Action::LocalInputSubmit);
-        assert_eq!(app.playlists_store.playlists[0].name, "路上");
+        assert_eq!(app.playlists_store.playlists[1].name, "路上");
     }
 
-    /// 重名要被挡下（歌单还是那一张），并且给一句通知。
+    /// 重名要被挡下（歌单还是那两张），并且给一句通知。
     #[test]
     fn duplicate_names_are_refused_with_a_notice() {
         let (mut app, _runtime) = test_app();
@@ -3396,7 +3822,7 @@ mod tests {
             app.apply(keys::Action::LocalInputChar(character));
         }
         app.apply(keys::Action::LocalInputSubmit);
-        assert_eq!(app.playlists_store.playlists.len(), 1, "没建成第二张");
+        assert_eq!(app.playlists_store.playlists.len(), 2, "没建成第二张");
         assert!(
             app.notice_text().is_some(),
             "给了说明：{:?}",
@@ -3410,22 +3836,29 @@ mod tests {
         let (mut app, _runtime) = test_app();
         app.playlists_store.create("通勤").expect("建歌单");
         app.switch_menu(Menu::LocalPlaylists);
+        app.apply(keys::Action::Down); // 挪到「通勤」（第一张「默认」不让删）
         app.apply(keys::Action::HistoryClear);
-        assert_eq!(app.playlists_store.playlists.len(), 1, "第一次不删");
+        assert_eq!(app.playlists_store.playlists.len(), 2, "第一次不删");
         assert!(
             app.notice_text()
                 .is_some_and(|text| text.contains("再按一次")),
             "{:?}",
             app.notice_text()
         );
-        app.apply(keys::Action::Down);
+        app.apply(keys::Action::Up);
         assert!(
             app.pending_playlist_delete.is_none(),
             "别的键取消这次待确认"
         );
+        app.apply(keys::Action::Down);
         app.apply(keys::Action::HistoryClear);
         app.apply(keys::Action::HistoryClear);
-        assert!(app.playlists_store.playlists.is_empty(), "第二次才删");
+        assert_eq!(app.playlists_store.playlists.len(), 1, "第二次才删");
+        assert_eq!(
+            app.playlists_store.playlists[0].name,
+            crate::playlists::DEFAULT_NAME,
+            "留下的只有那张固定的"
+        );
     }
 
     /// 文件不在了的条目仍然留在歌单里（渲染成「（已丢失）」，由绘制那一侧钉）。
@@ -3433,8 +3866,9 @@ mod tests {
     fn a_lost_entry_stays_in_the_playlist() {
         let (mut app, _runtime) = test_app();
         app.playlists_store.create("通勤").expect("建歌单");
-        app.playlists_store.add(0, &local_song("C:/m/gone.wav"));
+        app.playlists_store.add(1, &local_song("C:/m/gone.wav"));
         app.switch_menu(Menu::LocalPlaylists);
+        app.apply(keys::Action::Down);
         app.apply(keys::Action::Enter);
         assert_eq!(app.nav.local_tracks.items().len(), 1, "条目还在");
         assert!(app.library.is_empty(), "而它已经不在曲库里");
@@ -4344,17 +4778,18 @@ mod tests {
             crate::tui::test_support::test_playlist("1", "嗯"),
             crate::tui::test_support::test_playlist("2", "循环"),
         ]);
+        app.nav.playlists_loaded = true;
         app.apply(keys::Action::AddToPlaylist);
-        let Some((_, state, _)) = &app.picker else {
+        let Some(picker) = &app.picker else {
             panic!("选择框该开着");
         };
-        assert_eq!(state.selected(), Some(0));
+        assert_eq!(picker.cur, (PickSection::Online, 0));
 
         app.apply(keys::Action::Down);
-        let Some((_, state, _)) = &app.picker else {
+        let Some(picker) = &app.picker else {
             panic!("选择框还开着");
         };
-        assert_eq!(state.selected(), Some(1), "j 该挪选择框的高亮");
+        assert_eq!(picker.cur, (PickSection::Online, 1), "j 该挪选择框的高亮");
         assert_eq!(
             app.nav.favorites.state.selected(),
             Some(0),

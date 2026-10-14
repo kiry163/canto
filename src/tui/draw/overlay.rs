@@ -6,59 +6,129 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Clear, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use crate::config::HotkeyConfig;
-use crate::model::Song;
+use crate::model::{Playlist, Song};
 
-use super::super::state::{App, Menu, Screen};
+use super::super::state::{App, Menu, PickSection, Screen};
 use super::{highlight, rows};
 
 impl App {
-    /// `P` 的本地歌单选择框：第一行固定是「新建…」，下面才是已有的歌单。
-    pub(super) fn draw_local_picker(&mut self, frame: &mut Frame, area: Rect) {
-        let Some((playlists, state, song)) = self.local_picker.as_mut() else {
-            return;
-        };
-        let width = area.width.saturating_sub(4).min(56);
-        let height = playlists.len() as u16 + 3;
-        let popup = super::overlay_rect(area, width, height);
-        frame.render_widget(Clear, popup);
-        // 第一行是「新建…」，缩进跟歌单行走同一份口径（计数那 5 列留白）。
-        let mut items = vec![ListItem::new(super::playlist_row(None, "新建…"))];
-        items.extend(playlists.iter().map(|playlist| {
-            ListItem::new(super::playlist_row(Some(playlist.songs.len() as u64), &playlist.name))
-        }));
-        let list = List::new(items)
-            .block(Block::bordered().title(format!(" 把《{}》加进本地歌单 ", song.title)))
-            .highlight_style(highlight())
-            .highlight_symbol("▶ ");
-        frame.render_stateful_widget(list, popup, state);
-    }
-
-    /// `p`：加入歌单的选择框（QQ 那套）。
+    /// `p` 的选择框：上段「在线歌单」、下段「本地歌单」（本地歌只有下段）。
+    ///
+    /// 段标题是普通行、不参与选择（`j`/`k` 由 `Picker::down/up` 跳过它们）；哪一段拿着光标
+    /// 由 `picker.cur` 说了算，没拿着的那一段不画 `▶ `。
     pub(super) fn draw_picker(&mut self, frame: &mut Frame, area: Rect) {
-        let Some((playlists, state, song)) = self.picker.as_mut() else {
+        // 先看了一眼再借：空态文案要看 App 的状态（没登录 / 在拉 / 拉失败）。
+        let online_shows = self
+            .picker
+            .as_ref()
+            .is_some_and(|picker| picker.shows(PickSection::Online));
+        let online_has_rows = self
+            .picker
+            .as_ref()
+            .is_some_and(|picker| picker.online_rows() > 0);
+        let online_note = (online_shows && !online_has_rows).then(|| self.online_empty_note());
+        let Some(picker) = self.picker.as_mut() else {
             return;
         };
+        let song_title = picker.song.title.clone();
+        let cur = picker.cur;
+
+        // 一段的行数：段标题 1 行 + 内容行（空态给 1 行提示）；两段之间空一行。
+        let section_rows = |rows: usize, empty: bool| -> u16 {
+            if rows > 0 {
+                rows.min(PICKER_MAX_ROWS) as u16 + 1
+            } else if empty {
+                2
+            } else {
+                1
+            }
+        };
+        let online_block = if online_shows {
+            section_rows(picker.online_rows(), online_note.is_some())
+        } else {
+            0
+        };
+        let local_block = section_rows(picker.local_rows(), false);
+
         let width = area.width.saturating_sub(4).min(56);
-        let height = playlists.len() as u16 + 2;
+        let height = 2 + online_block + local_block + u16::from(online_shows);
         let popup = super::overlay_rect(area, width, height);
         frame.render_widget(Clear, popup);
-        let items: Vec<ListItem> = playlists
-            .iter()
-            .map(|playlist| {
-                ListItem::new(super::playlist_row(Some(playlist.song_count), &playlist.name))
-            })
-            .collect();
+
+        let mut items: Vec<ListItem> = Vec::new();
+        let mut selected_row = 0usize;
+        if online_shows {
+            items.push(ListItem::new(section_row("在线歌单")));
+            if let Some(note) = &online_note {
+                items.push(ListItem::new(note_row(note)));
+            } else {
+                if cur.0 == PickSection::Online {
+                    selected_row = items.len() + cur.1;
+                }
+                items.extend(picker.online.iter().flatten().map(playlist_item));
+            }
+            // 两段之间空一行（只有两段都在时才空）。
+            items.push(ListItem::new(String::new()));
+        }
+        items.push(ListItem::new(section_row("本地歌单")));
+        if cur.0 == PickSection::Local {
+            selected_row = items.len() + cur.1;
+        }
+        items.extend(picker.local.iter().map(|playlist| {
+            playlist_item_counted(playlist.songs.len() as u64, &playlist.name)
+        }));
+
+        // 光标位置由我们自己算（`Picker::cur`），所以把 `ListState` 临时摆好再画；
+        // 行数装不下时 `List` 自己滚到光标那一行（`PICKER_MAX_ROWS` 只是框高上限）。
+        let mut state = ListState::default();
+        state.select(Some(selected_row));
         let list = List::new(items)
-            .block(Block::bordered().title(format!(" 把《{}》加进 ", song.title)))
+            .block(Block::bordered().title(format!(" 把《{song_title}》加进歌单 ")))
             .highlight_style(highlight())
             .highlight_symbol("▶ ");
-        frame.render_stateful_widget(list, popup, state);
+        frame.render_stateful_widget(list, popup, &mut state);
     }
 
+    /// 在线那段空着时写什么：没登录 / 还没拉回来 / 拉失败 / 真没有，四种说清。
+    fn online_empty_note(&self) -> String {
+        if !self.logged_in() {
+            return "（没登录：按 L）".to_string();
+        }
+        if self.nav.playlists.error.is_some() {
+            return "（歌单加载失败，看 canto.log）".to_string();
+        }
+        if self.nav.playlists_loaded {
+            return "（没有在线歌单）".to_string();
+        }
+        "（加载中…）".to_string()
+    }
+}
+
+/// 选择框一段最多画几行内容（装不下时 `List` 自己滚）。
+const PICKER_MAX_ROWS: usize = 8;
+
+/// 段标题行（弱色，跟帮助浮层的分组标题同一副样子）。
+fn section_row(title: &str) -> Line<'static> {
+    Line::from(title.to_string()).style(Style::new().fg(Color::DarkGray))
+}
+
+/// 段内的提示行（没登录 / 加载中…）。
+fn note_row(text: &str) -> Line<'static> {
+    Line::from(text.to_string()).style(Style::new().fg(Color::DarkGray))
+}
+
+/// 一张在线歌单那一行。
+fn playlist_item(playlist: &Playlist) -> ListItem<'static> {
+    playlist_item_counted(playlist.song_count, &playlist.name)
+}
+
+/// 带曲目数的一行（两个来源的计数类型不同，统一到 `u64`）。
+fn playlist_item_counted(count: u64, name: &str) -> ListItem<'static> {
+    ListItem::new(super::playlist_row(Some(count), name))
 }
 
 impl App {
@@ -229,13 +299,14 @@ fn help_rows(screen: Option<Menu>, hotkeys: &HotkeyConfig) -> Vec<Row> {
         Row::Keys { keys: "← / →", help: "后退 / 前进 10 秒" },
         Row::Keys { keys: "+ / -", help: "音量 ±5%" },
     ]);
-    // 本地歌曲屏：曲目那一套少一半——本地歌没有 QQ 身份，`d`/`p`/`x` 不绑，别许诺。
+    // 本地歌曲屏：曲目那一套少一半——本地歌没有 QQ 身份，`d`/`x` 不绑，别许诺；
+    // `p` 现在也管本地歌单（选择框里只有本地那一段）。
     if matches!(screen, Some(Menu::LocalLibrary)) {
         rows.extend([
             Row::Section("歌曲"),
             Row::Keys { keys: "Enter", help: "播放选中" },
             Row::Keys { keys: "a / A", help: "追加到队尾 / 插到下一首" },
-            Row::Keys { keys: "P", help: "加进本地歌单" },
+            Row::Keys { keys: "p", help: "加进本地歌单" },
             Row::Keys { keys: "r", help: "重扫（本地歌曲目录 + 下载索引）" },
         ]);
     } else if matches!(screen, Some(Menu::LocalPlaylists)) {
@@ -243,6 +314,7 @@ fn help_rows(screen: Option<Menu>, hotkeys: &HotkeyConfig) -> Vec<Row> {
             Row::Section("本地歌单里的歌"),
             Row::Keys { keys: "Enter", help: "播放选中" },
             Row::Keys { keys: "a / A", help: "追加到队尾 / 插到下一首" },
+            Row::Keys { keys: "p", help: "加进本地歌单" },
             Row::Keys { keys: "x", help: "移出这张歌单" },
         ]);
     } else if list {
@@ -251,7 +323,7 @@ fn help_rows(screen: Option<Menu>, hotkeys: &HotkeyConfig) -> Vec<Row> {
             Row::Keys { keys: "Enter", help: "播放选中" },
             Row::Keys { keys: "a / A", help: "追加到队尾 / 插到下一首" },
             Row::Keys { keys: "d", help: "下载（含 .lrc）" },
-            Row::Keys { keys: "p", help: "加进歌单" },
+            Row::Keys { keys: "p", help: "加进歌单（在线 / 本地两段）" },
             Row::Keys { keys: "x", help: "从歌单移除" },
         ]);
     }
@@ -409,7 +481,8 @@ mod tests {
         assert_eq!(pretty(""), "", "空串不该进表，但也不该炸");
     }
 
-    /// 本地歌曲屏的帮助：列 `r`，不列 QQ 专有的 `d`/`p`/`x`（本地歌没有 QQ 身份）。
+    /// 本地歌曲屏的帮助：列 `r`，`p` 改成「加进本地歌单」（本地歌走选择框里的本地那一段）；
+    /// 不列 QQ 专有的 `d`/`x`（本地歌没有 QQ 身份）。
     #[test]
     fn the_local_screen_help_omits_qq_only_keys() {
         let rows = help_rows(
@@ -418,7 +491,13 @@ mod tests {
         );
         let cells: Vec<(&str, &str)> = rows.iter().filter_map(Row::cells).collect();
         assert!(cells.iter().any(|(keys, _)| *keys == "r"), "{cells:?}");
-        for dead in ["d", "p", "x"] {
+        assert!(
+            cells
+                .iter()
+                .any(|(keys, help)| *keys == "p" && *help == "加进本地歌单"),
+            "本地屏的 `p` 管的是本地歌单：{cells:?}"
+        );
+        for dead in ["d", "x", "P"] {
             assert!(
                 !cells.iter().any(|(keys, _)| *keys == dead),
                 "本地屏不绑 `{dead}`：{cells:?}"

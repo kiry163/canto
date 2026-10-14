@@ -17,6 +17,13 @@ use crate::model::Song;
 /// 落盘格式版本。字段含义变了就 +1（老文件按空处理，不做迁移）。
 pub const VERSION: u32 = 2;
 
+/// 固定那张本地歌单的名字。
+///
+/// **不能改名、不能删**：`p` 的选择框里永远得有个地方可放歌，不然「加进本地歌单」这件事
+/// 在没建过任何歌单的人那儿是无路可走的。按名字认它（名字固定 = 不用往文件里加标记、不用
+/// 动版本号），所以这个名字是保留的：`create` / `rename` 都不许撞上它。
+pub const DEFAULT_NAME: &str = "默认";
+
 /// 存进歌单的一条：`mid`（`local:<路径>`）+ 标题 / 歌手 / 专辑 / 时长的**快照**。
 ///
 /// 快照要够画出一行：文件被删了那句「（已丢失）」照样得写得出专辑与时长（曲库那边查不到了）。
@@ -42,6 +49,8 @@ pub struct LocalPlaylist {
 pub enum NameError {
     Empty,
     Duplicate,
+    /// 撞上固定那张「默认」（它的名字是保留的；改名与删它都不许）。
+    Reserved,
 }
 
 impl std::fmt::Display for NameError {
@@ -49,6 +58,7 @@ impl std::fmt::Display for NameError {
         formatter.write_str(match self {
             NameError::Empty => "名字不能是空的",
             NameError::Duplicate => "这个名字已经有过了",
+            NameError::Reserved => "「默认」这个名字是留着的",
         })
     }
 }
@@ -106,7 +116,36 @@ impl Store {
         Ok(())
     }
 
-    /// 新建一张，返回它在列表里的下标。名字去首尾空白，空 / 重名拒绝。
+    /// 保证有那张固定的「默认」：没有就插到**第一张**（别的歌单一个不动）。
+    /// 返回是不是刚补的——调用方拿它决定要不要立刻落盘。老文件（版本 2、没有这张）也照做：
+    /// 歌单是使用者自己建的东西，不升版本号、不清空。
+    pub fn ensure_default(&mut self) -> bool {
+        if self.has_default() {
+            return false;
+        }
+        self.playlists.insert(
+            0,
+            LocalPlaylist {
+                name: DEFAULT_NAME.to_string(),
+                songs: Vec::new(),
+            },
+        );
+        true
+    }
+
+    /// 有那张「默认」吗（按名字认）。
+    pub fn has_default(&self) -> bool {
+        self.playlists.iter().any(|playlist| playlist.name == DEFAULT_NAME)
+    }
+
+    /// 第 `index` 张是不是固定那张「默认」。
+    pub fn is_default(&self, index: usize) -> bool {
+        self.playlists
+            .get(index)
+            .is_some_and(|playlist| playlist.name == DEFAULT_NAME)
+    }
+
+    /// 新建一张，返回它在列表里的下标。名字去首尾空白，空 / 重名 / 撞上「默认」都拒绝。
     pub fn create(&mut self, name: &str) -> std::result::Result<usize, NameError> {
         let name = self.check_name(name, None)?;
         self.playlists.push(LocalPlaylist {
@@ -116,8 +155,11 @@ impl Store {
         Ok(self.playlists.len() - 1)
     }
 
-    /// 改名（同样校验；改成自己原来的名字不算重名）。
+    /// 改名（同样校验；改成自己原来的名字不算重名）。固定那张「默认」不许改名。
     pub fn rename(&mut self, index: usize, name: &str) -> std::result::Result<(), NameError> {
+        if self.is_default(index) {
+            return Err(NameError::Reserved);
+        }
         let name = self.check_name(name, Some(index))?;
         if let Some(playlist) = self.playlists.get_mut(index) {
             playlist.name = name;
@@ -152,14 +194,17 @@ impl Store {
         }
     }
 
-    /// 删掉整张歌单。
-    pub fn delete(&mut self, index: usize) {
-        if index < self.playlists.len() {
-            self.playlists.remove(index);
+    /// 删掉整张歌单。固定那张「默认」删不掉（返回 `false`）。
+    pub fn delete(&mut self, index: usize) -> bool {
+        if index >= self.playlists.len() || self.is_default(index) {
+            return false;
         }
+        self.playlists.remove(index);
+        true
     }
 
-    /// 名字校验：去首尾空白 → 非空 → 不与**别的**歌单重名（`ignore` 是正在改名的那张）。
+    /// 名字校验：去首尾空白 → 非空 → 不撞「默认」这个保留名 → 不与**别的**歌单重名
+    /// （`ignore` 是正在改名的那张）。
     fn check_name(
         &self,
         name: &str,
@@ -168,6 +213,11 @@ impl Store {
         let name = name.trim().to_string();
         if name.is_empty() {
             return Err(NameError::Empty);
+        }
+        if name == DEFAULT_NAME
+            && !ignore.is_some_and(|index| self.is_default(index))
+        {
+            return Err(NameError::Reserved);
         }
         let clash = self
             .playlists
@@ -240,6 +290,49 @@ mod tests {
             "老版本号读得出来，但不等于当前版本"
         );
         assert_eq!(VERSION, 2);
+    }
+
+    /// 固定那张「默认」：没有就补在**第一张**，别的歌单一个不动；已经有了就不动手
+    /// （老文件里没有它也一样补，不升版本号、不丢数据）。
+    #[test]
+    fn the_default_playlist_is_added_once_at_the_front() {
+        let mut store = Store::default();
+        assert!(store.ensure_default(), "本来没有，要补一张");
+        assert_eq!(store.playlists.len(), 1);
+        assert_eq!(store.playlists[0].name, DEFAULT_NAME);
+        assert!(store.playlists[0].songs.is_empty());
+        assert!(!store.ensure_default(), "已经有了就不再动手");
+        assert_eq!(store.playlists.len(), 1);
+
+        // 老文件：只有使用者自己建的一张 → 补在第一张，它自己留在后面。
+        let mut old = Store::default();
+        old.create("通勤").expect("建歌单");
+        assert!(old.ensure_default());
+        assert_eq!(
+            old.playlists.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(),
+            vec![DEFAULT_NAME, "通勤"],
+            "补在第一张，别的原地不动"
+        );
+    }
+
+    /// 「默认」这张：不能改名、不能删；名字也是保留的（新建 / 改名都不许撞上它）。
+    #[test]
+    fn the_default_playlist_cannot_be_renamed_or_deleted() {
+        let mut store = Store::default();
+        store.ensure_default();
+        let index = store.create("通勤").expect("建歌单");
+
+        assert_eq!(store.rename(0, "改个名"), Err(NameError::Reserved));
+        assert_eq!(store.playlists[0].name, DEFAULT_NAME, "名字没动");
+        assert!(!store.delete(0), "删不掉");
+        assert_eq!(store.playlists.len(), 2, "两张都还在");
+
+        assert_eq!(store.create(DEFAULT_NAME), Err(NameError::Reserved), "名字留着");
+        assert_eq!(store.rename(index, DEFAULT_NAME), Err(NameError::Reserved));
+        assert_eq!(store.rename(index, "通勤早"), Ok(()), "别的照旧");
+        assert!(store.delete(index), "别的删得掉");
+        assert_eq!(store.playlists.len(), 1);
+        assert!(store.has_default());
     }
 
     #[test]

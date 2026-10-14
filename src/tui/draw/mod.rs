@@ -155,8 +155,6 @@ impl App {
             self.draw_help(frame, area);
         } else if self.queue_open {
             self.draw_queue(frame, areas.content);
-        } else if self.local_picker.is_some() {
-            self.draw_local_picker(frame, area);
         } else if self.picker.is_some() {
             self.draw_picker(frame, area);
         }
@@ -315,20 +313,25 @@ mod tests {
     use crate::tui::state::Menu;
     use crate::tui::test_support::{test_app, test_song};
 
-    /// 本地歌单屏：一张都没有时给入口；进去看空歌单有话说；文件没了的条目照样列出来、
-    /// 并且标「（已丢失）」。
+    /// 本地歌单屏：一张都没建过时只剩固定那张「默认」；进去看空歌单有话说；文件没了的条目
+    /// 照样列出来、并且标「（已丢失）」。
     #[test]
     fn the_local_playlist_screen_paints_empty_and_lost_entries() {
         let (mut app, _runtime) = test_app();
         app.switch_menu(Menu::LocalPlaylists);
-        let empty = frame_rows(&mut app, 100, 24).join("\n");
-        assert!(empty.contains("还没有本地歌单"), "{empty:?}");
+        // 「默认」是固定那张，所以这一屏永远不空：先删掉它看不行的提示另有测试，这里只看
+        // 只有它一张时的样子。
+        assert_eq!(app.playlists_store.playlists.len(), 1);
+        let listed = frame_rows(&mut app, 100, 24).join("\n");
+        assert!(listed.contains(crate::playlists::DEFAULT_NAME), "{listed:?}");
 
         app.playlists_store.create("通勤").expect("建歌单");
         app.switch_menu(Menu::LocalPlaylists);
         let listed = frame_rows(&mut app, 100, 24).join("\n");
         assert!(listed.contains("通勤"), "{listed:?}");
 
+        // 进「通勤」（第二张）看空歌单。
+        app.apply(crate::tui::keys::Action::Down);
         app.apply(crate::tui::keys::Action::Enter);
         let opened = frame_rows(&mut app, 100, 24).join("\n");
         assert!(opened.contains("空歌单"), "{opened:?}");
@@ -336,7 +339,7 @@ mod tests {
         // 条目在，文件（与曲库）里没有：列表照样画这一行，后面缀一句「（已丢失）」。
         app.apply(crate::tui::keys::Action::Back);
         app.playlists_store.add(
-            0,
+            1,
             &crate::library::entry_to_song(&crate::library::Entry {
                 path: std::path::PathBuf::from("C:/m/gone.wav"),
                 mtime: 0,
@@ -378,8 +381,81 @@ mod tests {
             .push_tracks("id", "QQ 歌单", vec![test_song("m1")]);
         app.switch_menu(Menu::LocalPlaylists);
         let text = frame_rows(&mut app, 100, 24).join("\n");
-        assert!(text.contains("本地歌单1张"), "{text:?}");
+        assert!(text.contains("本地歌单2张"), "{text:?}");
         assert!(!text.contains("本地歌单0首"), "别把 QQ 那一层当成本地层级：{text:?}");
+    }
+
+    /// `p` 的选择框：上「在线歌单」、下「本地歌单」两段；本地歌的浮层里**没有**在线那段；
+    /// 都不再有「新建…」那一行。
+    #[test]
+    fn the_picker_overlay_shows_two_sections() {
+        let (mut app, _runtime) = test_app();
+        app.nav.switch_menu(Menu::Favorites);
+        app.nav.favorites.set_items(vec![test_song("a")]);
+        app.nav.favorites.select_first();
+        app.nav
+            .playlists
+            .set_items(vec![crate::tui::test_support::test_playlist("1", "嗯")]);
+        app.nav.playlists_loaded = true;
+        app.playlists_store.create("通勤").expect("建歌单");
+
+        app.apply(crate::tui::keys::Action::AddToPlaylist);
+        let text = frame_text(&mut app, 100, 30);
+        assert!(text.contains("在线歌单") && text.contains("嗯"), "{text:?}");
+        assert!(text.contains("本地歌单"), "{text:?}");
+        assert!(text.contains("默认") && text.contains("通勤"), "{text:?}");
+        assert!(!text.contains("新建…"), "浮层里不再快捷新建：{text:?}");
+        app.apply(crate::tui::keys::Action::Back);
+
+        // 本地歌：只有本地那一段。
+        app.library = vec![crate::tui::test_support::local_song("C:/m/a.wav")];
+        app.switch_menu(Menu::LocalLibrary);
+        app.apply(crate::tui::keys::Action::AddToPlaylist);
+        let text = frame_text(&mut app, 100, 30);
+        assert!(text.contains("本地歌单") && text.contains("默认"), "{text:?}");
+        assert!(!text.contains("在线歌单"), "本地歌没有在线那段：{text:?}");
+    }
+
+    /// 未登录时在线那段写一句「没登录」，光标落在本地那段（`Enter` 直接加到「默认」）。
+    #[test]
+    fn the_picker_online_section_says_when_not_logged_in() {
+        let (mut app, _runtime) = test_app();
+        app.logged_in = false;
+        app.nav.switch_menu(Menu::Favorites);
+        app.nav.favorites.set_items(vec![test_song("a")]);
+        app.nav.favorites.select_first();
+        app.apply(crate::tui::keys::Action::AddToPlaylist);
+        let text = frame_text(&mut app, 100, 30);
+        assert!(text.contains("没登录"), "{text:?}");
+        assert_eq!(
+            app.picker.as_ref().expect("开着").cur,
+            (crate::tui::state::PickSection::Local, 0)
+        );
+    }
+
+    /// 段内比框高长时（`PICKER_MAX_ROWS` 只封框高）：`List` 自己滚到光标那一行，
+    /// 选中的那个名字一定画得出来（段标题可能滚出去，无所谓）。
+    #[test]
+    fn a_long_picker_section_scrolls_to_the_cursor() {
+        let (mut app, _runtime) = test_app();
+        app.nav.switch_menu(Menu::Favorites);
+        app.nav
+            .favorites
+            .set_items(vec![test_song("a")]);
+        app.nav.favorites.select_first();
+        app.nav.playlists.set_items(
+            (0..20)
+                .map(|index| crate::tui::test_support::test_playlist(&format!("{index}"), &format!("歌单{index:02}")))
+                .collect(),
+        );
+        app.nav.playlists_loaded = true;
+
+        app.apply(crate::tui::keys::Action::AddToPlaylist);
+        for _ in 0..19 {
+            app.apply(crate::tui::keys::Action::Down);
+        }
+        let text = frame_text(&mut app, 100, 30);
+        assert!(text.contains("歌单19"), "光标那一行得画出来：{text:?}");
     }
 
     /// 把一帧按行铺开（每行去空白），要比较「谁在上面」时用得上。
