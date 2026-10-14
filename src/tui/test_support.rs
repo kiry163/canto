@@ -23,11 +23,20 @@ pub(super) fn test_app() -> (App, tokio::runtime::Runtime) {
     let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
     let runtime = tokio::runtime::Runtime::new().expect("测试运行时");
     let (tx, _rx) = channel();
+    // 下载目录也是一个测试一个：`Config::default()` 指的是使用者真实的 `<音乐目录>/canto`，
+    // 下载索引 `downloads.json` 就放在那儿——不换的话这些测试会读使用者的**真实索引**，
+    // 第 5 屏的合并列表跟着变，结果取决于开发机上有没有下载过东西（实测踩过：真机上
+    // 下载过一首之后，几条曲库测试的结果就多了一条）。
+    let mut config = Config::default();
+    config.paths.download_dir = std::env::temp_dir().join(format!(
+        "canto-test-{}-{unique}-downloads",
+        std::process::id()
+    ));
     let mut app = App::new(
         runtime.handle().clone(),
         // 关掉缓存：测试不该往使用者真实的 ~/.cache/canto 里写东西。
         Engine::silent(false),
-        Config::default(),
+        config,
         // 每个测试一个独立的临时历史文件，免得互相看到对方写的。
         std::env::temp_dir().join(format!(
             "canto-test-{}-{unique}-history.json",

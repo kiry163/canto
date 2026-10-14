@@ -367,11 +367,12 @@ pub(super) struct LocalCopy<'a> {
     pub origin: Option<&'static str>,
 }
 
-/// 口径：缓存 > 下载 > 曲库文件 > 按配置下限预估。
+/// 口径：缓存 > 下载索引 > 曲库文件 > 按配置下限预估。
 ///
 /// - 缓存那份的档位能从文件名精确读出（`<mid>.<档位>.<ext>`），体积取真实字节；
-/// - 下载那份与本地文件只读得出**容器**（扩展名）与字节数，不猜 128/320；
-/// - 本地歌（`Source::Local`）直接报自己的容器与 `local_bytes`；
+/// - 下载索引里那份的档位是**下载那一刻记下来的**（`Track.quality`），所以在线列表与第 5 屏
+///   写的是同一个答案；
+/// - 只是被扫到的本地文件读不出码率，写**容器**（扩展名）与 `local_bytes`——写容器是诚实的；
 /// - 都没有才按配置下限算「新取流会取哪一档」（今天的行为）。
 ///
 /// 本地有缓存与下载两份时两个标记都亮，但档位/体积报缓存那份——播放也是先命中缓存。
@@ -384,17 +385,23 @@ pub(super) fn copy_of<'a>(
 ) -> LocalCopy<'a> {
     if song.is_local() {
         let path = song.path();
-        let tier = path
-            .and_then(|path| path.extension())
-            .map_or_else(
-                || "—".to_string(),
-                |ext| crate::download::container_label(&ext.to_string_lossy()),
-            );
         // 本地那条是不是「下载来的」也按索引判（不是按目录位置猜）：历史屏里重播下载歌
-        // 同样该亮 `↓`，「来源」列也写同一份答案。
-        let registered = path.and_then(|path| downloads.mid_of_path(download_dir, path));
+        // 同样该亮 `↓`，「来源」列与档位也写同一份答案。
+        let registered = path
+            .and_then(|path| downloads.mid_of_path(download_dir, path))
+            .and_then(|mid| downloads.by_mid(mid));
+        let tier: Cow<'a, str> = match registered {
+            Some(track) => track.quality.label().into(),
+            None => path
+                .and_then(|path| path.extension())
+                .map_or_else(
+                    || "—".to_string(),
+                    |ext| crate::download::container_label(&ext.to_string_lossy()),
+                )
+                .into(),
+        };
         return LocalCopy {
-            tier: tier.into(),
+            tier,
             size: (song.local_bytes > 0).then_some(song.local_bytes),
             cached: false,
             downloaded: registered.is_some(),
@@ -666,22 +673,23 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("canto-rows-source-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).expect("建目录");
-        let downloaded = dir.join("歌手 - 下载的.flac");
+        let downloaded = dir.join("歌手 - 下载的.mp3");
         std::fs::write(&downloaded, vec![0_u8; 4]).expect("写文件");
-        let downloads = download_index(&[("m1", "歌手 - 下载的.flac", Quality::Flac, 4)]);
+        let downloads = download_index(&[("m1", "歌手 - 下载的.mp3", Quality::Low128, 4)]);
         let nothing = cached_index(&[]);
 
         let mine = crate::tui::test_support::local_song(&downloaded.to_string_lossy());
         let other =
             crate::tui::test_support::local_song(&dir.join("自己的.flac").to_string_lossy());
+        let copy = copy_of(&mine, &nothing, &downloads, &dir, Quality::Low128);
+        assert_eq!(copy.origin, Some("下载"));
         assert_eq!(
-            copy_of(&mine, &nothing, &downloads, &dir, Quality::Low128).origin,
-            Some("下载")
+            copy.tier, "MP3 128k",
+            "登记过的那份写**下载时记下的档位**（跟在线列表同一个答案），不是容器名"
         );
-        assert_eq!(
-            copy_of(&other, &nothing, &downloads, &dir, Quality::Low128).origin,
-            Some("目录")
-        );
+        let copy = copy_of(&other, &nothing, &downloads, &dir, Quality::Low128);
+        assert_eq!(copy.origin, Some("目录"));
+        assert_eq!(copy.tier, "FLAC", "没登记的那份只读得出容器（扩展名）");
         assert_eq!(
             copy_of(
                 &crate::tui::test_support::test_song("m9"),
