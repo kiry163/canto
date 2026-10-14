@@ -150,7 +150,7 @@ pub(super) enum Menu {
     Playlists,
     Search,
     History,
-    /// 本地曲库：数据来自扫出来的索引（`library.rs`），**不发任何网络请求**。
+    /// 本地歌曲（第 5 屏）：数据来自扫出来的索引（`library.rs`）与下载索引，**不发任何网络请求**。
     LocalLibrary,
     /// 本地歌单：使用者自己建的（`playlists.rs`），落 `local_playlists.json`。
     LocalPlaylists,
@@ -180,7 +180,7 @@ impl Menu {
             Menu::Playlists => "在线歌单",
             Menu::Search => "在线搜索",
             Menu::History => "播放历史",
-            Menu::LocalLibrary => "本地曲库",
+            Menu::LocalLibrary => "本地歌曲",
             Menu::LocalPlaylists => "本地歌单",
         }
     }
@@ -387,7 +387,7 @@ pub(super) struct Nav {
     /// 搜索结果单独一份：跟 `tracks` 共用会把正在看的歌单曲目冲掉。
     pub search_results: ListView<Song>,
     pub history_view: ListView<Song>,
-    /// 本地曲库那一屏的列表（扫描结果灌进来，`refresh_local_view` 负责同步）。
+    /// 本地歌曲那一屏的列表（扫描结果灌进来，`refresh_local_view` 负责同步）。
     pub local_view: ListView<Song>,
     /// 本地歌单那一屏：歌单名列一份，「进去看曲目」的曲目另列一份。
     pub local_playlists: ListView<LocalPlaylist>,
@@ -498,7 +498,7 @@ impl Nav {
     /// 返回上一层。返回 `true` 表示这次的 Esc 被吃掉了。
     ///
     /// 两层是**各屏各自**的（`shown` 管 QQ 歌单、`local_shown` 管本地歌单），所以退哪一层
-    /// 看当前屏：在别的屏（收藏 / 搜索 / 本地曲库 / 历史）上按 `Esc` 时，那两层一层都不该动
+    /// 看当前屏：在别的屏（收藏 / 搜索 / 本地歌曲 / 历史）上按 `Esc` 时，那两层一层都不该动
     /// ——以前这里不看屏，于是「在线歌单 › 某歌单」那一层会被那些屏的 `Esc` 悄悄吃掉、
     /// 画面一动不动（连「回首页」这一步也被顶掉），同一个坑的镜像版本见本地歌单那条。
     pub fn pop_tracks(&mut self) -> bool {
@@ -921,13 +921,13 @@ impl App {
         }
     }
 
-    // -- 本地曲库 ------------------------------------------------------------
+    // -- 本地歌曲 ------------------------------------------------------------
 
-    /// 起一次后台扫描：先读索引让「本地曲库」屏**立刻有歌**，再增量补扫，扫完发
+    /// 起一次后台扫描：先读索引让「本地歌曲」屏**立刻有歌**，再增量补扫，扫完发
     /// [`Msg::LibraryReady`]。扫描中再调只出一句提示（同时只允许一次）。
     pub(super) fn start_library_scan(&mut self) {
         if self.library_scanning {
-            self.notify("正在扫描曲库…");
+            self.notify("正在扫描本地歌曲…");
             return;
         }
         let dirs = self.config.library.resolve();
@@ -1246,7 +1246,7 @@ impl App {
 
     /// `P`：把当前选中的本地曲目加进本地歌单（选择框第一行固定是「新建…」）。
     ///
-    /// 只在「本地曲库」屏认：别的屏上选中的歌不一定有本地身份（QQ 歌没有）。
+    /// 只在「本地歌曲」屏认：别的屏上选中的歌不一定有本地身份（QQ 歌没有）。
     fn open_local_picker(&mut self) {
         if self.nav.menu != Menu::LocalLibrary {
             return;
@@ -1686,9 +1686,9 @@ impl App {
                 self.library_scanning = false;
                 // 通知槽只有一个：坏路径最要紧，其次是有变化，再次是「跳过了 N 首」。
                 if let Some(dir) = missing_dirs.first() {
-                    self.notify(format!("曲库目录不存在：{}", dir.display()));
+                    self.notify(format!("本地歌曲目录不存在：{}", dir.display()));
                 } else if added + removed > 0 {
-                    self.notify(format!("本地曲库：新增 {added} · 移除 {removed}"));
+                    self.notify(format!("本地歌曲：新增 {added} · 移除 {removed}"));
                 } else if skipped_unsupported > 0 {
                     self.notify(format!("跳过 {skipped_unsupported} 首不支持的格式"));
                 }
@@ -2069,7 +2069,7 @@ impl App {
             keys::Action::ToggleLyric => self.show_lyric = !self.show_lyric,
             keys::Action::ToggleSpectrum => self.show_spectrum = !self.show_spectrum,
             keys::Action::LyricsLock => self.overlay.toggle_lock(),
-            // `r` 只在「本地曲库」屏重扫：别的屏按 `r` 没有这个含义。
+            // `r` 只在「本地歌曲」屏重扫：别的屏按 `r` 没有这个含义。
             keys::Action::LocalRescan => {
                 if self.nav.menu == Menu::LocalLibrary {
                     self.start_library_scan();
@@ -2232,7 +2232,7 @@ impl App {
         self.logged_in
     }
 
-    /// 这一屏要不要求登录：QQ 三屏要，历史与本地曲库不要。
+    /// 这一屏要不要求登录：QQ 三屏要，历史与本地歌曲不要。
     pub(super) fn qq_screen_available(&self, menu: Menu) -> bool {
         self.logged_in() || !matches!(menu, Menu::Favorites | Menu::Playlists | Menu::Search)
     }
@@ -2319,7 +2319,7 @@ impl App {
         self.refresh_history_view();
     }
 
-    /// 把曲库灌进「本地曲库」屏的列表（选中位置留着，跟历史屏同一套做法）。
+    /// 把曲库灌进「本地歌曲」屏的列表（选中位置留着，跟历史屏同一套做法）。
     pub(super) fn refresh_local_view(&mut self) {
         let previous = self.nav.local_view.state.selected();
         let songs = self.library.clone();
@@ -3149,7 +3149,7 @@ mod tests {
         );
     }
 
-    /// `P` 只认「本地曲库」屏（别的屏按了不做事，也不该冒出一个空选择框）。
+    /// `P` 只认「本地歌曲」屏（别的屏按了不做事，也不该冒出一个空选择框）。
     #[test]
     fn the_local_picker_only_opens_on_the_local_library_screen() {
         let (mut app, _runtime) = test_app();
@@ -3450,7 +3450,7 @@ mod tests {
         assert!(matches!(app.screen, Screen::Home), "没登录也落首页");
     }
 
-    /// 未登录进 QQ 三屏：只给一句提示、**不跳屏**；本地曲库照进。
+    /// 未登录进 QQ 三屏：只给一句提示、**不跳屏**；本地歌曲照进。
     #[test]
     fn qq_screens_refuse_to_open_without_a_session() {
         let (mut app, _runtime) = test_app();
@@ -3488,7 +3488,7 @@ mod tests {
                 title: "曲终人散".to_string(),
                 singers: "张宇".to_string(),
                 at: 2,
-                origin: "本地曲库".to_string(),
+                origin: "本地歌曲".to_string(),
                 local_path: Some(std::path::PathBuf::from("C:/Music/canto/曲终人散.wav")),
                 duration_secs: 0,
                 sizes: crate::model::FileSizes::default(),
@@ -3597,7 +3597,7 @@ mod tests {
         assert_eq!(entries[0].title, "曲终人散");
     }
 
-    /// 本地曲库屏：数据来自曲库，切过去**一个请求都不发**；`r` 只在这一屏重扫。
+    /// 本地歌曲屏：数据来自曲库，切过去**一个请求都不发**；`r` 只在这一屏重扫。
     #[test]
     fn the_local_screen_uses_the_library_and_only_r_rescans_there() {
         let (mut app, _runtime) = test_app();
@@ -3623,7 +3623,7 @@ mod tests {
         );
         app.switch_menu(Menu::LocalLibrary);
         app.apply(keys::Action::LocalRescan);
-        assert!(app.library_scanning, "本地曲库屏才重扫");
+        assert!(app.library_scanning, "本地歌曲屏才重扫");
     }
 
     /// 曲库扫完/进屏时，屏里那份列表要跟着曲库走。
@@ -3991,7 +3991,7 @@ mod tests {
         assert!(matches!(app.screen, Screen::Home), "顶层 Esc 该回首页");
     }
 
-    /// 别的屏记住的层级不许吃掉这一屏的 `Esc`：在「本地曲库」上按 `Esc` 就该回首页，
+    /// 别的屏记住的层级不许吃掉这一屏的 `Esc`：在「本地歌曲」上按 `Esc` 就该回首页，
     /// 「在线歌单 › 某歌单」那一层既不该被退掉、也不该把回首页这一步挡下来。
     ///
     /// （回首页保留其它屏层级是刻意的，见 `going_home_leaves_the_other_screens_levels_alone`；
@@ -4027,7 +4027,7 @@ mod tests {
         }
     }
 
-    /// 本地歌单那一层同理：在本地曲库上按 `Esc` 不该动它（只有「本地歌单」屏自己退它）。
+    /// 本地歌单那一层同理：在本地歌曲上按 `Esc` 不该动它（只有「本地歌单」屏自己退它）。
     #[test]
     fn escape_on_the_local_library_ignores_the_local_playlist_level() {
         let (mut app, _runtime) = crate::tui::test_support::test_app();
@@ -4038,10 +4038,10 @@ mod tests {
 
         app.switch_menu(Menu::LocalLibrary);
         app.apply(keys::Action::Back);
-        assert!(matches!(app.screen, Screen::Home), "本地曲库上 Esc 该回首页");
+        assert!(matches!(app.screen, Screen::Home), "本地歌曲上 Esc 该回首页");
         assert!(
             app.nav.local_shown.is_some(),
-            "本地歌单那一层该留着（Esc 退的是本地曲库，不是它）"
+            "本地歌单那一层该留着（Esc 退的是本地歌曲，不是它）"
         );
     }
 
@@ -4676,7 +4676,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// 冷启动第一次进「本地曲库」（这一屏还没选过）也要有选中行：`Enter/a/x/d` 全按「选中那首」
+    /// 冷启动第一次进「本地歌曲」（这一屏还没选过）也要有选中行：`Enter/a/x/d` 全按「选中那首」
     /// 办事，选中是 `None` 的话那批键一个都不响。
     ///
     /// 回归：`refresh_local_view` 原来把刷新前的选中**无条件**写回，而它可能是 `None`
@@ -4731,7 +4731,7 @@ mod tests {
         );
     }
 
-    /// `r`（本地曲库重扫）也顺手重读下载索引：手工删掉文件之后按一下就该消失。
+    /// `r`（本地歌曲重扫）也顺手重读下载索引：手工删掉文件之后按一下就该消失。
     #[test]
     fn rescanning_the_library_also_refreshes_downloads() {
         let (mut app, _runtime) = test_app();

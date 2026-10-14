@@ -128,7 +128,7 @@ mod tests {
         );
         assert_eq!(
             copy_label(&snapshot(Some(PlaySource::Library), None, Some(31_457_280))),
-            "[曲库 30.0MB]"
+            "[本地 30.0MB]"
         );
     }
 

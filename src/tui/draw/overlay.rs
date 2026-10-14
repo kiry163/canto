@@ -162,7 +162,7 @@ fn help_rows(screen: Option<Menu>, hotkeys: &HotkeyConfig) -> Vec<Row> {
         let (title, section): (&'static str, Vec<Row>) = match menu {
             // 收藏屏没有专属键：`j`/`k` 选曲目、`/` 筛选都是所有列表共有的。
             Menu::Favorites => ("", Vec::new()),
-            // 本地曲库也没有屏专属段：`Enter`/`a`/`A`/`r` 已经在下面「歌曲」那一段里。
+            // 本地歌曲也没有屏专属段：`Enter`/`a`/`A`/`r` 已经在下面「歌曲」那一段里。
             Menu::LocalLibrary => ("", Vec::new()),
             Menu::LocalPlaylists => (
                 "本地歌单",
@@ -229,14 +229,14 @@ fn help_rows(screen: Option<Menu>, hotkeys: &HotkeyConfig) -> Vec<Row> {
         Row::Keys { keys: "← / →", help: "后退 / 前进 10 秒" },
         Row::Keys { keys: "+ / -", help: "音量 ±5%" },
     ]);
-    // 本地曲库屏：曲目那一套少一半——本地歌没有 QQ 身份，`d`/`p`/`x` 不绑，别许诺。
+    // 本地歌曲屏：曲目那一套少一半——本地歌没有 QQ 身份，`d`/`p`/`x` 不绑，别许诺。
     if matches!(screen, Some(Menu::LocalLibrary)) {
         rows.extend([
             Row::Section("歌曲"),
             Row::Keys { keys: "Enter", help: "播放选中" },
             Row::Keys { keys: "a / A", help: "追加到队尾 / 插到下一首" },
             Row::Keys { keys: "P", help: "加进本地歌单" },
-            Row::Keys { keys: "r", help: "重扫曲库" },
+            Row::Keys { keys: "r", help: "重扫（本地歌曲目录 + 下载索引）" },
         ]);
     } else if matches!(screen, Some(Menu::LocalPlaylists)) {
         rows.extend([
@@ -409,7 +409,7 @@ mod tests {
         assert_eq!(pretty(""), "", "空串不该进表，但也不该炸");
     }
 
-    /// 本地曲库屏的帮助：列 `r`，不列 QQ 专有的 `d`/`p`/`x`（本地歌没有 QQ 身份）。
+    /// 本地歌曲屏的帮助：列 `r`，不列 QQ 专有的 `d`/`p`/`x`（本地歌没有 QQ 身份）。
     #[test]
     fn the_local_screen_help_omits_qq_only_keys() {
         let rows = help_rows(

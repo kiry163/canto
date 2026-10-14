@@ -162,8 +162,9 @@ pub(super) fn track_columns() -> Vec<Column> {
     ]
 }
 
-/// 本地曲库：本地歌不经过缓存，也不叫「下载」——那两列整列恒空，不如不画；
-/// 换成 `来源`（这份是下载来的还是在目录里扫到的）——第 5 屏是两拨合起来的，得看得出区别。
+/// 本地歌曲（第 5 屏）：本地歌不经过缓存，也不叫「下载」——那两列整列恒空，不如不画；
+/// 换成 `来源`（`下载` = 下载索引里登记的 / `本地` = 本地歌曲目录里扫到的）——这一屏是两拨
+/// 合起来的，得看得出区别。
 pub(super) fn local_columns() -> Vec<Column> {
     vec![
         column(Field::Marker, "", MARKER, Align::Left),
@@ -362,7 +363,7 @@ pub(super) struct LocalCopy<'a> {
     pub size: Option<u64>,
     pub cached: bool,
     pub downloaded: bool,
-    /// 本地那份是哪儿来的：`下载`（路径在下载索引里）/ `目录`（只被曲库扫到）。
+    /// 本地那份是哪儿来的：`下载`（路径在下载索引里）/ `本地`（只被本地歌曲目录扫到）。
     /// 非本地歌是 `None`——那一列只有本地屏有。
     pub origin: Option<&'static str>,
 }
@@ -405,7 +406,7 @@ pub(super) fn copy_of<'a>(
             size: (song.local_bytes > 0).then_some(song.local_bytes),
             cached: false,
             downloaded: registered.is_some(),
-            origin: Some(if registered.is_some() { "下载" } else { "目录" }),
+            origin: Some(if registered.is_some() { "下载" } else { "本地" }),
         };
     }
     if let Some((quality, bytes)) = cached.get(&song.mid) {
@@ -666,7 +667,7 @@ mod tests {
         assert!(narrow.contains(&Field::Title) && narrow.contains(&Field::Duration));
     }
 
-    /// 本地那份的「来源」：下载索引里登记过 → `下载`，只在曲库目录里 → `目录`；
+    /// 本地那份的「来源」只有两个值：下载索引里登记过 → `下载`，只被本地歌曲目录扫到 → `本地`；
     /// QQ 歌没这一格（那是另一个屏的列）。
     #[test]
     fn a_row_says_where_the_bytes_came_from() {
@@ -688,7 +689,7 @@ mod tests {
             "登记过的那份写**下载时记下的档位**（跟在线列表同一个答案），不是容器名"
         );
         let copy = copy_of(&other, &nothing, &downloads, &dir, Quality::Low128);
-        assert_eq!(copy.origin, Some("目录"));
+        assert_eq!(copy.origin, Some("本地"));
         assert_eq!(copy.tier, "FLAC", "没登记的那份只读得出容器（扩展名）");
         assert_eq!(
             copy_of(

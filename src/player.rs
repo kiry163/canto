@@ -47,7 +47,7 @@ pub enum PlaySource {
     Cache,
     /// 下载目录里那份（`歌手 - 标题` 这个文件名认出来的）。
     Download,
-    /// 本地曲库（`[library] dirs` 扫出来的曲目，路径就写在 `Song` 上）。
+    /// 本地歌曲（`[library] dirs` 扫出来的曲目，路径就写在 `Song` 上）——标签写「本地」。
     Library,
 }
 
@@ -58,7 +58,7 @@ impl PlaySource {
             PlaySource::Online => "在线",
             PlaySource::Cache => "缓存",
             PlaySource::Download => "下载",
-            PlaySource::Library => "曲库",
+            PlaySource::Library => "本地",
         }
     }
 }
@@ -89,7 +89,7 @@ pub enum TrackSource {
 /// 内部写死 `paths::cache_dir()`：这条判定要能拿一个临时目录测。
 ///
 /// 来源标签（[`PlaySource`]）按**数据**定，不按「你从哪屏进来」：这份路径在下载索引里就写
-/// 「下载」，否则「曲库」——同一份文件从任何入口播都是同一个答案。
+/// 「下载」，否则「本地」——同一份文件从任何入口播都是同一个答案。
 pub fn local_copy(
     song: &Song,
     cache_dir: Option<&std::path::Path>,
@@ -173,7 +173,7 @@ pub struct Snapshot {
     pub title: Option<String>,
     /// 正在播那首的 mid（界面用来在列表里标 `♪`；mid 全局唯一，比标题可靠）。
     pub mid: Option<String>,
-    /// 这份字节从哪来（在线 / 缓存 / 下载 / 曲库）。`Buffering` 时还是 `None`。
+    /// 这份字节从哪来（在线 / 缓存 / 下载 / 本地）。`Buffering` 时还是 `None`。
     pub source: Option<PlaySource>,
     /// 实际开出来的档位（`Buffering` 时还是 `None`）。
     pub quality: Option<Quality>,
@@ -822,7 +822,7 @@ mod tests {
         );
     }
 
-    /// 来源标签按**数据**定：这份路径在下载索引里就写「下载」，只在曲库目录里就写「曲库」
+    /// 来源标签按**数据**定：这份路径在下载索引里就写「下载」，只在本地歌曲目录里就写「本地」
     /// ——同一份文件从哪屏播都是同一个答案。
     #[test]
     fn a_local_file_is_labelled_by_which_index_owns_it() {
@@ -852,7 +852,7 @@ mod tests {
         assert_eq!(
             local(local_copy(&mine_own, None, &downloads, &dir)),
             Some((other_path, None, PlaySource::Library)),
-            "只在曲库目录里（下载索引没登记它）"
+            "只在本地歌曲目录里（下载索引没登记它）"
         );
     }
 
@@ -877,7 +877,7 @@ mod tests {
         assert_eq!(
             opened.source,
             PlaySource::Library,
-            "播放条要报得出这份是曲库来的"
+            "播放条要报得出这份是本地歌曲来的"
         );
         assert!(
             opened.quality.is_none(),

@@ -126,19 +126,19 @@ impl App {
             };
             self.draw_spectrum_area(frame, area, &title);
         } else if matches!(self.screen, Screen::Home) {
-            // 首页先判：`go_home()` 只动 `screen`，`nav.menu` 还记着上一屏（比如刚从「本地曲库」
-            // 按 `Esc` 回来）——本地曲库那条分支排在它前面的话，状态行提示是首页那套、
+            // 首页先判：`go_home()` 只动 `screen`，`nav.menu` 还记着上一屏（比如刚从「本地歌曲」
+            // 按 `Esc` 回来）——本地歌曲那条分支排在它前面的话，状态行提示是首页那套、
             // 画面却还是曲库那屏，看着就像「`Esc` 没反应」。
             self.draw_home(frame, areas.content);
         } else if self.nav.menu == Menu::LocalLibrary {
-            // 本地曲库：列表来自索引，**不发任何请求**；空曲库给配置引导，扫描中带进度。
+            // 本地歌曲：列表来自索引，**不发任何请求**；空列表给配置引导，扫描中带进度。
             if self.library.is_empty() {
                 self.draw_empty_library(frame, areas.content);
             } else {
                 let title = if self.library_scanning {
-                    format!(" 本地曲库 · 扫描中 {} 首 ", self.library.len())
+                    format!(" 本地歌曲 · 扫描中 {} 首 ", self.library.len())
                 } else {
-                    format!(" 本地曲库 · {} 首 ", self.library.len())
+                    format!(" 本地歌曲 · {} 首 ", self.library.len())
                 };
                 self.draw_songs(frame, areas.content, &title);
             }
@@ -364,7 +364,7 @@ mod tests {
         app.go_home();
         let text = frame_rows(&mut app, 120, 40).join("\n");
         assert!(text.contains("1在线收藏"), "{text:?}");
-        assert!(text.contains("5本地曲库"), "{text:?}");
+        assert!(text.contains("5本地歌曲"), "{text:?}");
         assert!(text.contains("6本地歌单"), "{text:?}");
         assert!(text.contains("1-6直跳"), "{text:?}");
     }
@@ -825,10 +825,10 @@ mod tests {
         assert!(!text.contains("▶1在线收藏"), "`▶` 只该在选中那格：{text}");
     }
 
-    /// 从「本地曲库」回首页，画出来的**必须是首页那排格子**。
+    /// 从「本地歌曲」回首页，画出来的**必须是首页那排格子**。
     ///
-    /// 回归：`draw` 里「本地曲库」那条分支原来排在 `Screen::Home` 之前，而 `go_home()` 不动
-    /// `nav.menu` —— 于是 `Esc`/`0` 回首页后状态是首页、画面还是曲库那屏（看着像「Esc 没反应」）。
+    /// 回归：`draw` 里「本地歌曲」那条分支原来排在 `Screen::Home` 之前，而 `go_home()` 不动
+    /// `nav.menu` —— 于是 `Esc`/`0` 回首页后状态是首页、画面还是那一屏（看着像「Esc 没反应」）。
     #[test]
     fn coming_home_from_the_local_library_draws_the_home_grid() {
         let (mut app, _runtime) = test_app();
@@ -836,8 +836,8 @@ mod tests {
             vec![crate::tui::test_support::local_song("C:/Music/canto/曲终人散.flac")];
         app.switch_menu(Menu::LocalLibrary);
         assert!(
-            frame_flat(&mut app, 120, 40).contains("本地曲库"),
-            "前提：这一屏画的是本地曲库"
+            frame_flat(&mut app, 120, 40).contains("本地歌曲"),
+            "前提：这一屏画的是本地歌曲"
         );
 
         app.apply(crate::tui::keys::Action::Back);
@@ -845,10 +845,10 @@ mod tests {
         let text = frame_flat(&mut app, 120, 40);
         assert!(matches!(app.screen, Screen::Home), "状态上该回首页");
         assert!(text.contains("1在线收藏"), "画出来的得是首页那排格子：{text}");
-        // 高亮落在「本地曲库」那一格（`go_home()` 记住的就是它）——曲库那屏自己没有这串。
-        assert!(text.contains("▶5本地曲库"), "高亮该在曲库那一格：{text}");
-        // 曲库那屏的标题带条数（`本地曲库 · 1 首`），首页格子不带。
-        assert!(!text.contains("本地曲库·1首"), "不该还留着曲库那屏：{text}");
+        // 高亮落在「本地歌曲」那一格（`go_home()` 记住的就是它）——那一屏自己没有这串。
+        assert!(text.contains("▶5本地歌曲"), "高亮该在第五格：{text}");
+        // 那一屏的标题带条数（`本地歌曲 · 1 首`），首页格子不带。
+        assert!(!text.contains("本地歌曲·1首"), "不该还留着那一屏：{text}");
     }
 
     /// 最小窗口（内容区 10 行）与常规 80×24 里，四格都在界内。
@@ -1022,7 +1022,7 @@ mod tests {
         );
     }
 
-    /// 本地曲库屏：列曲目（体积 `—`、时长未知 `--:--`）、空曲库给配置引导、首页第五格。
+    /// 本地歌曲屏：列曲目（体积 `—`、时长未知 `--:--`）、空列表给配置引导、首页第五格。
     #[test]
     fn the_local_library_screen_lists_files_and_explains_an_empty_one() {
         let (mut app, _runtime) = test_app();
@@ -1043,11 +1043,12 @@ mod tests {
         let empty = frame_text(&mut app, 140, 40);
         assert!(
             empty.contains("[library]") && empty.contains("dirs"),
-            "空曲库要说清去哪儿加目录：{empty}"
+            "空列表要说清去哪儿加目录：{empty}"
         );
+        assert!(empty.contains("本地歌曲是空的"), "{empty}");
 
         app.go_home();
-        assert!(frame_text(&mut app, 140, 40).contains("本地曲库"), "首页第五格");
+        assert!(frame_text(&mut app, 140, 40).contains("5本地歌曲"), "首页第五格");
     }
 
     /// 没有歌词也画歌词栏：还在拉写「歌词加载中…」，拉完没有写「暂无歌词」。
@@ -1614,7 +1615,7 @@ mod tests {
         std::fs::remove_dir_all(&app.config.paths.download_dir).ok();
     }
 
-    /// 本地曲库屏：容器（扩展名）与真实大小，不再显示配置档位。
+    /// 本地歌曲屏：容器（扩展名）与真实大小，不再显示配置档位。
     #[test]
     fn a_local_row_reports_its_own_container_and_size() {
         let (mut app, _runtime) = test_app();

@@ -60,7 +60,7 @@ pub enum Action {
     LocalPlaylistCreate,
     /// `R`：给选中的本地歌单改名（本地歌单屏）。
     LocalPlaylistRename,
-    /// `P`：把选中的本地曲目加进本地歌单（本地曲库屏）。
+    /// `P`：把选中的本地曲目加进本地歌单（本地歌曲屏）。
     LocalPlaylistAdd,
     /// 本地歌单名字输入态里打的字。
     LocalInputChar(char),
@@ -83,12 +83,12 @@ pub enum Action {
     InputBackspace,
     /// 全局热键 `desktop_lyrics_lock`：切桌面歌词的锁定/解锁（界面上没有对应按键）。
     LyricsLock,
-    /// 本地曲库屏的 `r`：重扫曲库（把索引丢了重来）。
+    /// 本地歌曲屏的 `r`：重扫曲库（把索引丢了重来）。
     LocalRescan,
     /// 全局热键 `desktop_lyrics_toggle`：开 / 关桌面歌词窗口——关掉是把窗口**拆了**（不是藏起来），
     /// 状态记在 `desktop-lyrics.json`（界面上没有对应按键）。
     LyricsWindow,
-    /// 登录屏的 `Esc`：不登录，回首页（本地曲库照样能用）。
+    /// 登录屏的 `Esc`：不登录，回首页（本地歌曲照样能用）。
     LoginBack,
     /// `0`：回首页（屏幕层最外的那一层，各屏入口与编号都在它上面）。
     Home,
@@ -165,7 +165,7 @@ pub fn resolve(context: Context, key: KeyEvent) -> Option<Action> {
             KeyCode::Char('c') => Some(Action::LoginCookie),
             KeyCode::Char('o') => Some(Action::LoginOpenPng),
             KeyCode::Char('r') => Some(Action::LoginRetry),
-            // 不登录，回首页：本地曲库与历史照样能用。
+            // 不登录，回首页：本地歌曲与历史照样能用。
             KeyCode::Esc => Some(Action::LoginBack),
             KeyCode::Char('q') => Some(Action::Quit),
             _ => None,
@@ -269,7 +269,7 @@ fn common(key: KeyEvent) -> Option<Action> {
         // 小写 `n` 是「下一首」，别抢。
         KeyCode::Char('N') => Some(Action::LocalPlaylistCreate),
         KeyCode::Char('R') => Some(Action::LocalPlaylistRename),
-        // `P`（大写）：把本地曲目加进本地歌单（只有「本地曲库」屏认，见 `state.rs` 的分岔）。
+        // `P`（大写）：把本地曲目加进本地歌单（只有「本地歌曲」屏认，见 `state.rs` 的分岔）。
         KeyCode::Char('P') => Some(Action::LocalPlaylistAdd),
         KeyCode::Char('d') => Some(Action::Download),
         KeyCode::Char('y') => Some(Action::ToggleLyric),
@@ -277,7 +277,7 @@ fn common(key: KeyEvent) -> Option<Action> {
         KeyCode::Char('v') => Some(Action::ToggleSpectrum),
         // `/` 筛当前列表；搜索屏有自己的入口（菜单第 3 项）。
         KeyCode::Char('/') => Some(Action::Filter),
-        // `r` 在「本地曲库」屏是重扫曲库（别的屏按了没反应，见 `state.rs` 的分岔）。
+        // `r` 在「本地歌曲」屏是重扫曲库（别的屏按了没反应，见 `state.rs` 的分岔）。
         KeyCode::Char('r') => Some(Action::LocalRescan),
         // 可能有上一层（「在线歌单 › 某歌单」）：Esc 一层层退。
         KeyCode::Esc | KeyCode::Backspace => Some(Action::Back),
@@ -569,7 +569,7 @@ mod tests {
         );
         assert_eq!(press(Context::LocalInput, KeyCode::Enter), Some(Action::LocalInputSubmit));
         assert_eq!(press(Context::LocalInput, KeyCode::Esc), Some(Action::LocalInputCancel));
-        // `P` 只绑在「本地曲库」屏（状态层按 menu 分岔）。
+        // `P` 只绑在「本地歌曲」屏（状态层按 menu 分岔）。
         assert_eq!(press(Context::Content, KeyCode::Char('P')), Some(Action::LocalPlaylistAdd));
         // 选择框（本地那套跟 QQ 那套共用同一个上下文）：上下移、回车确认、Esc 取消。
         assert_eq!(press(Context::PlaylistPicker, KeyCode::Char('j')), Some(Action::Down));

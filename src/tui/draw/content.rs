@@ -72,7 +72,7 @@ impl App {
             Menu::LocalPlaylists
                 if self.nav.local_shown.is_some() && self.nav.local_tracks.items().is_empty() =>
             {
-                frame.render_widget(super::empty_panel("空歌单 · 曲库里按 P 把歌加进来", &title), area);
+                frame.render_widget(super::empty_panel("空歌单 · 本地歌曲里按 P 把歌加进来", &title), area);
             }
             Menu::Search => {
                 // 输入行占第一行（Task 7 把它做成常驻），结果在下面。
@@ -232,18 +232,18 @@ impl App {
         self.nav.song_view_mut().state = state;
     }
 
-    /// 空曲库：说清这一屏的两半来源（下载来的 + 扫出来的），不是一片空白。
+    /// 空列表：说清这一屏的两半来源（下载来的 + 本地歌曲目录扫出来的），不是一片空白。
     pub(super) fn draw_empty_library(&self, frame: &mut Frame, area: Rect) {
         let text = Line::from(vec![
-            Span::styled("本地曲库是空的", Style::new().fg(Color::Yellow)),
+            Span::styled("本地歌曲是空的", Style::new().fg(Color::Yellow)),
             Span::raw("：按 d 下载的歌会进来；想扫自己的目录就在 config.toml 的 [library] dirs 里写路径，再按 r"),
         ]);
-        frame.render_widget(Paragraph::new(text).block(panel_block(" 本地曲库 ")), area);
+        frame.render_widget(Paragraph::new(text).block(panel_block(" 本地歌曲 ")), area);
     }
 
-    /// 曲目列表：所有「装着一堆歌」的屏共用（收藏 / 歌单曲目 / 搜索 / 本地曲库 / 本地歌单曲目）。
+    /// 曲目列表：所有「装着一堆歌」的屏共用（收藏 / 歌单曲目 / 搜索 / 本地歌曲 / 本地歌单曲目）。
     ///
-    /// 列集按屏声明（本地曲库没有缓存/下载两列），宽度按窗口让位（见 `rows::fit`）。表头画在
+    /// 列集按屏声明（本地歌曲没有缓存/下载两列），宽度按窗口让位（见 `rows::fit`）。表头画在
     /// 列表块**内部**（先 `Block::inner` 再 `rows::group`），所以 `draw::layout` 不用动。
     pub(super) fn draw_songs(&mut self, frame: &mut Frame, area: Rect, title: &str) {
         let columns = match self.nav.menu {
@@ -294,7 +294,7 @@ impl App {
         playing: Option<&str>,
         want: Quality,
     ) -> rows::Row<'a> {
-        // 本地条目（本地曲库 / 本地歌单 / 历史里的本地条目）：曲库那份比快照新，优先用它。
+        // 本地条目（本地歌曲 / 本地歌单 / 历史里的本地条目）：曲库那份比快照新，优先用它。
         let fresh = library.get(song.mid.as_str()).copied();
         let source = fresh.unwrap_or(song);
         let copy = rows::copy_of(
