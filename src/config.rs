@@ -66,20 +66,17 @@ impl Default for PlaybackConfig {
     }
 }
 
-/// `[paths]` 段：两个落盘目录。
+/// `[paths]` 段：落盘目录。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathsConfig {
-    /// 歌曲下载目录（`d` 键）。
+    /// 下载目录（`d` 键落盘的歌曲、跟着它走的歌词、以及下载索引 `downloads.json` 都放这儿）。
     pub download_dir: PathBuf,
-    /// 歌词下载目录（跟歌曲分开放）。
-    pub lyrics_dir: PathBuf,
 }
 
 impl Default for PathsConfig {
     fn default() -> Self {
         Self {
             download_dir: default_download_dir(),
-            lyrics_dir: default_lyrics_dir(),
         }
     }
 }
@@ -130,16 +127,6 @@ pub fn default_download_dir() -> PathBuf {
     dirs::audio_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("canto")
-}
-
-/// 默认歌词目录：`<系统音乐目录>/canto-lyrics`。
-///
-/// 刻意跟歌曲目录**平级分开**：翻目录时不至于一首歌夹着两三个 `.lrc`，
-/// 也方便本地播放器或脚本按固定位置去取。
-pub fn default_lyrics_dir() -> PathBuf {
-    dirs::audio_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("canto-lyrics")
 }
 
 /// `[hotkeys]` 段：canto 在后台（没聚焦）时也能控制播放。
@@ -258,22 +245,19 @@ impl Rgb {
     }
 }
 
-/// `[library]` 段：本地曲库目录。
+/// `[library]` 段：本地曲库额外扫哪些目录。
 ///
-/// `dirs` 是 `Option`，因为「没写」与「写成空表」是两件事：没写 = 就扫下载目录；
-/// 写了空表 = 本地功能整体关掉（首页那一格也不画）。
+/// 两态：不写 / 空表 = **不扫别人的目录**（第 5 屏只列下载索引里那批歌）；列表 = 再加上这些。
+/// 下载目录永远被跳过（那批歌由下载索引管，扫了会重复一遍）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LibraryConfig {
-    pub dirs: Option<Vec<String>>,
+    pub dirs: Vec<String>,
 }
 
 impl LibraryConfig {
     /// 真正要扫的目录。相对路径原样留着（跟 `download_dir` 的语义一致，按当前工作目录解析）。
-    pub fn resolve(&self, download_dir: &Path) -> Vec<PathBuf> {
-        match &self.dirs {
-            None => vec![download_dir.to_path_buf()],
-            Some(dirs) => dirs.iter().map(PathBuf::from).collect(),
-        }
+    pub fn resolve(&self) -> Vec<PathBuf> {
+        self.dirs.iter().map(PathBuf::from).collect()
     }
 }
 
@@ -540,12 +524,9 @@ fn paths_config(table: Option<&toml::Table>, warnings: &mut Vec<String>) -> Path
         return config;
     };
     let mut section = Section::new("paths", table, warnings);
-    section.unknown(&["download_dir", "lyrics_dir"]);
+    section.unknown(&["download_dir"]);
     if let Some(text) = section.string("download_dir") {
         config.download_dir = expand_home(&text);
-    }
-    if let Some(text) = section.string("lyrics_dir") {
-        config.lyrics_dir = expand_home(&text);
     }
     config
 }
@@ -611,9 +592,7 @@ fn library_config(table: Option<&toml::Table>, warnings: &mut Vec<String>) -> Li
     };
     let mut section = Section::new("library", table, warnings);
     section.unknown(&["dirs"]);
-    if let Some(dirs) = section.string_list("dirs") {
-        config.dirs = Some(dirs);
-    }
+    config.dirs = section.string_list("dirs").unwrap_or_default();
     config
 }
 
@@ -895,7 +874,6 @@ fn render_default() -> String {
         .collect();
     // 路径按平台来：Windows 上是 `C:\Users\...`，必须写成字面串（见 `toml_literal`）。
     let download_dir = toml_literal(&default.paths.download_dir.to_string_lossy());
-    let lyrics_dir = toml_literal(&default.paths.lyrics_dir.to_string_lossy());
     let data_dir = paths::data_dir().display().to_string();
     let cache_dir = paths::cache_dir().display().to_string();
     let font = toml_literal(&default.desktop_lyrics.font);
@@ -914,13 +892,11 @@ fn render_default() -> String {
          quality = \"{}\"\n\
          \n\
          [paths]\n\
-         # 下载目录（`d` 键落盘的歌曲），支持 `~`\n\
+         # 下载目录（`d` 键落盘的歌曲、跟着它走的歌词、以及下载索引 downloads.json 都放这儿），支持 `~`\n\
          download_dir = {download_dir}\n\
-         # 歌词目录（下载时另存的 .lrc，跟歌曲分开放），支持 `~`\n\
-         lyrics_dir = {lyrics_dir}\n\
          \n\
          [cache]\n\
-         # 播放缓存上限（MB，0 = 关掉）；缓存在 {cache_dir}，按「最久没听的先删」维护\n\
+         # 播放缓存上限（MB，0 = 关掉）；缓存在 {cache_dir}（音频与歌词同目录），按「最久没听的先删」维护\n\
          mb = {}\n\
          \n\
          [history]\n\
@@ -932,9 +908,9 @@ fn render_default() -> String {
          notice_seconds = {}\n\
          \n\
          [library]\n\
-         # 本地曲库扫哪些目录（`5` 那屏；`r` 重扫）。**不写 dirs = 只扫上面的 download_dir**：\n\
-         #   dirs = []            → 本地功能整体关掉（首页不画「本地曲库 / 本地歌单」两格）\n\
-         #   dirs = ['D:/music']  → 就扫这些（不再顺手带上 download_dir），相对路径按启动时的工作目录算\n\
+         # 本地曲库额外扫哪些目录（第 5 屏；`r` 重扫）。**下载目录会被自动跳过**（那批歌由下载索引管）：\n\
+         #   不写 / dirs = []     → 不扫别人的目录（第 5 屏只列已下载的歌）\n\
+         #   dirs = ['D:/music']  → 再加上这些目录里的文件（相对路径按启动时的工作目录算）\n\
          # dirs = ['D:/music', 'E:/flac']\n\
          \n\
          [hotkeys]\n\
@@ -1032,7 +1008,6 @@ mod tests {
 quality = \"flac\"
 [paths]
 download_dir = 'D:/songs'
-lyrics_dir = 'D:/lyrics'
 [cache]
 mb = 16
 [history]
@@ -1053,14 +1028,10 @@ color = '#102030'
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(config.playback.quality, Quality::Flac);
         assert_eq!(config.paths.download_dir, PathBuf::from("D:/songs"));
-        assert_eq!(config.paths.lyrics_dir, PathBuf::from("D:/lyrics"));
         assert_eq!(config.cache.mb, 16);
         assert_eq!(config.history.limit, 7);
         assert_eq!(config.ui.notice_seconds, 30);
-        assert_eq!(
-            config.library.dirs.as_deref(),
-            Some(&["E:/one".to_string(), "E:/two".to_string()][..])
-        );
+        assert_eq!(config.library.dirs, vec!["E:/one".to_string(), "E:/two".to_string()]);
         assert_eq!(config.desktop_lyrics.font, "Noto Sans");
         assert_eq!(config.desktop_lyrics.font_size, 36);
         assert_eq!(config.desktop_lyrics.opacity, 40);
@@ -1248,46 +1219,11 @@ color = '#102030'
         assert!(warning.contains("red"), "{warnings:?}");
     }
 
-    /// `[library]` 的三种写法各是各的意思（这就是模板里那段注释要讲清的东西）。
-    #[test]
-    fn the_three_library_forms_mean_three_things() {
-        let download = Path::new("C:/Music/canto");
-
-        let (config, warnings) = parse("[cache]\nmb = 1\n");
-        assert_eq!(
-            config.library.resolve(download),
-            vec![download.to_path_buf()],
-            "不写 = 就扫下载目录"
-        );
-        assert!(warnings.is_empty(), "{warnings:?}");
-
-        let (config, warnings) = parse("[library]\ndirs = []\n");
-        assert!(
-            config.library.resolve(download).is_empty(),
-            "空表 = 本地功能关掉"
-        );
-        assert!(
-            warnings.is_empty(),
-            "空表是明确关闭，不是配置错误：{warnings:?}"
-        );
-
-        let (config, warnings) = parse("[library]\ndirs = ['D:/music', 'E:/flac']\n");
-        assert_eq!(
-            config.library.resolve(download),
-            vec![PathBuf::from("D:/music"), PathBuf::from("E:/flac")],
-            "写了就以写的为准，不再顺手带上下载目录"
-        );
-        assert!(warnings.is_empty(), "{warnings:?}");
-    }
-
     /// 数组里混进非字符串：只丢那一个并点名，别的照用。
     #[test]
     fn a_bad_library_entry_is_dropped_and_named() {
         let (config, warnings) = parse("[library]\ndirs = ['D:/music', 3]\n");
-        assert_eq!(
-            config.library.dirs.as_deref(),
-            Some(&["D:/music".to_string()][..])
-        );
+        assert_eq!(config.library.dirs, vec!["D:/music".to_string()]);
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("[library] dirs"), "{warnings:?}");
     }
@@ -1442,7 +1378,6 @@ color = '#102030'
         let (config, warnings) = parse("[playback]\nquality = \"flac\"\n");
         assert_eq!(config.playback.quality, Quality::Flac);
         assert_eq!(config.paths.download_dir, default_download_dir());
-        assert_eq!(config.paths.lyrics_dir, default_lyrics_dir());
         assert_eq!(config.cache.mb, DEFAULT_CACHE_MB);
         assert_eq!(config.history.limit, 500);
         assert_eq!(config.ui.notice_seconds, 4);
@@ -1464,19 +1399,14 @@ color = '#102030'
     #[test]
     fn windows_paths_survive_the_template_round_trip() {
         let text = format!(
-            "[paths]\ndownload_dir = {}\nlyrics_dir = {}\n",
+            "[paths]\ndownload_dir = {}\n",
             toml_literal(r"C:\Users\me\Music\canto"),
-            toml_literal(r"C:\Users\me\Music\canto-lyrics"),
         );
         let (config, warnings) = parse(&text);
         assert!(warnings.is_empty(), "路径不该让配置解析失败：{warnings:?}");
         assert_eq!(
             config.paths.download_dir,
             PathBuf::from(r"C:\Users\me\Music\canto")
-        );
-        assert_eq!(
-            config.paths.lyrics_dir,
-            PathBuf::from(r"C:\Users\me\Music\canto-lyrics")
         );
     }
 
@@ -1511,7 +1441,6 @@ color = '#102030'
         for key in [
             "quality",
             "download_dir",
-            "lyrics_dir",
             "mb =",
             "limit =",
             "notice_seconds =",
@@ -1526,6 +1455,11 @@ color = '#102030'
         ] {
             assert!(text.contains(key), "模板里缺 {key}：{text}");
         }
+        // 删掉的键不许再出现在模板里（写进去就等于教人改一个不生效的键）。
+        assert!(
+            !text.contains("lyrics_dir"),
+            "`[paths] lyrics_dir` 已经删了：{text}"
+        );
         // 值一律跟着默认值走（改了默认值模板就跟着走，不会说岔）。
         for line in [
             format!("quality = \"{}\"", default.playback.quality.token()),
@@ -1619,8 +1553,8 @@ color = '#102030'
         );
     }
 
-    /// `[library] dirs` 是个特例：**缺这个键 = 默认行为**，所以模板里只能是注释，
-    /// 写进去反而会把「扫下载目录」变成「本地功能关掉」。
+    /// `[library] dirs` 是个特例：**缺这个键 = 默认行为**（不扫别人的目录），所以模板里只能是
+    /// 注释，写进去就把「不扫」变成「扫这一条」了。
     #[test]
     fn the_template_leaves_library_dirs_commented_out() {
         let text = render_default();
@@ -1637,10 +1571,14 @@ color = '#102030'
                 "只有注释形式才对：{line}"
             );
         }
-        // 三种写法都讲清楚（不写 = 扫下载目录 / 空表 = 关掉 / 列表 = 就扫这些）。
-        assert!(text.contains("不写 dirs"), "{text}");
-        assert!(text.contains("dirs = []"), "{text}");
-        assert!(text.contains("本地功能整体关掉"), "{text}");
+        // 两态都讲清楚（不写 / 空表 = 不扫别人的目录；列表 = 再加上这些），
+        // 外加一句「下载目录会被跳过」——它是这一屏的另一半来源。
+        assert!(text.contains("不写 / dirs = []"), "{text}");
+        assert!(text.contains("下载目录会被自动跳过"), "{text}");
+        assert!(
+            !text.contains("本地功能整体关掉"),
+            "那个状态已经取消了：{text}"
+        );
     }
 
     /// 固定路径、状态文件这些「不在文件里但人得知道在哪」的东西，模板末尾要列出来。
@@ -1712,6 +1650,33 @@ color = '#102030'
         assert!(backup.is_none());
         assert!(path.exists());
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// 同一秒里跑两次：两份备份，谁也不覆盖谁。
+    /// `[paths] lyrics_dir` 删了：老配置里残留的那个键要点名，别的键照旧（歌词现在跟着音频走，
+    /// 见 `download::save`）。
+    #[test]
+    fn lyrics_dir_is_gone_and_named_as_unknown() {
+        let (config, warnings) = parse("[paths]\ndownload_dir = 'D:/songs'\nlyrics_dir = 'D:/lyrics'\n");
+        assert_eq!(config.paths.download_dir, PathBuf::from("D:/songs"));
+        let joined = warnings.join("\n");
+        assert!(joined.contains("lyrics_dir"), "要点名：{joined}");
+        assert!(joined.contains("[paths]"), "{joined}");
+    }
+
+    /// `[library] dirs` 两态：不写 / 空表 = 不扫别人的目录；列表 = 就扫这些。
+    /// 两种都不再回退到「顺手扫下载目录」（那批歌由下载索引管）。
+    #[test]
+    fn library_dirs_is_two_state() {
+        let (config, warnings) = parse("[library]\ndirs = []\n");
+        assert!(config.library.resolve().is_empty(), "空表 = 不扫别人的目录");
+        assert!(warnings.is_empty(), "空表不是错误：{warnings:?}");
+
+        let (config, _) = parse("[library]\ndirs = ['D:/music']\n");
+        assert_eq!(config.library.resolve(), vec![PathBuf::from("D:/music")]);
+
+        let (config, _) = parse("[playback]\nquality = \"flac\"\n");
+        assert!(config.library.resolve().is_empty(), "不写 = 也不扫");
     }
 
     /// 同一秒里跑两次：两份备份，谁也不覆盖谁。

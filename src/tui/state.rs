@@ -930,7 +930,7 @@ impl App {
             self.notify("正在扫描曲库…");
             return;
         }
-        let dirs = self.config.library.resolve(&self.config.paths.download_dir);
+        let dirs = self.config.library.resolve();
         // 没有额外目录：不扫别人的目录，但下载来的那些照样在第 5 屏（那一屏永远在）。
         if dirs.is_empty() {
             self.scanned.clear();
@@ -3334,7 +3334,7 @@ mod tests {
     #[test]
     fn an_empty_dirs_list_still_offers_the_local_screens() {
         let (mut app, _runtime) = test_app();
-        app.config.library.dirs = Some(Vec::new());
+        app.config.library.dirs.clear();
         app.switch_menu(Menu::LocalLibrary);
         assert_eq!(app.nav.menu, Menu::LocalLibrary, "第 5 屏照样进");
         assert!(app.library.is_empty(), "没扫过、也没下载过：这一屏是空的");
@@ -3615,7 +3615,7 @@ mod tests {
         );
         assert!(app.nav.favorites.error.is_none(), "没登录也不该去拉收藏");
 
-        app.config.library.dirs = Some(vec!["C:/不存在的曲库".to_string()]);
+        app.config.library.dirs = vec!["C:/不存在的曲库".to_string()];
         app.switch_menu(Menu::Favorites);
         app.apply(keys::Action::LocalRescan);
         assert!(
@@ -3710,7 +3710,7 @@ mod tests {
     #[test]
     fn a_running_scan_is_not_started_twice() {
         let (mut app, _runtime) = test_app();
-        app.config.library.dirs = Some(vec!["C:/不存在的曲库".to_string()]);
+        app.config.library.dirs = vec!["C:/不存在的曲库".to_string()];
         app.library_scanning = true;
         app.start_library_scan();
         assert!(
@@ -4539,7 +4539,7 @@ mod tests {
             duration_secs: 276,
             at: 0,
         });
-        app.config.library.dirs = Some(vec![music.to_string_lossy().into_owned()]);
+        app.config.library.dirs = vec![music.to_string_lossy().into_owned()];
 
         let dirs = [music.clone()];
         app.on_msg(scan_library(&dirs, &root.join("library.json"), &download_dir));

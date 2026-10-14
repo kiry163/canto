@@ -360,7 +360,7 @@ mod tests {
     #[test]
     fn the_home_grid_keeps_all_six_cells_with_no_extra_dirs() {
         let (mut app, _runtime) = test_app();
-        app.config.library.dirs = Some(Vec::new());
+        app.config.library.dirs.clear();
         app.go_home();
         let text = frame_rows(&mut app, 120, 40).join("\n");
         assert!(text.contains("1在线收藏"), "{text:?}");
