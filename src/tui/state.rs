@@ -1561,9 +1561,8 @@ impl App {
                     size: 0,
                     title: stored.title.clone(),
                     artist: stored.singers.clone(),
-                    album: String::new(),
-                    // 条目快照里没有时长（存储只留 mid / 标题 / 歌手），列表会显示 `--:--`。
-                    duration_secs: 0,
+                    album: stored.album.clone(),
+                    duration_secs: stored.duration_secs,
                     lyric: None,
                 }))
             })

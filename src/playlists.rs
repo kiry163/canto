@@ -15,14 +15,19 @@ use serde::{Deserialize, Serialize};
 use crate::model::Song;
 
 /// 落盘格式版本。字段含义变了就 +1（老文件按空处理，不做迁移）。
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
-/// 存进歌单的一条：`mid`（`local:<路径>`）+ 标题与歌手的**快照**。
+/// 存进歌单的一条：`mid`（`local:<路径>`）+ 标题 / 歌手 / 专辑 / 时长的**快照**。
+///
+/// 快照要够画出一行：文件被删了那句「（已丢失）」照样得写得出专辑与时长（曲库那边查不到了）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredSong {
     pub mid: String,
     pub title: String,
     pub singers: String,
+    pub album: String,
+    /// 秒；0 = 不知道。
+    pub duration_secs: u64,
 }
 
 /// 一张本地歌单。条目按加入顺序，不支持手动排序。
@@ -132,6 +137,8 @@ impl Store {
             mid: song.mid.clone(),
             title: song.title.clone(),
             singers: song.singers.clone(),
+            album: song.album_name.clone(),
+            duration_secs: song.duration_secs,
         });
     }
 
@@ -198,6 +205,41 @@ mod tests {
             duration_secs: 270,
             lyric: None,
         })
+    }
+
+    /// 快照要够画出一行：专辑与时长都存下来，读回来还在（文件删了也能写「（已丢失）」那一行）。
+    #[test]
+    fn a_stored_song_keeps_the_album_and_duration() {
+        let path = std::env::temp_dir().join("canto-playlists-snapshot/曲终人散.flac");
+        let song = local_song(&path, "曲终人散");
+        assert_eq!(song.album_name, "消息", "前提：借来的那首有专辑");
+        let mut store = Store::default();
+        let index = store.create("通勤").expect("建歌单");
+        store.add(index, &song);
+
+        let stored = &store.playlists[0].songs[0];
+        assert_eq!(
+            (stored.album.as_str(), stored.duration_secs),
+            ("消息", 270),
+            "专辑与时长都要跟着走"
+        );
+
+        let text = serde_json::to_string(&store).expect("序列化");
+        let back: Store = serde_json::from_str(&text).expect("反序列化");
+        assert_eq!(back.playlists[0].songs[0].duration_secs, 270);
+        assert_eq!(back.playlists[0].songs[0].album, "消息");
+    }
+
+    /// 老版本（只有 mid / 标题 / 歌手）：版本号对不上 → 整份按空处理，不是崩。
+    #[test]
+    fn an_old_playlist_file_is_treated_as_empty() {
+        let text = r#"{"version":1,"playlists":[{"name":"旧的","songs":[{"mid":"local:C:/a.flac","title":"旧","singers":"人"}]}]}"#;
+        let store: std::result::Result<Store, _> = serde_json::from_str(text);
+        assert!(
+            store.map(|store| store.version == VERSION).unwrap_or(true),
+            "老版本号读得出来，但不等于当前版本"
+        );
+        assert_eq!(VERSION, 2);
     }
 
     #[test]
