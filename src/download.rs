@@ -16,6 +16,138 @@ use crate::media::MediaStream;
 use crate::model::{Lyric, Quality, Song};
 use crate::qq::vkey::Candidate;
 
+/// 下载索引：`<download_dir>/downloads.json`。
+///
+/// 这是「这份文件是哪首 QQ 歌」的**唯一**登记：播放缓存从文件名就读得出 mid，下载这边只有下载
+/// 那一刻知道，所以必须写下来（曲库那边根本没有 mid）。字段与缓存侧对齐，另外带上离线显示要用
+/// 的标题 / 歌手 / 专辑 / 时长——不登录、没网时列表也得写得出名字与时长。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Track {
+    /// 哪首 QQ 歌。只用于两件事：在线歌起播前的本地优先判定、在线列表里那个 `↓`。
+    pub mid: String,
+    /// 相对 `download_dir` 的文件名（而不是绝对路径：整个目录搬走、备份、同步都还成立）。
+    pub file: String,
+    /// 下载时那份的档位（缓存侧从文件名读到的也是同一个东西）。
+    pub quality: Quality,
+    /// 容器名（`.flac` → `FLAC`），列表那一列写它。
+    pub container: String,
+    /// 登记时的字节数；`validate` 拿它跟磁盘对，不符就以磁盘为准。
+    pub bytes: u64,
+    pub title: String,
+    pub singers: String,
+    pub album: String,
+    pub duration_secs: u64,
+    /// 下载时间（Unix 秒）。
+    pub at: u64,
+}
+
+/// 索引文件版本。字段含义变了就 +1：老文件整份丢弃（跟曲库索引一个约定，不做迁移）。
+pub const INDEX_VERSION: u32 = 1;
+
+/// 索引文件的内容。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Index {
+    pub version: u32,
+    pub tracks: Vec<Track>,
+}
+
+impl Default for Index {
+    fn default() -> Self {
+        Self {
+            version: INDEX_VERSION,
+            tracks: Vec::new(),
+        }
+    }
+}
+
+/// 索引文件的位置：**放在下载目录里**——整个目录拷走 / 备份时登记跟着走。
+pub fn index_path(dir: &Path) -> PathBuf {
+    dir.join("downloads.json")
+}
+
+impl Index {
+    /// 读索引。缺失 / 坏了 / 版本不符一律当空：宁可当没有，也不要带着半份数据接着写。
+    pub fn load(dir: &Path) -> Self {
+        let path = index_path(dir);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return Self::default();
+        };
+        match serde_json::from_str::<Self>(&text) {
+            Ok(index) if index.version == INDEX_VERSION => index,
+            Ok(index) => {
+                tracing::warn!(
+                    "下载索引版本是 {}（当前 {INDEX_VERSION}），按空处理",
+                    index.version
+                );
+                Self::default()
+            }
+            Err(error) => {
+                tracing::warn!("下载索引解析失败（按空处理）：{}：{error}", path.display());
+                Self::default()
+            }
+        }
+    }
+
+    /// 写索引（临时文件 + rename，中途失败不留坏文件）。
+    pub fn save(&self, dir: &Path) -> Result<()> {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("创建下载目录失败：{}", dir.display()))?;
+        let path = index_path(dir);
+        let text = serde_json::to_string_pretty(self).context("序列化下载索引失败")?;
+        let temp = path.with_extension("json.tmp");
+        std::fs::write(&temp, text).with_context(|| format!("写 {} 失败", temp.display()))?;
+        std::fs::rename(&temp, &path)
+            .with_context(|| format!("把 {} 换成 {} 失败", temp.display(), path.display()))
+    }
+
+    /// 按 mid 找登记（「本地有这份吗」的判定）。
+    pub fn by_mid(&self, mid: &str) -> Option<&Track> {
+        self.tracks.iter().find(|entry| entry.mid == mid)
+    }
+
+    /// 这条登记在磁盘上的路径。
+    pub fn path_of(&self, track: &Track, dir: &Path) -> PathBuf {
+        dir.join(&track.file)
+    }
+
+    /// 这份路径归哪个 mid（界面判「来源」与播放条标签用它）。
+    pub fn mid_of_path(&self, dir: &Path, path: &Path) -> Option<&str> {
+        self.tracks
+            .iter()
+            .find(|entry| dir.join(&entry.file) == path)
+            .map(|entry| entry.mid.as_str())
+    }
+
+    /// 记一条：同 mid 覆盖（顺序不动），新的追加到末尾。
+    pub fn upsert(&mut self, track: Track) {
+        match self.tracks.iter_mut().find(|entry| entry.mid == track.mid) {
+            Some(slot) => *slot = track,
+            None => self.tracks.push(track),
+        }
+    }
+
+    /// 跟磁盘对一遍：文件不在的条目丢掉（幽灵），大小不符的以磁盘为准。
+    ///
+    /// 返回「有没有改过」，好让调用方决定要不要回写——索引是登记册，真相永远在磁盘上。
+    pub fn validate(&mut self, dir: &Path) -> bool {
+        let before = self.tracks.len();
+        let mut changed = false;
+        self.tracks.retain_mut(|entry| {
+            let path = dir.join(&entry.file);
+            let Ok(metadata) = std::fs::metadata(&path) else {
+                tracing::info!("下载索引：{} 不在了，去掉这条", path.display());
+                return false;
+            };
+            if metadata.len() != entry.bytes {
+                entry.bytes = metadata.len();
+                changed = true;
+            }
+            true
+        });
+        changed || self.tracks.len() != before
+    }
+}
+
 /// 下载结果。
 pub struct Saved {
     pub path: PathBuf,
@@ -303,6 +435,92 @@ mod tests {
         );
         // 标题与歌手都空 → 退回 mid，不能生成 ".flac" 这种文件。
         assert_eq!(file_stem(&song("", "")), "000CbUE00I998M");
+    }
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("canto-download-{}-{tag}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        dir
+    }
+
+    /// 一条索引记录（测试用）：体积 0 表示「还没跟磁盘对过」。
+    pub(super) fn track(mid: &str, file: &str) -> Track {
+        Track {
+            mid: mid.to_string(),
+            file: file.to_string(),
+            quality: Quality::Flac,
+            container: "FLAC".to_string(),
+            bytes: 0,
+            title: format!("标题 {mid}"),
+            singers: "歌手".to_string(),
+            album: "专辑".to_string(),
+            duration_secs: 1,
+            at: 1,
+        }
+    }
+
+    #[test]
+    fn the_index_round_trips_and_treats_anything_odd_as_empty() {
+        let dir = temp_dir("index-basics");
+        assert!(Index::load(&dir).tracks.is_empty(), "缺失 = 空");
+
+        std::fs::write(index_path(&dir), "{ 不是 JSON").expect("写坏文件");
+        assert!(Index::load(&dir).tracks.is_empty(), "坏了 = 空");
+
+        let mut index = Index::default();
+        index.upsert(track("m1", "歌手 - 一首.flac"));
+        index.save(&dir).expect("落盘");
+        let back = Index::load(&dir);
+        assert_eq!(back.tracks, index.tracks);
+        assert_eq!(
+            back.by_mid("m1").map(|entry| entry.file.as_str()),
+            Some("歌手 - 一首.flac")
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_version_mismatch_is_empty_too() {
+        let dir = temp_dir("index-version");
+        std::fs::write(index_path(&dir), r#"{"version":99,"tracks":[]}"#).expect("写文件");
+        assert!(Index::load(&dir).tracks.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn upsert_replaces_the_same_mid_only() {
+        let mut index = Index::default();
+        index.upsert(track("m1", "a.flac"));
+        index.upsert(track("m2", "b.flac"));
+        index.upsert(track("m1", "a2.flac"));
+        let files: Vec<&str> = index.tracks.iter().map(|entry| entry.file.as_str()).collect();
+        assert_eq!(files, ["a2.flac", "b.flac"], "同 mid 覆盖，别的条目顺序不动");
+    }
+
+    #[test]
+    fn validate_drops_ghosts_and_trusts_the_disk_for_sizes() {
+        let dir = temp_dir("index-validate");
+        std::fs::write(dir.join("活着.flac"), vec![7_u8; 11]).expect("写文件");
+        let mut index = Index::default();
+        index.upsert(track("live", "活着.flac"));
+        index.upsert(track("ghost", "没有这个文件.flac"));
+        assert!(index.validate(&dir), "丢了一条幽灵条目 = 改过");
+        assert_eq!(index.tracks.len(), 1);
+        assert_eq!(index.by_mid("live").expect("还在").bytes, 11, "大小以磁盘为准");
+        assert!(!index.validate(&dir), "再验一次不该说改过");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_path_knows_its_mid() {
+        let dir = temp_dir("index-mid-of-path");
+        let mut index = Index::default();
+        index.upsert(track("m1", "一首.flac"));
+        let path = index.path_of(index.by_mid("m1").expect("有这条"), &dir);
+        assert_eq!(index.mid_of_path(&dir, &path), Some("m1"));
+        assert_eq!(index.mid_of_path(&dir, Path::new("/别处/一首.flac")), None);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// 歌词写进**歌词目录**（不是歌曲目录），名字与音频同 stem。

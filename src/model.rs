@@ -7,11 +7,17 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// 音质档位。声明顺序就是高低顺序，便于比较（`want >= Quality::Flac`）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+///
+/// 带 serde：下载索引里就写 `"flac"` 这种**规范名**（与配置文件同一套词），人翻索引文件也看得懂。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub enum Quality {
+    #[serde(rename = "128")]
     Low128,
+    #[serde(rename = "320")]
     High320,
+    #[serde(rename = "flac")]
     Flac,
+    #[serde(rename = "hires")]
     Hires,
 }
 
