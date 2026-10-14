@@ -1561,6 +1561,22 @@ mod tests {
             vec![0_u8; 1_024],
         )
         .expect("写下载文件");
+        // 下载那份要**登记过**才算（新模型：`↓` 按 mid 查索引，不再按文件名猜）。
+        app.downloads.upsert(crate::download::Track {
+            mid: "a".to_string(),
+            file: "刘若英 - 成全.mp3".to_string(),
+            quality: crate::model::Quality::High320,
+            container: "MP3".to_string(),
+            bytes: 1_024,
+            title: "成全".to_string(),
+            singers: "刘若英".to_string(),
+            album: String::new(),
+            duration_secs: 0,
+            at: 0,
+        });
+        app.downloads
+            .save(&app.config.paths.download_dir)
+            .expect("索引落盘");
         app.refresh_downloads();
         app.switch_menu(Menu::Favorites);
 

@@ -57,6 +57,21 @@ pub(super) enum Screen {
     Main,
 }
 
+/// 读下载索引并对一遍磁盘：幽灵条目丢掉、大小不符以磁盘为准，改过就回写。
+///
+/// 索引是「这份文件是哪首 QQ 歌」的唯一登记（播放缓存从文件名就有 mid，下载这边只有下载那一刻
+/// 知道），所以它坏了 / 对不上时只影响 `↓` 与本地命中，不该拦住启动也**不必**回退到扫目录
+/// ——没登记的文件就是不认（下载目录归 canto 管）。
+fn load_downloads(dir: &std::path::Path) -> download::Index {
+    let mut index = download::Index::load(dir);
+    if index.validate(dir)
+        && let Err(error) = index.save(dir)
+    {
+        tracing::warn!("下载索引回写失败：{error:#}");
+    }
+    index
+}
+
 /// 扫一遍曲库并把索引落盘，返回给界面线程的消息。
 ///
 /// **阻塞**（读 tag 是磁盘密集型）：只从后台线程里调。测试直接调它——线程那一层没有逻辑。
@@ -773,10 +788,10 @@ pub(super) struct App {
     /// 并显示缓存档位（命中缓存时播放/下载用的就是它）；启动时扫一遍目录，播放中刚听完
     /// 转正的那首由音频线程回传（见 `Engine::take_cached`）。
     pub(super) cached: std::collections::HashMap<String, (crate::model::Quality, u64)>,
-    /// 下载目录里已有的文件：`文件名（不含扩展名） → 那份文件`。列表里标 `↓`、「音质/体积」
-    /// 报磁盘那份，起播也优先放它（见 `player::local_copy`）。启动扫一次，下载完成后与 `r`
-    /// 重扫时更新（见 `refresh_downloads`）。
-    pub(super) downloads: std::collections::HashMap<String, download::Downloaded>,
+    /// 下载索引（`<download_dir>/downloads.json`）：`mid → 那份文件`。列表里标 `↓`、
+    /// 「音质/体积」报磁盘那份、起播也优先放它（见 `player::local_copy`）。启动读一次并对一遍
+    /// 磁盘，下载完成后与 `r` 重扫时更新（见 `refresh_downloads`）。
+    pub(super) downloads: download::Index,
     /// `/` 的筛选框开着（输入即筛当前列表）。
     pub(super) filter_input: bool,
     /// 帮助浮层开着（`?`）。
@@ -828,8 +843,8 @@ impl App {
     ) -> Self {
         // 先读存储（下面 `playlists_path` 会被 move 进字段）。
         let playlists_store = playlists::Store::load(&playlists_path);
-        // 下载目录里的文件：`↓` 标记与「体积报磁盘那份」用它（配置还没被 move 进字段）。
-        let downloads = crate::download::scan_downloads(&config.paths.download_dir);
+        // 下载索引：`↓` 标记、体积报磁盘那份、本地命中都用它（配置还没被 move 进字段）。
+        let downloads = load_downloads(&config.paths.download_dir);
         Self {
             handle,
             engine,
@@ -905,12 +920,13 @@ impl App {
         });
     }
 
-    /// 重扫下载目录：`↓` 与「体积报磁盘那份」的数据源。
+    /// 重读下载索引：`↓`、体积与「本地命中」的数据源。
     ///
-    /// 启动一次（`App::new` 里直接扫）；每次下载完成（`poll_transfer` 收到结果）一次；
-    /// `r` 重扫曲库时顺带一次——外部删掉 / 手工拷进来的文件靠这三处反映。
+    /// 启动一次（`App::new` 里直接读）；每次下载完成（`poll_transfer` 收到结果）一次；
+    /// `r` 重扫曲库时顺带一次——外部删掉 / 手工改动的文件靠 `validate` 那一步反映（索引里没
+    /// 登记的文件不认，这是刻意的：下载目录归 canto 管）。
     pub(super) fn refresh_downloads(&mut self) {
-        self.downloads = crate::download::scan_downloads(&self.config.paths.download_dir);
+        self.downloads = load_downloads(&self.config.paths.download_dir);
     }
 
     /// 本地曲库（已按 歌手 → 专辑 → 标题 排好）。Task 5 的「本地曲库」屏接上就摘掉这个 allow。
@@ -1368,6 +1384,7 @@ impl App {
             song,
             self.cache_on().then(paths::cache_dir).as_deref(),
             &self.downloads,
+            &self.config.paths.download_dir,
         )
     }
 
@@ -3223,6 +3240,20 @@ mod tests {
         std::fs::write(dir.join(format!("{stem}.mp3")), vec![0_u8; 4400]).expect("写下载文件");
         // 歌词与音频**同目录**（下载时就写在这儿）。
         std::fs::write(dir.join(format!("{stem}.lrc")), "[00:01.00]第一句\n").expect("写歌词");
+        // 下载索引：新模型下「本地有这份吗」按 mid 查它。
+        app.downloads.upsert(crate::download::Track {
+            mid: song.mid.clone(),
+            file: format!("{stem}.mp3"),
+            quality: crate::model::Quality::High320,
+            container: "MP3".to_string(),
+            bytes: 4400,
+            title: song.title.clone(),
+            singers: song.singers.clone(),
+            album: String::new(),
+            duration_secs: song.duration_secs,
+            at: 0,
+        });
+        app.downloads.save(&dir).expect("索引落盘");
         app.refresh_downloads();
 
         app.nav.favorites.set_items(vec![song.clone()]);
@@ -4411,35 +4442,46 @@ mod tests {
         );
     }
 
-    /// 下载完了列表里的 `↓` 要立刻出现：`poll_transfer` 收到结果就重扫下载目录。
+    /// 下载索引就是 `↓` 的真相：登记过的亮，文件没了那条要掉（`validate` 那一步）。
     #[test]
-    fn a_finished_download_refreshes_the_downloaded_index() {
+    fn the_download_index_is_validated_against_the_disk() {
         let (mut app, _runtime) = test_app();
         let dir = std::env::temp_dir().join(format!("canto-dl-state-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).expect("建目录");
         app.config.paths.download_dir = dir.clone();
         app.refresh_downloads();
-        assert!(app.downloads.is_empty(), "空目录就是空表");
+        assert!(app.downloads.tracks.is_empty(), "空目录（没有索引）就是空索引");
 
-        // 假装那一下下载落了盘，然后走一遍「下载完成」的收尾。
+        // 假装下过一首：文件 + 索引一条。
         let song = crate::tui::test_support::test_song("a");
-        std::fs::write(
-            dir.join(format!("{}.mp3", crate::download::file_stem(&song))),
-            vec![0_u8; 1024],
-        )
-        .expect("写文件");
-        app.transfer = Some(std::sync::Arc::new(std::sync::Mutex::new(Transfer {
+        let file = format!("{}.mp3", crate::download::file_stem(&song));
+        std::fs::write(dir.join(&file), vec![0_u8; 1024]).expect("写文件");
+        app.downloads.upsert(crate::download::Track {
+            mid: song.mid.clone(),
+            file: file.clone(),
+            quality: crate::model::Quality::High320,
+            container: "MP3".to_string(),
+            bytes: 1024,
             title: song.title.clone(),
-            received: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            total: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            outcome: Some("已下载：歌 a".to_string()),
-        })));
-        app.poll_transfer();
-
+            singers: song.singers.clone(),
+            album: String::new(),
+            duration_secs: 0,
+            at: 0,
+        });
+        app.downloads.save(&dir).expect("落盘");
+        app.refresh_downloads();
         assert!(
-            app.downloads.contains_key(&crate::download::file_stem(&song)),
-            "下载完成后 `↓` 该出现：{:?}",
+            app.downloads.by_mid(&song.mid).is_some(),
+            "登记过的这首要在：{:?}",
+            app.downloads
+        );
+
+        std::fs::remove_file(dir.join(&file)).expect("删文件");
+        app.refresh_downloads();
+        assert!(
+            app.downloads.by_mid(&song.mid).is_none(),
+            "文件没了，那条幽灵条目要掉：{:?}",
             app.downloads
         );
 
@@ -4501,7 +4543,7 @@ mod tests {
         );
     }
 
-    /// `r`（本地曲库重扫）也顺手重扫下载目录：手工删掉文件之后按一下就该消失。
+    /// `r`（本地曲库重扫）也顺手重读下载索引：手工删掉文件之后按一下就该消失。
     #[test]
     fn rescanning_the_library_also_refreshes_downloads() {
         let (mut app, _runtime) = test_app();
@@ -4511,13 +4553,29 @@ mod tests {
         app.config.paths.download_dir = dir.clone();
         let file = dir.join("刘若英 - 成全.mp3");
         std::fs::write(&file, vec![0_u8; 8]).expect("写文件");
+        app.downloads.upsert(crate::download::Track {
+            mid: "abc123".to_string(),
+            file: "刘若英 - 成全.mp3".to_string(),
+            quality: crate::model::Quality::High320,
+            container: "MP3".to_string(),
+            bytes: 8,
+            title: "成全".to_string(),
+            singers: "刘若英".to_string(),
+            album: String::new(),
+            duration_secs: 0,
+            at: 0,
+        });
+        app.downloads.save(&dir).expect("落盘");
         app.refresh_downloads();
-        assert_eq!(app.downloads.len(), 1);
+        assert_eq!(app.downloads.tracks.len(), 1);
 
         std::fs::remove_file(&file).expect("删文件");
         app.switch_menu(Menu::LocalLibrary);
         app.apply(crate::tui::keys::Action::LocalRescan);
-        assert!(app.downloads.is_empty(), "重扫之后删掉的那份不该还在");
+        assert!(
+            app.downloads.tracks.is_empty(),
+            "重扫之后删掉的那份不该还在"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

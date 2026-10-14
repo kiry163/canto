@@ -297,7 +297,13 @@ impl App {
         // 本地条目（本地曲库 / 本地歌单 / 历史里的本地条目）：曲库那份比快照新，优先用它。
         let fresh = library.get(song.mid.as_str()).copied();
         let source = fresh.unwrap_or(song);
-        let copy = rows::copy_of(source, &self.cached, &self.downloads, want);
+        let copy = rows::copy_of(
+            source,
+            &self.cached,
+            &self.downloads,
+            &self.config.paths.download_dir,
+            want,
+        );
         let note = match self.nav.menu {
             Menu::LocalPlaylists
                 if self.nav.local_shown.is_some() && !self.library_scanning && fresh.is_none() =>

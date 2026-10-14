@@ -361,12 +361,13 @@ pub(super) struct LocalCopy<'a> {
 pub(super) fn copy_of<'a>(
     song: &'a Song,
     cached: &'a HashMap<String, (Quality, u64)>,
-    downloads: &'a HashMap<String, crate::download::Downloaded>,
+    downloads: &'a crate::download::Index,
+    download_dir: &std::path::Path,
     want: Quality,
 ) -> LocalCopy<'a> {
     if song.is_local() {
-        let tier = song
-            .path()
+        let path = song.path();
+        let tier = path
             .and_then(|path| path.extension())
             .map_or_else(
                 || "—".to_string(),
@@ -376,21 +377,22 @@ pub(super) fn copy_of<'a>(
             tier: tier.into(),
             size: (song.local_bytes > 0).then_some(song.local_bytes),
             cached: false,
-            downloaded: false,
+            // 本地那条是不是「下载来的」也按索引判：历史屏里重播下载歌同样该亮 `↓`。
+            downloaded: path.is_some_and(|path| downloads.mid_of_path(download_dir, path).is_some()),
         };
     }
-    let stem = crate::download::file_stem(song);
     if let Some((quality, bytes)) = cached.get(&song.mid) {
         return LocalCopy {
             tier: quality.label().into(),
             size: Some(*bytes),
             cached: true,
-            downloaded: downloads.contains_key(&stem),
+            // 两个标记都按 mid 查：同一份文件在哪一屏都是同一个答案。
+            downloaded: downloads.by_mid(&song.mid).is_some(),
         };
     }
-    if let Some(found) = downloads.get(&stem) {
+    if let Some(found) = downloads.by_mid(&song.mid) {
         return LocalCopy {
-            tier: found.container.clone().into(),
+            tier: found.quality.label().into(),
             size: Some(found.bytes),
             cached: false,
             downloaded: true,
@@ -775,62 +777,83 @@ mod tests {
             .collect()
     }
 
-    fn downloaded_index(entries: &[(&str, &str, u64)]) -> HashMap<String, crate::download::Downloaded> {
-        entries
-            .iter()
-            .map(|(stem, container, bytes)| {
-                (
-                    (*stem).to_string(),
-                    crate::download::Downloaded {
-                        path: std::path::PathBuf::from(*stem),
-                        container: (*container).to_string(),
-                        bytes: *bytes,
-                    },
-                )
-            })
-            .collect()
+    /// 一份下载索引（测试用）：`(mid, 文件名, 档位, 字节数)`。
+    fn download_index(entries: &[(&str, &str, Quality, u64)]) -> crate::download::Index {
+        let mut index = crate::download::Index::default();
+        for (mid, file, quality, bytes) in entries {
+            index.upsert(crate::download::Track {
+                mid: (*mid).to_string(),
+                file: (*file).to_string(),
+                quality: *quality,
+                container: crate::download::container_label(file.rsplit('.').next().unwrap_or("")),
+                bytes: *bytes,
+                title: String::new(),
+                singers: String::new(),
+                album: String::new(),
+                duration_secs: 0,
+                at: 0,
+            });
+        }
+        index
     }
 
-    /// 四种状态：缓存命中 > 下载命中 > 都没有（按配置下限预估）；本地歌报自己的容器与大小。
+    /// 下载目录（测试里只用来把 `file` 拼成路径，没在磁盘上建）。
+    const DOWNLOADS: &str = "D:/canto";
+
+    /// 四种状态：缓存命中 > 下载索引命中 > 都没有（按配置下限预估）；本地歌报自己的容器与大小。
     #[test]
     fn the_tier_and_size_report_whatever_is_already_on_disk() {
         let mut song = crate::tui::test_support::titled_song("a", "成全", "刘若英");
         song.sizes.mp3_128 = 4_400_000;
         let cached = cached_index(&[("a", Quality::High320, 9_800_000)]);
-        let downloads = downloaded_index(&[("刘若英 - 成全", "MP3", 9_900_000)]);
-        // 空的表要先绑成变量：`copy` 借着它们，临时值活不到断言那里。
+        let downloads = download_index(&[("a", "刘若英 - 成全.mp3", Quality::High320, 9_900_000)]);
+        // 空的索引要先绑成变量：`copy` 借着它们，临时值活不到断言那里。
         let nothing_cached = cached_index(&[]);
-        let nothing_downloaded = downloaded_index(&[]);
+        let nothing_downloaded = download_index(&[]);
+        let dir = std::path::Path::new(DOWNLOADS);
 
         // ① 有缓存：报缓存那份（播放也是先命中缓存），两个标记都亮。
-        let copy = copy_of(&song, &cached, &downloads, Quality::Low128);
+        let copy = copy_of(&song, &cached, &downloads, dir, Quality::Low128);
         assert_eq!(copy.tier, "MP3 320k");
         assert_eq!(copy.size, Some(9_800_000));
         assert!(copy.cached && copy.downloaded);
 
-        // ② 只下载过：报磁盘那份的容器与真实大小。
-        let copy = copy_of(&song, &nothing_cached, &downloads, Quality::Low128);
-        assert_eq!(copy.tier, "MP3");
+        // ② 只下载过：档位与真实大小都来自索引（档位不再只到容器）。
+        let copy = copy_of(&song, &nothing_cached, &downloads, dir, Quality::Low128);
+        assert_eq!(copy.tier, "MP3 320k");
         assert_eq!(copy.size, Some(9_900_000));
         assert!(!copy.cached && copy.downloaded);
 
         // ③ 都没有：按配置下限预估（今天的行为）。
-        let copy = copy_of(&song, &nothing_cached, &nothing_downloaded, Quality::Low128);
+        let copy = copy_of(&song, &nothing_cached, &nothing_downloaded, dir, Quality::Low128);
         assert_eq!(copy.tier, "MP3 128k");
         assert_eq!(copy.size, Some(4_400_000));
         assert!(!copy.cached && !copy.downloaded);
 
-        // ④ 本地歌：容器取自扩展名，大小来自曲库扫描；缓存/下载两列不适用。
+        // ④ 本地歌：容器取自扩展名，大小来自曲库扫描；缓存/下载两列按「这份路径归谁」判。
         let mut local = crate::tui::test_support::local_song("C:/Music/canto/曲终人散.flac");
         local.local_bytes = 31_457_280;
-        let copy = copy_of(&local, &cached, &downloads, Quality::Low128);
+        let copy = copy_of(&local, &cached, &downloads, dir, Quality::Low128);
         assert_eq!(copy.tier, "FLAC");
         assert_eq!(copy.size, Some(31_457_280));
-        assert!(!copy.cached && !copy.downloaded);
+        assert!(!copy.cached && !copy.downloaded, "没在下载索引里");
 
         // ⑤ 本地歌读不出大小：体积未知，仍是 `—`。
         let mut unknown = crate::tui::test_support::local_song("C:/Music/canto/没时长的.wav");
         unknown.local_bytes = 0;
-        assert_eq!(copy_of(&unknown, &cached, &downloads, Quality::Low128).size, None);
+        assert_eq!(copy_of(&unknown, &cached, &downloads, dir, Quality::Low128).size, None);
+    }
+
+    /// 本地歌那份**就是下载来的**（路径在下载索引里）：历史屏里重播也该亮 `↓`。
+    #[test]
+    fn a_local_file_that_is_in_the_download_index_still_lights_the_marker() {
+        let dir = std::path::Path::new(DOWNLOADS);
+        let mut local = crate::tui::test_support::local_song("D:/canto/刘若英 - 成全.flac");
+        local.local_bytes = 4_400_000;
+        let downloads = download_index(&[("a", "刘若英 - 成全.flac", Quality::Flac, 4_400_000)]);
+        let nothing_cached = cached_index(&[]);
+        let copy = copy_of(&local, &nothing_cached, &downloads, dir, Quality::Low128);
+        assert!(copy.downloaded, "路径在下载索引里");
+        assert!(!copy.cached);
     }
 }

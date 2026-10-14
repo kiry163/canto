@@ -82,20 +82,29 @@ pub enum TrackSource {
     },
 }
 
-/// 本地已有这份吗——顺序就是优先级：曲库路径（`Song` 自带）→ 播放缓存 → 下载目录。
+/// 本地已有这份吗——顺序就是优先级：曲库路径（`Song` 自带）→ 播放缓存（mid）→ 下载索引（mid）。
 ///
 /// `cache_dir` 给 `None` 就是不查缓存（`config.toml` 里 `[cache] mb = 0`）。目录传进来而不是
 /// 内部写死 `paths::cache_dir()`：这条判定要能拿一个临时目录测。
+///
+/// 来源标签（[`PlaySource`]）按**数据**定，不按「你从哪屏进来」：这份路径在下载索引里就写
+/// 「下载」，否则「曲库」——同一份文件从任何入口播都是同一个答案。
 pub fn local_copy(
     song: &Song,
     cache_dir: Option<&std::path::Path>,
-    downloads: &std::collections::HashMap<String, crate::download::Downloaded>,
+    downloads: &crate::download::Index,
+    download_dir: &std::path::Path,
 ) -> Option<TrackSource> {
     if let Some(path) = song.path() {
+        let from = if downloads.mid_of_path(download_dir, path).is_some() {
+            PlaySource::Download
+        } else {
+            PlaySource::Library
+        };
         return Some(TrackSource::Local {
             path: path.to_path_buf(),
             quality: None,
-            from: PlaySource::Library,
+            from,
         });
     }
     if let Some(dir) = cache_dir
@@ -107,10 +116,17 @@ pub fn local_copy(
             from: PlaySource::Cache,
         });
     }
-    let downloaded = downloads.get(&crate::download::file_stem(song))?;
+    let track = downloads.by_mid(&song.mid)?;
+    let path = downloads.path_of(track, download_dir);
+    // 索引是启动时校验过的，但文件可能在跑的过程中被删：那就当没有，别拿一条死路径去开
+    // （交给线上取流，跟「本来就没有本地那份」一个结果）。
+    if !path.is_file() {
+        return None;
+    }
     Some(TrackSource::Local {
-        path: downloaded.path.clone(),
-        quality: None,
+        path,
+        // 下载那份的档位只有索引知道（文件名里没有）；缓存侧是从文件名读的。
+        quality: Some(track.quality),
         from: PlaySource::Download,
     })
 }
@@ -703,98 +719,136 @@ mod tests {
         assert_eq!(snapshot(300, Some(236)).progress(), 1.0);
     }
 
-    /// 「本地已有这份吗」的顺序：曲库路径 → 播放缓存 → 下载目录；缓存关掉（`[cache] mb = 0`）
-    /// 就整段缓存判定不作数。这条判定只有一处，顺序错了就会出现「本地明明有那份还去取流」。
-    #[test]
-    fn local_copy_prefers_the_library_then_the_cache_then_the_download() {
-        let cache_dir =
-            std::env::temp_dir().join(format!("canto-copy-cache-{}", std::process::id()));
-        let download_dir =
-            std::env::temp_dir().join(format!("canto-copy-dl-{}", std::process::id()));
-        std::fs::remove_dir_all(&cache_dir).ok();
-        std::fs::remove_dir_all(&download_dir).ok();
-        std::fs::create_dir_all(&cache_dir).expect("建缓存目录");
-        std::fs::create_dir_all(&download_dir).expect("建下载目录");
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("canto-player-{}-{tag}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("建临时目录");
+        dir
+    }
 
-        let song = Song {
-            mid: "abc123".to_string(),
+    fn titled(mid: &str, title: &str, singers: &str) -> Song {
+        Song {
+            mid: mid.to_string(),
             song_id: None,
             media_mid: None,
-            title: "成全".to_string(),
-            singers: "刘若英".to_string(),
+            title: title.to_string(),
+            singers: singers.to_string(),
             album_mid: String::new(),
             album_name: String::new(),
             duration_secs: 276,
             sizes: crate::model::FileSizes::default(),
             local_bytes: 0,
             source: crate::model::Source::Qq,
-        };
-        // 下载目录那份（键就是文件名，跟列表里 `↓` 用的是同一份索引）。
-        let stem = crate::download::file_stem(&song);
-        let downloaded = download_dir.join(format!("{stem}.mp3"));
-        std::fs::write(&downloaded, vec![0_u8; 4400]).expect("写下载文件");
-        let downloads: std::collections::HashMap<String, crate::download::Downloaded> = [(
-            stem,
-            crate::download::Downloaded {
-                path: downloaded.clone(),
-                container: "MP3".to_string(),
-                bytes: 4400,
-            },
-        )]
-        .into_iter()
-        .collect();
-        // 缓存那份：文件名就是 `<mid>.<档位>.<扩展名>`，所以档位也读得出来。
-        let cached = cache_dir.join("abc123.320.mp3");
-        std::fs::write(&cached, vec![0_u8; 9800]).expect("写缓存文件");
+        }
+    }
 
-        let local = |source: Option<TrackSource>| match source {
+    fn track_for(mid: &str, file: &str) -> crate::download::Track {
+        crate::download::Track {
+            mid: mid.to_string(),
+            file: file.to_string(),
+            quality: Quality::High320,
+            container: "MP3".to_string(),
+            bytes: 4400,
+            title: "成全".to_string(),
+            singers: "刘若英".to_string(),
+            album: String::new(),
+            duration_secs: 276,
+            at: 1,
+        }
+    }
+
+    fn local(source: Option<TrackSource>) -> Option<(std::path::PathBuf, Option<Quality>, PlaySource)> {
+        match source {
             Some(TrackSource::Local { path, quality, from }) => Some((path, quality, from)),
             Some(TrackSource::Cdn(_)) => panic!("本地判定不该给出线上源"),
             None => None,
-        };
+        }
+    }
+
+    /// QQ 歌的本地命中链：缓存（mid）→ 下载索引（mid）→ 交给线上。曲库**不在这条链上**
+    /// （曲库目录里那些自己放的文件不参与在线歌的取源）。缓存关掉（`[cache] mb = 0`）只影响
+    /// 缓存那一跳。
+    #[test]
+    fn the_chain_is_cache_then_download_then_nothing() {
+        let cache_dir = temp_dir("chain-cache");
+        let download_dir = temp_dir("chain-dl");
+        let song = titled("abc123", "成全", "刘若英");
+        let cached = cache_dir.join("abc123.320.mp3");
+        std::fs::write(&cached, vec![0_u8; 9800]).expect("写缓存");
+        let downloaded = download_dir.join("刘若英 - 成全.mp3");
+        std::fs::write(&downloaded, vec![0_u8; 4400]).expect("写下载文件");
+        let mut downloads = crate::download::Index::default();
+        downloads.upsert(track_for("abc123", "刘若英 - 成全.mp3"));
 
         assert_eq!(
-            local(local_copy(&song, Some(&cache_dir), &downloads)),
+            local(local_copy(&song, Some(&cache_dir), &downloads, &download_dir)),
             Some((cached.clone(), Some(Quality::High320), PlaySource::Cache)),
             "有缓存就用缓存，档位从文件名读"
         );
 
         std::fs::remove_file(&cached).expect("删缓存");
         assert_eq!(
-            local(local_copy(&song, Some(&cache_dir), &downloads)),
-            Some((downloaded.clone(), None, PlaySource::Download)),
-            "缓存没了就看下载目录；下载那份读不出档位"
+            local(local_copy(&song, Some(&cache_dir), &downloads, &download_dir)),
+            Some((downloaded.clone(), Some(Quality::High320), PlaySource::Download)),
+            "缓存没了就看下载索引，档位来自索引"
         );
 
         std::fs::write(&cached, vec![0_u8; 9800]).expect("写回缓存");
         assert_eq!(
-            local(local_copy(&song, None, &downloads)),
-            Some((downloaded.clone(), None, PlaySource::Download)),
-            "`[cache] mb = 0` 时缓存不算数，仍走下载目录"
+            local(local_copy(&song, None, &downloads, &download_dir)),
+            Some((downloaded.clone(), Some(Quality::High320), PlaySource::Download)),
+            "`[cache] mb = 0` 时缓存那一跳不作数，仍走下载索引"
         );
 
-        let nothing = std::collections::HashMap::new();
+        // 两边都没有（缓存目录里那份已经删了）：交给线上取流。
+        std::fs::remove_file(&cached).expect("删缓存");
+        let nothing = crate::download::Index::default();
         assert_eq!(
-            local(local_copy(&song, Some(&cache_dir.join("没有这个目录")), &nothing)),
+            local(local_copy(&song, Some(&cache_dir), &nothing, &download_dir)),
             None,
             "两边都没有才交给线上取流"
         );
 
-        // 曲库歌：`Song` 自带路径，排在缓存前面（缓存里那个 mid 压根不会是它）。
-        let path = std::env::temp_dir().join("canto-copy-local.wav");
-        let local_song = Song {
-            mid: crate::model::local_mid(&path),
-            source: crate::model::Source::Local(path.clone()),
-            ..song
+        // 索引里有一条、文件却不在（会话中途被删）：当作没有，交给线上，别拿一条死路径去开。
+        std::fs::remove_file(&downloaded).expect("删下载文件");
+        assert_eq!(
+            local(local_copy(&song, Some(&cache_dir), &downloads, &download_dir)),
+            None
+        );
+    }
+
+    /// 来源标签按**数据**定：这份路径在下载索引里就写「下载」，只在曲库目录里就写「曲库」
+    /// ——同一份文件从哪屏播都是同一个答案。
+    #[test]
+    fn a_local_file_is_labelled_by_which_index_owns_it() {
+        let dir = temp_dir("label");
+        let mine = dir.join("刘若英 - 成全.flac");
+        std::fs::write(&mine, vec![0_u8; 4]).expect("写文件");
+        let mut downloads = crate::download::Index::default();
+        downloads.upsert(track_for("abc123", "刘若英 - 成全.flac"));
+
+        let downloaded = Song {
+            mid: crate::model::local_mid(&mine),
+            source: crate::model::Source::Local(mine.clone()),
+            ..titled("abc123", "成全", "刘若英")
         };
         assert_eq!(
-            local(local_copy(&local_song, Some(&cache_dir), &nothing)),
-            Some((path, None, PlaySource::Library)),
-            "曲库歌用自己的路径"
+            local(local_copy(&downloaded, None, &downloads, &dir)),
+            Some((mine, None, PlaySource::Download)),
+            "这份文件在下载索引里"
         );
 
-        std::fs::remove_dir_all(&cache_dir).ok();
-        std::fs::remove_dir_all(&download_dir).ok();
+        let other_path = dir.join("自己放的.flac");
+        let mine_own = Song {
+            mid: crate::model::local_mid(&other_path),
+            source: crate::model::Source::Local(other_path.clone()),
+            ..titled("abc999", "自己放的", "谁")
+        };
+        assert_eq!(
+            local(local_copy(&mine_own, None, &downloads, &dir)),
+            Some((other_path, None, PlaySource::Library)),
+            "只在曲库目录里（下载索引没登记它）"
+        );
     }
 
     /// 本地文件：直接开文件解码，**不要候选也不写播放缓存**（候选取空也照样开）。
