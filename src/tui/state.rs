@@ -60,11 +60,11 @@ pub(super) enum Screen {
 /// 扫一遍曲库并把索引落盘，返回给界面线程的消息。
 ///
 /// **阻塞**（读 tag 是磁盘密集型）：只从后台线程里调。测试直接调它——线程那一层没有逻辑。
-fn scan_library(dirs: &[std::path::PathBuf], index_path: &std::path::Path) -> Msg {
+fn scan_library(dirs: &[std::path::PathBuf], index_path: &std::path::Path, skip: &std::path::Path) -> Msg {
     let missing_dirs: Vec<std::path::PathBuf> =
         dirs.iter().filter(|dir| !dir.is_dir()).cloned().collect();
     let previous = crate::library::load_index(index_path, dirs);
-    let outcome = crate::library::rescan(&previous, dirs);
+    let outcome = crate::library::rescan(&previous, dirs, skip);
     if let Err(error) = crate::library::save_index(index_path, &outcome.index) {
         tracing::warn!("曲库索引落盘失败（下次启动会重扫）：{error:#}");
     }
@@ -899,8 +899,9 @@ impl App {
         self.refresh_local_view();
         self.library_scanning = true;
         let tx = self.tx.clone();
+        let skip = self.config.paths.download_dir.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(scan_library(&dirs, &index_path));
+            let _ = tx.send(scan_library(&dirs, &index_path, &skip));
         });
     }
 
@@ -1386,7 +1387,7 @@ impl App {
         }
         let found = path
             .as_deref()
-            .and_then(|path| crate::library::local_lyric(path, &self.config.paths.lyrics_dir));
+            .and_then(|path| crate::library::local_lyric(path));
         match found {
             Some(lyric) => {
                 crate::cache::put_lyric(&song.mid, Some(&lyric));
@@ -1504,6 +1505,7 @@ impl App {
                     album: String::new(),
                     // 条目快照里没有时长（存储只留 mid / 标题 / 歌手），列表会显示 `--:--`。
                     duration_secs: 0,
+                    lyric: None,
                 }))
             })
             .collect();
@@ -3039,6 +3041,7 @@ mod tests {
             artist: "人".to_string(),
             album: String::new(),
             duration_secs: 0,
+            lyric: None,
         })
     }
 
@@ -3214,17 +3217,12 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).expect("建下载目录");
         app.config.paths.download_dir = dir.clone();
-        app.config.paths.lyrics_dir = dir.join("lyrics");
 
         let song = crate::tui::test_support::titled_song("abc123", "成全", "刘若英");
         let stem = crate::download::file_stem(&song);
         std::fs::write(dir.join(format!("{stem}.mp3")), vec![0_u8; 4400]).expect("写下载文件");
-        std::fs::create_dir_all(&app.config.paths.lyrics_dir).expect("建歌词目录");
-        std::fs::write(
-            app.config.paths.lyrics_dir.join(format!("{stem}.lrc")),
-            "[00:01.00]第一句\n",
-        )
-        .expect("写歌词");
+        // 歌词与音频**同目录**（下载时就写在这儿）。
+        std::fs::write(dir.join(format!("{stem}.lrc")), "[00:01.00]第一句\n").expect("写歌词");
         app.refresh_downloads();
 
         app.nav.favorites.set_items(vec![song.clone()]);
@@ -3580,7 +3578,7 @@ mod tests {
         let (mut app, _runtime) = test_app();
         let dir = crate::tui::test_support::temp_library_tree("scan-fill");
         let dirs = [dir.join("canto")];
-        app.on_msg(scan_library(&dirs, &dir.join("library.json")));
+        app.on_msg(scan_library(&dirs, &dir.join("library.json"), &dir.join("下载目录")));
         assert_eq!(app.local_songs().len(), 2, "两首都进曲库");
         assert!(!app.library_scanning);
         assert!(
@@ -3597,9 +3595,9 @@ mod tests {
         let dir = crate::tui::test_support::temp_library_tree("scan-quiet");
         let index = dir.join("library.json");
         let dirs = [dir.join("canto")];
-        app.on_msg(scan_library(&dirs, &index));
+        app.on_msg(scan_library(&dirs, &index, &dir.join("下载目录")));
         app.notice = None;
-        app.on_msg(scan_library(&dirs, &index));
+        app.on_msg(scan_library(&dirs, &index, &dir.join("下载目录")));
         assert_eq!(app.local_songs().len(), 2);
         assert!(
             app.notice_text().is_none(),
@@ -3614,10 +3612,10 @@ mod tests {
         let dir = crate::tui::test_support::temp_library_tree("scan-removed");
         let index = dir.join("library.json");
         let dirs = [dir.join("canto")];
-        app.on_msg(scan_library(&dirs, &index));
+        app.on_msg(scan_library(&dirs, &index, &dir.join("下载目录")));
         app.notice = None;
         std::fs::remove_file(dir.join("canto/b.wav")).expect("删一首");
-        app.on_msg(scan_library(&dirs, &index));
+        app.on_msg(scan_library(&dirs, &index, &dir.join("下载目录")));
         assert_eq!(app.local_songs().len(), 1);
         assert!(
             app.notice_text()
@@ -3632,7 +3630,7 @@ mod tests {
         let (mut app, _runtime) = test_app();
         let dir = crate::tui::test_support::temp_library_tree("scan-missing");
         let missing = dir.join("没有这个目录");
-        app.on_msg(scan_library(&[missing], &dir.join("library.json")));
+        app.on_msg(scan_library(&[missing], &dir.join("library.json"), &dir.join("下载目录")));
         assert!(
             app.notice_text()
                 .is_some_and(|text| text.contains("没有这个目录")),

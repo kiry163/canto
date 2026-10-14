@@ -804,7 +804,7 @@ mod tests {
             std::env::temp_dir().join(format!("canto-local-play-{}.wav", std::process::id()));
         write_sine_wav(&path, 44_100, 1.0, 440.0);
 
-        let song = crate::library::entry_to_song(&crate::library::read_entry(&path, 0, 0));
+        let song = crate::library::entry_to_song(&crate::library::read_entry(&path, 0, 0, None));
         assert!(song.is_local(), "库里造出来的歌是本地曲目");
         let track = Track {
             song,

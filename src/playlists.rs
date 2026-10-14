@@ -196,6 +196,7 @@ mod tests {
             artist: "张宇".to_string(),
             album: "消息".to_string(),
             duration_secs: 270,
+            lyric: None,
         })
     }
 

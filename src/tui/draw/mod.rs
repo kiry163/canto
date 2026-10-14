@@ -350,6 +350,7 @@ mod tests {
                 artist: "人".to_string(),
                 album: String::new(),
                 duration_secs: 0,
+                lyric: None,
             }),
         );
         app.switch_menu(Menu::LocalPlaylists);

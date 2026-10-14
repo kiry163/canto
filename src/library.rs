@@ -36,26 +36,77 @@ pub struct Entry {
     pub artist: String,
     pub album: String,
     pub duration_secs: u64,
+    /// 同目录同 stem 的 `.lrc`（扫描时配的；没有就是 `None`）。
+    ///
+    /// 内嵌歌词不落这里——那个播放时用 `lofty` 现读。
+    #[serde(default)]
+    pub lyric: Option<PathBuf>,
 }
 
-/// 走一遍配置里的目录：返回候选文件的 `(路径, mtime, size)`，以及「认得出是音频但解不了」
+/// 一条扫描到的音频（tag 还没读）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoundFile {
+    pub path: PathBuf,
+    /// 秒级修改时间（拿不到就是 0）。
+    pub mtime: u64,
+    pub size: u64,
+    /// 同目录同 stem 的 `.lrc`（`.trans.lrc` 是翻译，不算这一份）。
+    pub lyric: Option<PathBuf>,
+}
+
+/// 走一遍配置里的目录：返回候选音频（配好同 stem 的 `.lrc`），以及「认得出是音频但解不了」
 /// 的条数。目录不存在 / 没权限一律跳过——曲库不该因为配置里一个坏路径就起不来。
-pub fn walk(dirs: &[PathBuf]) -> (Vec<(PathBuf, u64, u64)>, usize) {
+///
+/// `skip` 是**下载目录**：整棵子树跳过。下载那批歌归下载索引管，扫进来会让第 5 屏里同一份
+/// 文件出现两次（一次「下载」、一次「目录」）。
+pub fn walk(dirs: &[PathBuf], skip: &Path) -> (Vec<FoundFile>, usize) {
     let mut files = Vec::new();
     let mut unsupported = 0;
     for dir in dirs {
-        walk_into(dir, &mut files, &mut unsupported);
+        walk_into(dir, skip, &mut files, &mut unsupported);
     }
-    files.sort();
-    files.dedup_by(|left, right| left.0 == right.0);
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    files.dedup_by(|left, right| left.path == right.path);
     (files, unsupported)
 }
 
-fn walk_into(dir: &Path, files: &mut Vec<(PathBuf, u64, u64)>, unsupported: &mut usize) {
+/// 这个目录就是要跳过的那个吗。两边都试着规范化（`./`、盘符大小写、软链都在这层抹平）；
+/// 规范化不出来（比如目录还不存在）就按字面比。
+fn is_skipped(dir: &Path, skip: &Path) -> bool {
+    if dir == skip {
+        return true;
+    }
+    match (std::fs::canonicalize(dir), std::fs::canonicalize(skip)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn walk_into(dir: &Path, skip: &Path, files: &mut Vec<FoundFile>, unsupported: &mut usize) {
+    if is_skipped(dir, skip) {
+        return;
+    }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    for entry in entries.flatten() {
+    let entries: Vec<std::fs::DirEntry> = entries.flatten().collect();
+    // 先把这一层目录里的 `.lrc` 收一份，音频进来时按 stem 配（只配同目录的）。
+    let mut lyrics: HashMap<String, PathBuf> = HashMap::new();
+    for entry in &entries {
+        let path = entry.path();
+        if extension_of(&path).as_deref() != Some("lrc") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().map(|stem| stem.to_string_lossy().to_lowercase()) else {
+            continue;
+        };
+        // `一首.trans.lrc` 的 stem 是 `一首.trans`——那是翻译，不是这一首的歌词。
+        if stem.is_empty() || stem.ends_with(".trans") {
+            continue;
+        }
+        lyrics.entry(stem).or_insert(path);
+    }
+    for entry in entries {
         let path = entry.path();
         let Ok(metadata) = std::fs::symlink_metadata(&path) else {
             continue;
@@ -67,12 +118,21 @@ fn walk_into(dir: &Path, files: &mut Vec<(PathBuf, u64, u64)>, unsupported: &mut
         }
         if kind.is_dir() {
             if !is_hidden(&path) {
-                walk_into(&path, files, unsupported);
+                walk_into(&path, skip, files, unsupported);
             }
         } else if kind.is_file() {
             let extension = extension_of(&path);
             if extension.as_deref().is_some_and(|extension| EXTENSIONS.contains(&extension)) {
-                files.push((path, mtime_secs(&metadata), metadata.len()));
+                let lyric = path
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().to_lowercase())
+                    .and_then(|stem| lyrics.get(&stem).cloned());
+                files.push(FoundFile {
+                    path,
+                    mtime: mtime_secs(&metadata),
+                    size: metadata.len(),
+                    lyric,
+                });
             } else if extension
                 .as_deref()
                 .is_some_and(|extension| UNSUPPORTED_AUDIO.contains(&extension))
@@ -85,7 +145,7 @@ fn walk_into(dir: &Path, files: &mut Vec<(PathBuf, u64, u64)>, unsupported: &mut
 
 /// 读一首文件的 tag 与属性。读不到的字段按「没有」处理：标题回落文件名、其余空、时长 0
 /// （界面把 0 渲染成 `--:--`，不再假装 `00:00`）。
-pub fn read_entry(path: &Path, mtime: u64, size: u64) -> Entry {
+pub fn read_entry(path: &Path, mtime: u64, size: u64, lyric: Option<PathBuf>) -> Entry {
     let tagged = lofty::read_from_path(path).ok();
     let tag = tagged
         .as_ref()
@@ -108,11 +168,14 @@ pub fn read_entry(path: &Path, mtime: u64, size: u64) -> Entry {
             .as_ref()
             .map(|file| file.properties().duration().as_secs())
             .unwrap_or(0),
+        lyric,
     }
 }
 
 /// 索引格式版本。字段含义变了就 +1：旧文件整份丢弃重扫，不做迁移。
-pub const INDEX_VERSION: u32 = 1;
+///
+/// 2：条目多了一列 `lyric`（同 stem 的 `.lrc`），同时扫描开始跳过下载目录。
+pub const INDEX_VERSION: u32 = 2;
 
 /// 曲库索引：扫过的目录 + 每首的 tag 快照。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,8 +225,10 @@ pub fn save_index(path: &Path, index: &Index) -> Result<()> {
 }
 
 /// 增量扫描：`mtime`/`size` 都没变的沿用旧 `Entry`（不重读 tag），变了的重读，这次没扫到的丢掉。
-pub fn rescan(previous: &Index, dirs: &[PathBuf]) -> ScanOutcome {
-    let (files, skipped_unsupported) = walk(dirs);
+///
+/// `skip` 是下载目录（见 [`walk`]）。内容没变但这次才配到的 `.lrc` 会补进沿用的那条。
+pub fn rescan(previous: &Index, dirs: &[PathBuf], skip: &Path) -> ScanOutcome {
+    let (files, skipped_unsupported) = walk(dirs, skip);
     let mut known: HashMap<PathBuf, Entry> = previous
         .entries
         .iter()
@@ -172,11 +237,14 @@ pub fn rescan(previous: &Index, dirs: &[PathBuf]) -> ScanOutcome {
         .collect();
     let mut entries = Vec::with_capacity(files.len());
     let mut added = 0;
-    for (path, mtime, size) in files {
-        match known.remove(&path) {
-            Some(entry) if entry.mtime == mtime && entry.size == size => entries.push(entry),
+    for file in files {
+        match known.remove(&file.path) {
+            Some(mut entry) if entry.mtime == file.mtime && entry.size == file.size => {
+                entry.lyric = file.lyric;
+                entries.push(entry);
+            }
             _ => {
-                entries.push(read_entry(&path, mtime, size));
+                entries.push(read_entry(&file.path, file.mtime, file.size, file.lyric));
                 added += 1;
             }
         }
@@ -229,17 +297,11 @@ pub fn entry_to_song(entry: &Entry) -> Song {
 
 /// 本地曲目的歌词：**只在本地找**，一个请求都不发。
 ///
-/// 三处按顺序试：① 音频**同目录同名** `.lrc` → ② `lyrics_dir` 里的同名 `.lrc`
-/// （canto 自己下载的歌词就放那儿）→ ③ 音频里的**内嵌歌词**（`lofty`）。
-pub fn local_lyric(path: &Path, lyrics_dir: &Path) -> Option<Lyric> {
+/// 两处按顺序试：① 音频**同目录同名** `.lrc`（canto 自己下载的歌词就放音频旁边）
+/// → ② 音频里的**内嵌歌词**（`lofty`）。
+pub fn local_lyric(path: &Path) -> Option<Lyric> {
     if let Some(lyric) = read_lrc(&path.with_extension("lrc")) {
         return Some(lyric);
-    }
-    if let Some(stem) = path.file_stem() {
-        let named = lyrics_dir.join(format!("{}.lrc", stem.to_string_lossy()));
-        if let Some(lyric) = read_lrc(&named) {
-            return Some(lyric);
-        }
     }
     embedded_lyric(path)
 }
@@ -295,26 +357,78 @@ mod tests {
     use super::*;
     use crate::model::Quality;
 
-    /// 本地歌词三处查找：同目录同名 `.lrc` → `lyrics_dir` 里的同名 → 都没有就是没有。
+    /// 一个不存在的「下载目录」：这些测试不关心「跳过下载目录」那件事。
+    fn no_skip() -> PathBuf {
+        PathBuf::from("不存在的下载目录")
+    }
+
+    /// 本地歌词两处查找：同目录同名 `.lrc` → 音频内嵌 tag；都没有就是没有。
+    /// （「集中歌词目录」那条随 `[paths] lyrics_dir` 一起取消了。）
     #[test]
-    fn local_lyrics_come_from_the_sidecar_then_the_lyrics_dir() {
+    fn local_lyrics_come_from_the_sidecar_or_the_file_itself() {
         let dir = temp_tree("lyric-lookup");
         let wav = dir.join("canto/一首.wav");
         fixture_with_tags(&wav, "一首", "张宇", "消息");
-        let lyrics_dir = dir.join("lyrics");
-        std::fs::create_dir_all(&lyrics_dir).expect("建歌词目录");
-        assert!(local_lyric(&wav, &lyrics_dir).is_none(), "两处都没有就是没有");
+        assert!(local_lyric(&wav).is_none(), "两处都没有就是没有");
 
         std::fs::write(dir.join("canto/一首.lrc"), "[00:01.00]第一句\n[00:11.00]第二句\n")
             .expect("写同目录的 .lrc");
-        let sidecar = local_lyric(&wav, &lyrics_dir).expect("同目录同名 .lrc 优先");
+        let sidecar = local_lyric(&wav).expect("同目录同名 .lrc");
         assert_eq!(sidecar.lines.len(), 2);
         assert_eq!(sidecar.lines[1].text, "第二句");
+    }
 
-        std::fs::remove_file(dir.join("canto/一首.lrc")).expect("删掉同目录那份");
-        std::fs::write(lyrics_dir.join("一首.lrc"), "[00:02.00]来自歌词目录\n").expect("写歌词目录");
-        let from_dir = local_lyric(&wav, &lyrics_dir).expect("lyrics_dir 里的同名 .lrc");
-        assert_eq!(from_dir.lines[0].text, "来自歌词目录");
+    /// 扫描时把同 stem 的 `.lrc` 配上：它**不是**音频（不算进候选、也不算「不支持的音频」）。
+    #[test]
+    fn a_sibling_lrc_is_paired_and_never_counted_as_audio() {
+        let dir = temp_tree("lrc-pair");
+        let canto = dir.join("canto");
+        std::fs::write(canto.join("a.lrc"), "[00:01.00]给 a.mp3 的\n").expect("写歌词");
+        std::fs::write(canto.join("a.trans.lrc"), "[00:01.00]译文\n").expect("写翻译");
+        std::fs::write(canto.join("无主.lrc"), "[00:01.00]孤儿\n").expect("写孤儿歌词");
+
+        let (files, unsupported) = walk(&[canto.clone()], &no_skip());
+        assert_eq!(files.len(), 3, "只有三个音频进候选：{files:?}");
+        assert_eq!(unsupported, 0, ".lrc 不算「不支持的音频」");
+
+        let outcome = rescan(&Index::default(), &[canto.clone()], &no_skip());
+        let paired = outcome
+            .index
+            .entries
+            .iter()
+            .find(|entry| entry.path.ends_with("a.mp3"))
+            .expect("有 a.mp3");
+        assert_eq!(paired.lyric.as_deref(), Some(canto.join("a.lrc").as_path()), "同 stem 的 .lrc 配上");
+        let orphan = outcome
+            .index
+            .entries
+            .iter()
+            .find(|entry| entry.path.ends_with("c.txt") || entry.path.ends_with("无主"));
+        assert!(orphan.is_none(), "没有对应音频的 .lrc 不进索引");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 下载目录整棵跳过：`dirs` 里正好是它、或它是 `dirs` 某一项的子树，两种都要成立
+    /// （否则同一份文件会在下载索引与曲库索引里各出现一次）。
+    #[test]
+    fn the_download_directory_is_skipped_whole() {
+        let root = std::env::temp_dir().join(format!("canto-library-skip-{}", std::process::id()));
+        std::fs::remove_dir_all(&root).ok();
+        let download = root.join("canto");
+        let music = root.join("music");
+        std::fs::create_dir_all(&download).expect("建下载目录");
+        std::fs::create_dir_all(&music).expect("建音乐目录");
+        std::fs::write(download.join("下载的.mp3"), b"x").expect("写下载文件");
+        std::fs::write(music.join("自己的.wav"), b"y").expect("写自己的文件");
+
+        let (files, _) = walk(&[download.clone(), music.clone()], &download);
+        assert_eq!(files.len(), 1, "正好是它 → 那一条不扫：{files:?}");
+        assert!(files[0].path.ends_with("自己的.wav"));
+
+        let (files, _) = walk(&[root.clone()], &download);
+        assert_eq!(files.len(), 1, "它是某一项的子树 → 递归到它时跳过：{files:?}");
+        assert!(files[0].path.ends_with("自己的.wav"));
+        std::fs::remove_dir_all(&root).ok();
     }
 
     /// 一棵测试用的目录树：`canto/{a.mp3, b.FLAC, c.txt, .hidden/d.mp3, sub/e.wav}`。
@@ -353,7 +467,7 @@ mod tests {
         let dir = temp_tree("index-roundtrip");
         let index_path = dir.join("library.json");
         let dirs = [dir.join("canto")];
-        let outcome = rescan(&Index::default(), &dirs);
+        let outcome = rescan(&Index::default(), &dirs, &no_skip());
         save_index(&index_path, &outcome.index).expect("写索引");
         assert_eq!(load_index(&index_path, &dirs).entries.len(), 3, "读得回来");
         assert!(
@@ -369,9 +483,9 @@ mod tests {
     fn only_changed_files_are_re_read() {
         let dir = temp_tree("index-unchanged");
         let dirs = [dir.join("canto")];
-        let first = rescan(&Index::default(), &dirs);
+        let first = rescan(&Index::default(), &dirs, &no_skip());
         assert_eq!((first.added, first.removed, first.skipped_unsupported), (3, 0, 0));
-        let again = rescan(&first.index, &dirs);
+        let again = rescan(&first.index, &dirs, &no_skip());
         assert_eq!((again.added, again.removed), (0, 0));
         assert_eq!(again.index.entries, first.index.entries, "整套 Entry 原样沿用，没重读 tag");
     }
@@ -380,10 +494,10 @@ mod tests {
     fn changed_and_removed_files_are_noticed() {
         let dir = temp_tree("index-changed");
         let dirs = [dir.join("canto")];
-        let first = rescan(&Index::default(), &dirs);
+        let first = rescan(&Index::default(), &dirs, &no_skip());
         std::fs::write(dir.join("canto/a.mp3"), "完全不同的内容，长度也不一样").expect("改文件");
         std::fs::remove_file(dir.join("canto/b.FLAC")).expect("删文件");
-        let second = rescan(&first.index, &dirs);
+        let second = rescan(&first.index, &dirs, &no_skip());
         assert_eq!(second.removed, 1);
         assert_eq!(second.added, 1, "变过的那首算重读");
         assert!(
@@ -396,7 +510,7 @@ mod tests {
     #[test]
     fn index_songs_sorts_by_artist_album_title_and_marks_them_local() {
         let dir = temp_tagged_tree("index-sort");
-        let songs = index_songs(&rescan(&Index::default(), &[dir.join("canto")]).index);
+        let songs = index_songs(&rescan(&Index::default(), &[dir.join("canto")], &no_skip()).index);
         assert_eq!(songs.len(), 3);
         let key = |song: &Song| (song.singers.clone(), song.album_name.clone(), song.title.clone());
         assert!(
@@ -418,8 +532,8 @@ mod tests {
     #[test]
     fn walk_collects_supported_files_and_counts_the_rest() {
         let dir = temp_tree("walk-basic");
-        let (files, skipped) = walk(&[dir.join("canto")]);
-        let names: Vec<String> = files.iter().map(|(path, _, _)| file_name(path)).collect();
+        let (files, skipped) = walk(&[dir.join("canto")], &no_skip());
+        let names: Vec<String> = files.iter().map(|file| file_name(&file.path)).collect();
         assert_eq!(names, ["a.mp3", "b.FLAC", "e.wav"], "大小写不敏感；点开头目录整棵跳过");
         assert_eq!(skipped, 0, "c.txt 不是音频，不参与「不支持的格式」计数");
     }
@@ -429,7 +543,7 @@ mod tests {
         let dir = temp_tree("walk-unsupported");
         std::fs::write(dir.join("canto/曲子.opus"), b"opus").expect("写 opus");
         std::fs::write(dir.join("canto/曲子.ape"), b"ape").expect("写 ape");
-        let (files, skipped) = walk(&[dir.join("canto")]);
+        let (files, skipped) = walk(&[dir.join("canto")], &no_skip());
         assert_eq!(files.len(), 3, "不支持的音频不进列表");
         assert_eq!(skipped, 2, "opus/ape 要计数（提示才说得出口）");
     }
@@ -439,30 +553,30 @@ mod tests {
         let dir = temp_tree("walk-cycle");
         // 真软链要权限，建不起来就只留「不跟软链」的实现约束（这条断言仍会跑到）。
         make_symlink(&dir.join("canto/loop"), &dir.join("canto")).ok();
-        let (files, _) = walk(&[dir.join("canto")]);
+        let (files, _) = walk(&[dir.join("canto")], &no_skip());
         assert!(files.len() <= 3, "成环要不跟软链，不能无限递归：{files:?}");
     }
 
     #[test]
     fn walk_dedupes_and_sorts() {
         let dir = temp_tree("walk-dedupe");
-        let (files, _) = walk(&[dir.join("canto"), dir.join("canto/")]);
+        let (files, _) = walk(&[dir.join("canto"), dir.join("canto/")], &no_skip());
         assert_eq!(files.len(), 3, "同一目录写两遍只算一次");
-        let paths: Vec<&PathBuf> = files.iter().map(|(path, _, _)| path).collect();
+        let paths: Vec<&PathBuf> = files.iter().map(|file| &file.path).collect();
         assert!(paths.windows(2).all(|pair| pair[0] <= pair[1]), "排序稳定：{paths:?}");
     }
 
     #[test]
     fn walk_skips_missing_and_relative_dirs_without_panicking() {
         let dir = temp_tree("walk-missing");
-        let (files, _) = walk(&[dir.join("没有这个目录"), dir.join("canto")]);
+        let (files, _) = walk(&[dir.join("没有这个目录"), dir.join("canto")], &no_skip());
         assert_eq!(files.len(), 3, "不存在的目录跳过，别炸");
     }
 
     #[test]
     fn read_entry_falls_back_to_the_file_name() {
         let dir = temp_tree("entry-fallback");
-        let entry = read_entry(&dir.join("canto/a.mp3"), 1, 2);
+        let entry = read_entry(&dir.join("canto/a.mp3"), 1, 2, None);
         assert_eq!(entry.title, "a", "文件名（去掉扩展名）当标题");
         assert_eq!(entry.artist, "");
         assert_eq!(entry.album, "");
@@ -475,7 +589,7 @@ mod tests {
     fn read_entry_reads_written_tags_and_duration() {
         let dir = temp_tree("entry-tags");
         let path = fixture_with_tags(&dir.join("canto/tagged.wav"), "曲终人散", "张宇", "消息");
-        let entry = read_entry(&path, 7, 8);
+        let entry = read_entry(&path, 7, 8, None);
         assert_eq!(entry.title, "曲终人散");
         assert_eq!(entry.artist, "张宇");
         assert_eq!(entry.album, "消息");
@@ -550,6 +664,7 @@ mod tests {
             artist: "张宇".to_string(),
             album: "消息".to_string(),
             duration_secs: 270,
+            lyric: None,
         };
         let song = entry_to_song(&entry);
         assert_eq!(song.local_bytes, 31_457_280);
