@@ -215,10 +215,9 @@ struct SavedFile {
     cy: Option<i32>,
 }
 
-/// 启动时开不开：状态文件优先（缺 `shown` = 还没记过），其次老配置里遗留的 `enabled`
-/// （那个键已移除，但用它当一次初值，免得「明明设了关、升级后冒出个窗口」），再不然默认开。
-fn start_shown(saved: Option<bool>, legacy: Option<bool>) -> bool {
-    saved.or(legacy).unwrap_or(true)
+/// 启动时开不开：状态文件说开着就开着（缺 `shown` = 还没记过），再不然默认开。
+fn start_shown(saved: Option<bool>) -> bool {
+    saved.unwrap_or(true)
 }
 
 /// 读开关与中心点；文件不在或读坏了就是「什么都没记」（调用方退回默认）。
@@ -286,13 +285,13 @@ impl DesktopLyrics {
         }
     }
 
-    /// 启动：状态文件（或老配置里的 `enabled`）说开着就建窗口。
+    /// 启动：状态文件说开着就建窗口（没记过 = 默认开着）。
     ///
     /// 建不起来只报一句、界面照跑——**不改意图、不落盘**：文件记的是「你想开着」，按一次热键
     /// 就是重试。
     pub fn install(config: &DesktopLyricsConfig, saved: SavedState) -> Installed {
         let mut overlay = Self { center: saved.center, ..Self::none() };
-        if !start_shown(saved.shown, config.legacy_enabled) {
+        if !start_shown(saved.shown) {
             return Installed { overlay, error: None };
         }
         let error = overlay.enable(config);
@@ -1723,13 +1722,12 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// 启动时开不开：状态文件优先（缺 `shown` = 还没记过），其次老配置里遗留的 `enabled`。
+    /// 启动时开不开：状态文件说了算（缺 `shown` = 还没记过 → 默认开）。
     #[test]
-    fn the_startup_switch_prefers_the_file_then_the_legacy_key() {
-        assert!(start_shown(Some(true), Some(false)), "文件说了算");
-        assert!(!start_shown(Some(false), Some(true)), "文件说了算");
-        assert!(!start_shown(None, Some(false)), "没记过才轮到老配置里的 enabled");
-        assert!(start_shown(None, None), "都没有就默认开（跟老 enabled = true 一个口径）");
+    fn the_startup_switch_comes_from_the_state_file() {
+        assert!(start_shown(Some(true)), "记着开着");
+        assert!(!start_shown(Some(false)), "记着关着");
+        assert!(start_shown(None), "没记过就默认开");
     }
 
     /// 没窗口的时候连 payload 都不造——「关掉就零成本」这条性质靠它守着。

@@ -1352,10 +1352,10 @@ mod tests {
         let (mut app, _runtime) = test_app();
         // 独立的下载目录：默认那个是 `~/Music/canto`，开发机上真躺着「刘若英 - 成全.mp3」，
         // 这一行就会走「下载里已有」（容器 `MP3`）而不是记录里那份。列口径是 缓存 > 下载 > 记录。
-        app.config.download_dir = std::env::temp_dir()
+        app.config.paths.download_dir = std::env::temp_dir()
             .join(format!("canto-draw-hist-{}", std::process::id()));
-        std::fs::remove_dir_all(&app.config.download_dir).ok();
-        std::fs::create_dir_all(&app.config.download_dir).expect("建下载目录");
+        std::fs::remove_dir_all(&app.config.paths.download_dir).ok();
+        std::fs::create_dir_all(&app.config.paths.download_dir).expect("建下载目录");
         app.refresh_downloads();
 
         // 一条「刚听完 QQ 歌」的记录：时长/体积是 Task 8 存进去的那份。
@@ -1365,7 +1365,7 @@ mod tests {
                 mid: "a".to_string(),
                 title: "成全".to_string(),
                 singers: "刘若英".to_string(),
-                at: crate::history::now_secs(),
+                at: crate::clock::now_secs(),
                 origin: "在线收藏".to_string(),
                 local_path: None,
                 duration_secs: 276,
@@ -1398,7 +1398,7 @@ mod tests {
         assert!(data.contains("刚刚 · 来自《在线收藏》"), "备注列写时间与来源：{data}");
         assert!(!data.contains("成全 — 刘若英"), "不该再拼「标题 — 歌手」：{data}");
 
-        std::fs::remove_dir_all(&app.config.download_dir).ok();
+        std::fs::remove_dir_all(&app.config.paths.download_dir).ok();
     }
 
     /// 老条目（记录里没有时长/体积）显示占位符，不写假的 0。
@@ -1410,7 +1410,7 @@ mod tests {
                 mid: "a".to_string(),
                 title: "老条目".to_string(),
                 singers: "某人".to_string(),
-                at: crate::history::now_secs(),
+                at: crate::clock::now_secs(),
                 origin: "在线收藏".to_string(),
                 local_path: None,
                 duration_secs: 0,
@@ -1448,7 +1448,7 @@ mod tests {
                 mid: "a".to_string(),
                 title: "成全".to_string(),
                 singers: "刘若英".to_string(),
-                at: crate::history::now_secs(),
+                at: crate::clock::now_secs(),
                 origin: "在线收藏".to_string(),
                 local_path: None,
                 duration_secs: 276,
@@ -1498,10 +1498,10 @@ mod tests {
     #[test]
     fn the_queue_overlay_has_a_header() {
         let (mut app, _runtime) = test_app();
-        app.config.download_dir =
+        app.config.paths.download_dir =
             std::env::temp_dir().join(format!("canto-draw-queue-{}", std::process::id()));
-        std::fs::remove_dir_all(&app.config.download_dir).ok();
-        std::fs::create_dir_all(&app.config.download_dir).expect("建下载目录");
+        std::fs::remove_dir_all(&app.config.paths.download_dir).ok();
+        std::fs::create_dir_all(&app.config.paths.download_dir).expect("建下载目录");
         app.refresh_downloads();
         app.queue = crate::tui::queue::Queue::new(
             vec![
@@ -1539,7 +1539,7 @@ mod tests {
         );
 
         app.apply(crate::tui::keys::Action::QueueOverlay);
-        std::fs::remove_dir_all(&app.config.download_dir).ok();
+        std::fs::remove_dir_all(&app.config.paths.download_dir).ok();
     }
 
     /// 曲目列表有表头，且与数据同列；缓存/下载两个标记按数据落在正确的列上。
@@ -1551,12 +1551,12 @@ mod tests {
         app.nav.favorites.set_items(vec![song]);
         app.cached
             .insert("a".to_string(), (crate::model::Quality::High320, 9_800_000));
-        app.config.download_dir =
+        app.config.paths.download_dir =
             std::env::temp_dir().join(format!("canto-draw-dl-{}", std::process::id()));
-        std::fs::remove_dir_all(&app.config.download_dir).ok();
-        std::fs::create_dir_all(&app.config.download_dir).expect("建下载目录");
+        std::fs::remove_dir_all(&app.config.paths.download_dir).ok();
+        std::fs::create_dir_all(&app.config.paths.download_dir).expect("建下载目录");
         std::fs::write(
-            app.config.download_dir.join("刘若英 - 成全.mp3"),
+            app.config.paths.download_dir.join("刘若英 - 成全.mp3"),
             vec![0_u8; 1_024],
         )
         .expect("写下载文件");
@@ -1599,7 +1599,7 @@ mod tests {
             }
         }
 
-        std::fs::remove_dir_all(&app.config.download_dir).ok();
+        std::fs::remove_dir_all(&app.config.paths.download_dir).ok();
     }
 
     /// 本地曲库屏：容器（扩展名）与真实大小，不再显示配置档位。

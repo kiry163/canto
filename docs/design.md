@@ -10,7 +10,7 @@ README 只讲「怎么用」，这里讲「怎么做、为什么这么做、实�
 所以起播几乎是瞬时的。正常播放是「一次请求顺序读到底」；往回拖进度、或往前跳超过 4 MiB
 才重开一次 `Range: bytes=N-` 请求（往前走小距离就直接读掉，省一次连接）。
 
-在此之上加了一层**磁盘缓存**（`~/.cache/canto`，上限 `cache_mb`）：
+在此之上加了一层**磁盘缓存**（`~/.cache/canto`，上限 `[cache] mb`）：
 
 - 文件名是 `<mid>.<档位>.<扩展名>`（mid 全局唯一、不会过期；vkey 会过期所以不能进键。
   档位写进名字是为了算「这份是什么档位」时不用猜——`320` 与 `128` 都是 `.mp3`）
@@ -28,11 +28,11 @@ README 只讲「怎么用」，这里讲「怎么做、为什么这么做、实�
   缓存文件解不开、退回网络那次就是「在线」；档位仍然只有缓存与 CDN 那份知道，本地那份只报体积
 - **下载会先看缓存**：已经有完整的一份就直接复制到下载目录（一个字节都不走网络），
   档位以缓存里那份为准；歌词同样优先用下面这份缓存
-- 超出上限时按「最久没听的先删」清理；`cache_mb = 0` 关掉缓存（顺手把存货也清空）
+- 超出上限时按「最久没听的先删」清理；`[cache] mb = 0` 关掉缓存（顺手把存货也清空）
 
 **歌词也缓存**（`~/.cache/canto/lyrics/<mid>.lrc`，跟歌曲分开两份）：播放与下载都先查它，
 命中就省一次请求；「这首没有歌词」也记一笔（空文件当记号），免得反复为空结果发请求。
-歌词体积很小，不计入 `cache_mb` 上限，但 `cache_mb = 0` 时一起关掉。
+歌词体积很小，不计入 `[cache] mb` 上限，但 `[cache] mb = 0` 时一起关掉。
 
 注意：缓存**只有你听完的歌**才有，所以它不等于离线模式——没听过的歌仍然要联网；**下载过的那份
 同样直接放**（它就是磁盘上的文件，一个请求都不发）。
@@ -55,7 +55,7 @@ README 只讲「怎么用」，这里讲「怎么做、为什么这么做、实�
 
 | 前缀 | 实测规格 | 体积（4 分钟量级） | 用途 |
 |---|---|---|---|
-| `AI00` | flac 192kHz/24bit 立体声 | ~150MB | 母带，仅 `quality = "hires"` |
+| `AI00` | flac 192kHz/24bit 立体声 | ~150MB | 母带，仅 `[playback] quality = "hires"` |
 | `F000` | flac 44.1k/16bit 立体声（个别 48k/24bit） | ~25MB | **默认首选** |
 | `Q000` | flac 44.1k/16bit 立体声 | ~25MB | 默认次选 |
 | `M800` | mp3 320k 立体声 | ~9MB | 无损不可用时 |
@@ -63,7 +63,8 @@ README 只讲「怎么用」，这里讲「怎么做、为什么这么做、实�
 | `Q001` | flac 44.1k/16bit **6 声道** | ~62MB | 5.1 环绕，排在 mp3 之后 |
 | `O801` | vorbis 44.1k **4 声道** | ~19MB | 环绕，最后兜底 |
 
-`quality` 的语义是「从这一档往下找」：`hires`（母带）→ `flac`（默认）→ `320` → `128`。
+`[playback] quality` 的语义是「从这一档往下找」：`hires`（母带，要显式配）→ `flac` → `320` →
+`128`（**配置里的默认值**就是这一档，所以不写这一项时按它排）。
 环绕声版本排在立体声之后，是因为它们只会经过 rodio 的降混，白白多花带宽。
 
 ## 登录二维码（实测，2026-10-11）
@@ -138,7 +139,7 @@ macOS 是主线程 `NSPanel` + 每帧手动泵 AppKit）只管把 payload 画出
 | GDI 不写 alpha 怎么办 | 先用「白字黑底 + `ANTIALIASED_QUALITY`」把 GDI 的输出画进**第二块 DIB 当覆盖率蒙版**，再在 Rust 里按 over 合成到预乘 BGRA（`composite`） | 32 位 DIB 里 GDI 只写 RGB、alpha 保持我们清零的样子；直接画完 `UpdateLayeredWindow` 会得到一个**全透明窗口**（第一版探针就这么写废的） |
 | 为什么要描边 | 8 个方向各画一遍正文（描边色），再画正文（本身颜色） | 桌面什么背景都有，纯色字总有一段看不清 |
 | 鼠标怎么办 | 锁定 = `WS_EX_TRANSPARENT` + `WM_NCHITTEST` 回 `HTTRANSPARENT`；解锁 = 去掉前者、回 `HTCAPTION` | 锁定态「点不着但看得见」；解锁态让系统自己拖，`WM_EXITSIZEMOVE` 收尾 |
-| 位置存哪 | **中心点**存 `desktop-lyrics.json`（独立状态文件） | 窗口宽度随文字长度变，存左上角会一行长一行短地左右抖；`config.toml` 是手写的，程序不改写它（跟 `history.json` 一个口径） |
+| 位置存哪 | **中心点**存 `desktop-lyrics.json`（独立状态文件） | 窗口宽度随文字长度变，存左上角会一行长一行短地左右抖；`config.toml` 是手写的，程序不改写它（跟 `history.json` 一个口径）——唯一的写入口是 `canto config init`（先备份再整份重写，不碰单个键） |
 | 锁定态 | **不持久化**，每次启动都是锁定的 | 省得下次开机「怎么点不到」；忘了锁回来才是真正的坑 |
 | 空闲成本 | `App::tick` 每 150ms 递一帧，内容没变就**一个字节都不推**（`State::advance` 比 payload） | 逐帧零绘制、零分配；只有换行 / 换播放态 / 切锁定才叫醒窗口线程 |
 | 尺寸与位置 | 每次重画按文本量尺寸 → 按中心点摆 → 按当前 DPI 缩放字号 | 一句话长一句话短也不会左右抖；换显示器（DPI 变）字号跟着变 |
@@ -174,7 +175,7 @@ macOS 是主线程 `NSPanel` + 每帧手动泵 AppKit）只管把 payload 画出
 
 ### 开关：热键真拆真建（2026-10-13）
 
-原来「建不建」由 `[desktop_lyrics] enabled` 在启动时定；现在挪到全局热键 `lyrics`
+原来「建不建」由 `[desktop_lyrics] enabled` 在启动时定；现在挪到全局热键 `desktop_lyrics_toggle`
 （默认 `ctrl+shift+d`），并且**真拆真建**——关掉时窗口、线程（Windows）/ panel（macOS）都
 不在，所以「关掉零成本」是物理上的，不是靠跳过 `sync` 装出来的。要点：
 
@@ -185,11 +186,13 @@ macOS 是主线程 `NSPanel` + 每帧手动泵 AppKit）只管把 payload 画出
 | 「开没开」 | `imp::Imp::running()`：Windows 看 `hwnd != 0`、macOS 看 `inner.is_some()`、其它平台恒 `false` | 一处判断同时管住「谁算开着」和「`sync` 要不要干活」（`sync` 开头就早退，连 payload 都不造） |
 | `State` 重置 | 重建时 `state = State::default()` | `State.last` 记着上一份窗口的 payload；不清的话新窗口第一帧 `advance()` 判定「没变化」→ **窗口永远空着**。顺带把锁定态带回默认（拆了再建是锁定的、点不着） |
 | 位置通道 | `positions: Option<Receiver>` **收进 `DesktopLyrics`**（原来是 `App.lyrics_positions`） | 每次建窗口都新开一条通道；放 `App` 上重建后拿到的还是旧通道，拖动回传就断了 |
-| 落盘 | 开关与位置在同一个文件：`{"shown":bool,"cx":int,"cy":int}`；`take_state()` 只在变过时给一份 | 开关是**状态**不是偏好（热键不该去改使用者的配置文件）。缺省 `shown = true`（= 老的 `enabled = true`）；老配置里残留的 `enabled` 只在状态文件还没记过开关时当一次初值（`start_shown`） |
+| 落盘 | 开关与位置在同一个文件：`{"shown":bool,"cx":int,"cy":int}`；`take_state()` 只在变过时给一份 | 开关是**状态**不是偏好（热键不该去改使用者的配置文件）。缺省 `shown = true`（= 老 `enabled = true` 的口径），启动时由 `start_shown` 读；`enabled` 那个键已彻底不认了（不认识的键会点名进 `canto.log`） |
 | 起不来 | 通知一句 + 日志，**不落盘** | 文件记的是「你想开着」、内存记的是真相；再按一次热键就是重试 |
 
 派发只在主界面（`Screen::Main` 或首页 `Screen::Home`——七个动作同一条规则；登录屏直接丢）；
-热键**不因开关状态而注销**——关掉了还得靠它开回来。`[hotkeys]` 因此从 6 条变 7 条（`lyrics`），`enabled` 从配置模板里消失。
+热键**不因开关状态而注销**——关掉了还得靠它开回来。`[hotkeys]` 因此从 6 条变 7 条（新增
+`desktop_lyrics_toggle`，另一条 `desktop_lyrics_lock` 管锁定；两条都带 `desktop_lyrics_` 前缀，
+光看键名就知道是管什么的），`enabled` 从配置模板里消失。
 
 ### 开关两次才发现的三个坑（macOS，实测 2026-10-13）
 
@@ -354,8 +357,8 @@ Windows 那半不受影响：`Drop` 走 `WM_CLOSE` → `DestroyWindow`（真销�
   比按「标题 — 歌手」字符串准，但重复出现的同一首无法区分。
 - 「会话已失效」的判定码（`session::looks_expired`）按 401 与已知文案写就，
   **还没等来一次真实的会话过期去核对**；下次遇到时把 `--log debug` 里的响应补进去收紧。
-- 下载的 `hires` 档位体积很大（单曲约 150MB）。默认档位是 **320k MP3**（约 10MB/首）；
-  要无损就把 `config.toml` 的 `quality` 改成 `flac`。
+- 下载的 `hires` 档位体积很大（单曲约 150MB）。默认档位是 **128k MP3**（约 3–5MB/首）；
+  要无损就把 `config.toml` 的 `[playback] quality` 改成 `flac`。
 
 ## 设计要点
 
@@ -488,10 +491,11 @@ Windows 那半不受影响：`Drop` 走 `WM_CLOSE` → `DestroyWindow`（真销�
 
 ```
 src/
-  main.rs      启动：日志 → 配置 → 会话 → 界面（只剩这一条路径）
-  cli.rs       --log / --version
+  main.rs      启动：配置 → 会话 → 界面；`canto config …` 在锁、日志、界面之前就处理完并退出
+  cli.rs       `--log` / `config init|path` / `--version`
   paths.rs     所有落盘路径（会话 / 配置 / 历史 / 日志 / 二维码 PNG）
-  config.rs    config.toml：载入、默认生成、坏文件回退、`~` 展开
+  clock.rs     本地时间（Unix `localtime_r` / Windows `FileTimeToSystemTime`）：历史文案与备份文件名
+  config.rs    config.toml：逐键解析（坏键只波及自己 + 未知键点名）、带注释的默认配置、`canto config init` 的备份与重写
   history.rs   播放历史：落盘、上限截断、连续去重、相对时间文案
   hotkeys.rs   全局快捷键：组合 → 系统级注册 → `keys::Action`（Windows/macOS/其它 三份 cfg 实现）
   session.rs   登录态：域名感知 cookie jar、完整性校验、落盘、失效判定

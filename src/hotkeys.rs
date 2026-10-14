@@ -67,16 +67,16 @@ pub const DEFAULTS: [DefaultBinding; 7] = [
         action: Action::VolumeDown,
     },
     DefaultBinding {
-        field: "lock",
-        keys: "ctrl+shift+l",
-        help: "歌词窗口锁定 / 解锁",
-        action: Action::LyricsLock,
+        field: "desktop_lyrics_toggle",
+        keys: "ctrl+shift+d",
+        help: "桌面歌词开 / 关",
+        action: Action::LyricsWindow,
     },
     DefaultBinding {
-        field: "lyrics",
-        keys: "ctrl+shift+d",
-        help: "歌词窗口开 / 关",
-        action: Action::LyricsWindow,
+        field: "desktop_lyrics_lock",
+        keys: "ctrl+shift+l",
+        help: "桌面歌词锁定 / 解锁",
+        action: Action::LyricsLock,
     },
 ];
 
@@ -521,7 +521,15 @@ mod tests {
         let fields: Vec<&str> = DEFAULTS.iter().map(|entry| entry.field).collect();
         assert_eq!(
             fields,
-            ["play_pause", "next", "prev", "volume_up", "volume_down", "lock", "lyrics"]
+            [
+                "play_pause",
+                "next",
+                "prev",
+                "volume_up",
+                "volume_down",
+                "desktop_lyrics_toggle",
+                "desktop_lyrics_lock"
+            ]
         );
         let combos: Vec<&str> = DEFAULTS.iter().map(|entry| entry.keys).collect();
         assert_eq!(
@@ -532,8 +540,8 @@ mod tests {
                 "ctrl+shift+left",
                 "ctrl+shift+up",
                 "ctrl+shift+down",
-                "ctrl+shift+l",
-                "ctrl+shift+d"
+                "ctrl+shift+d",
+                "ctrl+shift+l"
             ]
         );
         let actions: Vec<Action> = DEFAULTS.iter().map(|entry| entry.action).collect();
@@ -545,13 +553,18 @@ mod tests {
                 Action::Prev,
                 Action::VolumeUp,
                 Action::VolumeDown,
-                Action::LyricsLock,
-                Action::LyricsWindow
+                Action::LyricsWindow,
+                Action::LyricsLock
             ]
         );
         // 帮助浮层那一列也在这张表里：键行左键右述，说明不能是空的。
         for entry in DEFAULTS {
             assert!(!entry.help.is_empty(), "{} 缺帮助说明", entry.field);
+            // 桌面歌词那两条要能从名字上认出管什么（帮助浮层里也这么写）。
+            if entry.action == Action::LyricsWindow || entry.action == Action::LyricsLock {
+                assert!(entry.field.starts_with("desktop_lyrics_"), "{}", entry.field);
+                assert!(entry.help.starts_with("桌面歌词"), "{}", entry.help);
+            }
         }
         // 每个默认组合本身必须合法，否则开箱就报错。
         for entry in DEFAULTS {

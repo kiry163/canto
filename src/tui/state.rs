@@ -660,7 +660,7 @@ fn saved_notice(title: &str, saved: &download::Saved) -> String {
 
 /// 状态行右侧的**一条**通知。
 ///
-/// 只有一把槽：新消息直接顶掉旧的，`config.notice_seconds` 秒后自己消失（0 = 不消失）。
+/// 只有一把槽：新消息直接顶掉旧的，`config.ui.notice_seconds` 秒后自己消失（0 = 不消失）。
 /// `soft` 标记的是**在飞操作的进度**——它每 tick 重写自己，但不许抢占刚发生的一次性消息
 /// （否则下载进度一刷新，刚才那句「已插队…」就没人看得见了）。
 ///
@@ -829,7 +829,7 @@ impl App {
         // 先读存储（下面 `playlists_path` 会被 move 进字段）。
         let playlists_store = playlists::Store::load(&playlists_path);
         // 下载目录里的文件：`↓` 标记与「体积报磁盘那份」用它（配置还没被 move 进字段）。
-        let downloads = crate::download::scan_downloads(&config.download_dir);
+        let downloads = crate::download::scan_downloads(&config.paths.download_dir);
         Self {
             handle,
             engine,
@@ -890,7 +890,7 @@ impl App {
             self.notify("正在扫描曲库…");
             return;
         }
-        let dirs = self.config.library.resolve(&self.config.download_dir);
+        let dirs = self.config.library.resolve(&self.config.paths.download_dir);
         if dirs.is_empty() {
             return; // `[library] dirs = []`：本地功能整体关掉
         }
@@ -909,7 +909,7 @@ impl App {
     /// 启动一次（`App::new` 里直接扫）；每次下载完成（`poll_transfer` 收到结果）一次；
     /// `r` 重扫曲库时顺带一次——外部删掉 / 手工拷进来的文件靠这三处反映。
     pub(super) fn refresh_downloads(&mut self) {
-        self.downloads = crate::download::scan_downloads(&self.config.download_dir);
+        self.downloads = crate::download::scan_downloads(&self.config.paths.download_dir);
     }
 
     /// 本地曲库（已按 歌手 → 专辑 → 标题 排好）。Task 5 的「本地曲库」屏接上就摘掉这个 allow。
@@ -964,9 +964,9 @@ impl App {
         }
     }
 
-    /// `notice_seconds = 0` = 不自动过期（只被下一条顶掉）。
+    /// `[ui] notice_seconds = 0` = 不自动过期（只被下一条顶掉）。
     fn expired(&self, notice: &Notice, now: Instant) -> bool {
-        let ttl = Duration::from_secs(self.config.notice_seconds);
+        let ttl = Duration::from_secs(self.config.ui.notice_seconds);
         !ttl.is_zero() && now.saturating_duration_since(notice.born) >= ttl
     }
 
@@ -1074,9 +1074,9 @@ impl App {
         let Some(song) = self.selected_song() else {
             return;
         };
-        let dir = self.config.download_dir.clone();
-        let lyrics_dir = self.config.lyrics_dir.clone();
-        let quality = self.config.quality;
+        let dir = self.config.paths.download_dir.clone();
+        let lyrics_dir = self.config.paths.lyrics_dir.clone();
+        let quality = self.config.playback.quality;
         let cache_on = self.cache_on();
         let received = Arc::new(AtomicU64::new(0));
         let total = Arc::new(AtomicU64::new(0));
@@ -1347,7 +1347,7 @@ impl App {
         self.lyric = None;
         self.lyric_loading = true;
         let tx = self.tx.clone();
-        let quality = self.config.quality;
+        let quality = self.config.playback.quality;
         self.handle.spawn(async move {
             let result = qq::vkey::candidates(&song, Some(quality)).await;
             let _ = tx.send(Msg::Candidates {
@@ -1386,7 +1386,7 @@ impl App {
         }
         let found = path
             .as_deref()
-            .and_then(|path| crate::library::local_lyric(path, &self.config.lyrics_dir));
+            .and_then(|path| crate::library::local_lyric(path, &self.config.paths.lyrics_dir));
         match found {
             Some(lyric) => {
                 crate::cache::put_lyric(&song.mid, Some(&lyric));
@@ -2078,7 +2078,7 @@ impl App {
 
     /// 播放缓存开着吗（`config.toml` 的 `cache_mb` 为 0 就是关掉，歌词缓存一起关）。
     fn cache_on(&self) -> bool {
-        self.config.cache_mb > 0
+        self.config.cache.mb > 0
     }
 
     /// 进登录屏并开始扫码流程。
@@ -2247,7 +2247,7 @@ impl App {
                 mid: song.mid.clone(),
                 title: song.title.clone(),
                 singers: song.singers.clone(),
-                at: history::now_secs(),
+                at: crate::clock::now_secs(),
                 origin: self.queue.origin().to_string(),
                 local_path: song.path().map(std::path::Path::to_path_buf),
                 // 起播这一刻手里就有时长、专辑与各档位体积，落盘存下来（历史屏那几列要用）。
@@ -2255,7 +2255,7 @@ impl App {
                 sizes: song.sizes,
                 album_name: song.album_name.clone(),
             },
-            self.config.history_limit,
+            self.config.history.limit,
         );
         if let Err(error) = self.history.save(&self.history_path) {
             tracing::warn!("写历史失败：{error:#}");
@@ -2325,7 +2325,7 @@ impl App {
             .map(|entry| {
                 format!(
                     "{} · 来自《{}》",
-                    history::relative(history::now_secs(), entry.at),
+                    history::relative(crate::clock::now_secs(), entry.at),
                     entry.origin
                 )
             })
@@ -2548,7 +2548,7 @@ impl App {
         }
         // 频谱：只在频谱区开着且正在播时取，别的屏不付这份算力。
         let now = std::time::Instant::now();
-        // 通知到点自己消失（`notice_seconds = 0` 表示不消失）。
+        // 通知到点自己消失（`[ui] notice_seconds = 0` 表示不消失）。
         self.expire(now);
         let elapsed = now.saturating_duration_since(self.last_tick);
         self.last_tick = now;
@@ -3213,15 +3213,15 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("canto-play-dl-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).expect("建下载目录");
-        app.config.download_dir = dir.clone();
-        app.config.lyrics_dir = dir.join("lyrics");
+        app.config.paths.download_dir = dir.clone();
+        app.config.paths.lyrics_dir = dir.join("lyrics");
 
         let song = crate::tui::test_support::titled_song("abc123", "成全", "刘若英");
         let stem = crate::download::file_stem(&song);
         std::fs::write(dir.join(format!("{stem}.mp3")), vec![0_u8; 4400]).expect("写下载文件");
-        std::fs::create_dir_all(&app.config.lyrics_dir).expect("建歌词目录");
+        std::fs::create_dir_all(&app.config.paths.lyrics_dir).expect("建歌词目录");
         std::fs::write(
-            app.config.lyrics_dir.join(format!("{stem}.lrc")),
+            app.config.paths.lyrics_dir.join(format!("{stem}.lrc")),
             "[00:01.00]第一句\n",
         )
         .expect("写歌词");
@@ -3669,7 +3669,7 @@ mod tests {
         assert!(app.help_open, "主界面要跟按 `?` 一样生效");
     }
 
-    /// `lock` 是第 6 条全局热键，落到桌面歌词的锁定态上（这条同时钉住「动作接对了」）。
+    /// `desktop_lyrics_lock` 是全局热键之一，落到桌面歌词的锁定态上（这条同时钉住「动作接对了」）。
     #[test]
     fn lyrics_lock_flips_the_overlay_lock() {
         let (mut app, _runtime) = crate::tui::test_support::test_app();
@@ -3685,7 +3685,7 @@ mod tests {
         );
     }
 
-    /// `lyrics` 是第 7 条全局热键（开 / 关歌词窗口）。这里只钉「登录屏挡住」这一半：
+    /// `desktop_lyrics_toggle` 是全局热键之一（开 / 关歌词窗口）。这里只钉「登录屏挡住」那一半：
     /// 主界面那一半会真建窗口，归真机冒烟（跟 `App::new` 不许 install 是同一个理由）。
     #[test]
     fn the_lyrics_window_hotkey_is_blocked_on_the_login_screen() {
@@ -4365,7 +4365,7 @@ mod tests {
     #[test]
     fn zero_seconds_keeps_a_notice_until_it_is_replaced() {
         let (mut app, _runtime) = crate::tui::test_support::test_app();
-        app.config.notice_seconds = 0;
+        app.config.ui.notice_seconds = 0;
 
         app.notify("播放模式：单曲");
         app.expire(after(3600));
@@ -4420,7 +4420,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("canto-dl-state-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).expect("建目录");
-        app.config.download_dir = dir.clone();
+        app.config.paths.download_dir = dir.clone();
         app.refresh_downloads();
         assert!(app.downloads.is_empty(), "空目录就是空表");
 
@@ -4510,7 +4510,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("canto-dl-rescan-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).expect("建目录");
-        app.config.download_dir = dir.clone();
+        app.config.paths.download_dir = dir.clone();
         let file = dir.join("刘若英 - 成全.mp3");
         std::fs::write(&file, vec![0_u8; 8]).expect("写文件");
         app.refresh_downloads();

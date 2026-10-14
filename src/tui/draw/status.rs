@@ -18,7 +18,8 @@ use super::truncate_to_cols;
 ///
 /// **固定**而不是随内容伸缩：右边一伸缩，左边那半行键位提示就会忽长忽短地跳。
 /// 代价是超过这些列的通知要截断，所以往这里写的东西必须短（长错误链进日志）。
-const NOTICE_COLS: u16 = 32;
+/// `config.rs` 也读它：配置警告要不要原样显示，判的就是这一条线。
+pub(crate) const NOTICE_COLS: u16 = 32;
 
 impl App {
     pub(super) fn draw_status(&self, frame: &mut Frame, area: Rect) {

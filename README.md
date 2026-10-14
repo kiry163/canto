@@ -24,7 +24,7 @@
 | 播放取源：起播先看本地——**缓存 > 下载目录 > 线上取流**，`●` 已缓存 / `↓` 已下载那两行重听 0 网络；播放条那一格写着来源（`[缓存 MP3 320k 10.3MB]` / `[下载 3.6MB]` / `[在线 MP3 128k 2.3MB]` / `[曲库 FLAC 27.2MB]`） | ✅ |
 | 播放缓存（完整听过的歌留在 `~/.cache/canto`，重听直接读它） | ✅ |
 | 歌单写入：加进歌单 / 从歌单移除（「我喜欢」只读，见「已知限制」） | ✅ |
-| 配置文件 `config.toml`（音质下限 / 目录 / 缓存与历史上限 / 通知存活秒数 / 全局快捷键 / 桌面歌词） | ✅ |
+| 配置文件 `config.toml`（音质下限 / 两个目录 / 缓存与历史上限 / 通知存活秒数 / 本地曲库目录 / 全局快捷键 / 桌面歌词；`canto config init` 重新生成、`path` 说它在哪） | ✅ |
 | 全局快捷键：canto 在后台时也能播放 / 暂停、上下一首、音量 ±5、开 / 关桌面歌词、切歌词锁定（Windows / macOS，可配可禁） | ✅ |
 | 桌面歌词（Windows / macOS，默认开）：当前句 + 翻译 + 下一句浮在桌面之上，默认鼠标穿透、热键解锁后可拖 | ✅ |
 | 单例运行（同一份数据目录只允许一个实例） | ✅ |
@@ -50,12 +50,15 @@ Intel 芯片的 Mac 不在 Release 里（GitHub 也在逐步下线 `macos-*-inte
 ## 用法
 
 ```bash
-cargo run                 # 进界面（默认命令，也是唯一的命令）
-cargo run -- --log info   # 把播放细节写进日志文件
-cargo run -- --help       # 只有 --log / --version
+cargo run                        # 进界面（不给子命令就是进界面）
+cargo run -- --log info          # 把播放细节写进日志文件
+cargo run -- config path         # 打印配置文件路径（不进界面）
+cargo run -- config init         # 重新生成一份带注释的默认配置（旧的先备份成 .bak）
+cargo run -- --help              # --log / config / --version
 ```
 
-首次运行自动生成 `config.toml`；没有有效会话时界面先出**登录屏**：二维码画在终端里扫码登录。
+首次运行自动生成 `config.toml`（想重新来一份就 `canto config init`，旧的那份会先按时间戳备份）；
+没有有效会话时界面先出**登录屏**：二维码画在终端里扫码登录。
 二维码按**模块**画（一个字符格宽 = 一个模块），33×33 的码只占 **37 列 × 19 行**——普通终端都
 装得下，终端越大自动画得越大（1 / 2 / 4 倍）。真装不下（不到 **38×23**）会告诉你需要多大，
 并给 `c`（粘贴 cookie）与 `o`（用系统查看器打开二维码图片）两条路。同一份数据目录**只允许一个
@@ -83,7 +86,7 @@ canto 在跑**：第二个实例直接退出并报出持有者的 pid（锁在 `
 ```
 
 状态行左边永远是当前可用键的提示，右边是**一条通知**（固定 32 列）：加载进度、动作结果、错误
-都写在那儿，`notice_seconds` 秒后自己消失。列表条数不占这块——它挂在内容块标题上
+都写在那儿，`[ui] notice_seconds` 秒后自己消失。列表条数不占这块——它挂在内容块标题上
 （`在线歌单 › 嗯 42 首`）。
 
 ## 键位
@@ -135,16 +138,27 @@ canto 在跑**：第二个实例直接退出并报出持有者的 pid（锁在 `
   队列里没版权的歌（实测常见）会自动跳过，连着 3 首都不可播就停下报错。**队列内容与各屏选中
   位置退出即丢**（不落盘）。
 
-全局热键（`[hotkeys]`）里关于桌面歌词的有两条：`lyrics = "ctrl+shift+d"` 开 / 关那个窗口
-（**关掉是把窗口拆了**，不是藏起来；再按一次重新建。开不开记在 `desktop-lyrics.json`，重启保持），
-`lock = "ctrl+shift+l"` 切它的锁定 / 解锁（桌面上那个窗口见「功能」，锁定态默认就是**点不着**的
-那一种）。两条只在主界面生效——登录屏没有可控制的东西，按了当没按。
+全局热键（`[hotkeys]`）里关于桌面歌词的有两条，名字自带前缀：`desktop_lyrics_toggle =
+"ctrl+shift+d"` 开 / 关那个窗口（**关掉是把窗口拆了**，不是藏起来；再按一次重新建。开不开记在
+`desktop-lyrics.json`，重启保持），`desktop_lyrics_lock = "ctrl+shift+l"` 切它的锁定 / 解锁
+（桌面上那个窗口见「功能」，锁定态默认就是**点不着**的那一种）。两条只在主界面生效——登录屏没有
+可控制的东西，按了当没按。
 
 ## 配置
 
-`~/.config/canto/config.toml`（首次运行自动生成）：
+`~/.config/canto/config.toml`（首次运行自动生成；`canto config init` 重新生成、`canto config path`
+说它在哪）。**这份文件就是说明书**——能配的键全在里面，各带一句注释；不能在这份文件里改的
+（固定路径、状态文件、派生数据）在文件末尾列出来：
 
 ```toml
+# canto 配置。改完重启 canto 生效；想重新来一份就跑 `canto config init`
+# （旧的那份会先备份成 config.toml.<时间戳>.bak）。
+#
+# 这个文件是**手写**的：程序只在首次运行与 `canto config init` 时写它。
+# 写坏的键不会让程序起不来——那个键回默认值、别的键照旧，一句话进状态行、
+# 详情进 canto.log；拼错的键（不认识的键）同样会在 canto.log 里记一笔。
+
+[playback]
 # 音质下限：从这一档往下找，这一档没有就退到更低的一档（播放与下载都用它）
 #   128    MP3 128k   约 3–5 MB/首   ← 默认
 #   320    MP3 320k   约 8–12 MB/首
@@ -152,43 +166,56 @@ canto 在跑**：第二个实例直接退出并报出持有者的 pid（锁在 `
 #   hires  Hi-Res     单曲可到 ~150 MB
 quality = "128"
 
+[paths]
 # 下载目录（`d` 键落盘的歌曲），支持 `~`
-download_dir = "/Users/you/Music/canto"
-
+download_dir = '/Users/you/Music/canto'
 # 歌词目录（下载时另存的 .lrc，跟歌曲分开放），支持 `~`
-lyrics_dir = "/Users/you/Music/canto-lyrics"
+lyrics_dir = '/Users/you/Music/canto-lyrics'
 
+[cache]
 # 播放缓存上限（MB，0 = 关掉）；缓存在 ~/.cache/canto，按「最久没听的先删」维护
-cache_mb = 1024
+mb = 1024
 
-# 播放历史最多保留多少条
-history_limit = 500
+[history]
+# 播放历史最多保留多少条（至少 1）
+limit = 500
 
+[ui]
 # 状态行右侧那条通知存活多少秒（0 = 不自动消失，只被下一条顶掉）
 notice_seconds = 4
 
+[library]
+# 本地曲库扫哪些目录（`5` 那屏；`r` 重扫）。**不写 dirs = 只扫上面的 download_dir**：
+#   dirs = []            → 本地功能整体关掉（首页不画「本地曲库 / 本地歌单」两格）
+#   dirs = ['D:/music']  → 就扫这些（不再顺手带上 download_dir），相对路径按启动时的工作目录算
+# dirs = ['D:/music', 'E:/flac']
+
+[hotkeys]
 # 全局快捷键：canto 在后台（没聚焦）时也能用这几个键控制播放。
+# 只在 Windows / macOS 生效（Linux 上这一整段不注册，真的就只是注释）。
 # 注意：注册期间这些组合**别的程序收不到**（系统级注册的固有代价）。
 # 写法：修饰键在前、最后一个是要按的键；修饰键可写 ctrl / alt / shift / win
 # （win = super = cmd），键名如 space / up / down / left / f5 / a；
 # 别用媒体键名（macOS 上那要走系统授权）。空字符串 = 这个动作不注册。
-[hotkeys]
+# 最后两条是桌面歌词的：desktop_lyrics_toggle 开 / 关那个窗口（真拆真建），
+# desktop_lyrics_lock 切它的锁定 / 解锁（解锁后才能拖动）。
 play_pause = "ctrl+shift+space"
 next = "ctrl+shift+right"
 prev = "ctrl+shift+left"
 volume_up = "ctrl+shift+up"
 volume_down = "ctrl+shift+down"
-lock = "ctrl+shift+l"
-lyrics = "ctrl+shift+d"
+desktop_lyrics_toggle = "ctrl+shift+d"
+desktop_lyrics_lock = "ctrl+shift+l"
 
-# 桌面歌词（Windows / macOS）：播放时在桌面之上浮一条歌词，默认点不着；
-# 全局热键 lyrics（默认 ctrl+shift+d）开 / 关这个窗口，lock 解锁后能拖动
-# ——开关与位置都是状态，记在 desktop-lyrics.json 里。
+[desktop_lyrics]
+# 桌面歌词（只在 Windows / macOS 生效）：播放时在桌面之上浮一条歌词，默认点不着；
+# 全局热键 desktop_lyrics_toggle（默认 ctrl+shift+d）开 / 关这个窗口，
+# desktop_lyrics_lock 解锁后能拖动
+# ——开关与位置都是**状态**，记在 desktop-lyrics.json 里，不在这份文件里。
 # 颜色写 #RRGGBB，opacity 是 0-100。
 # font 是字体面：默认那串是 Windows 的中文字体，macOS 上认不出来会自动回退系统字体
-# （想指定就写 macOS 上有的名字，如 "PingFang SC"）。
-[desktop_lyrics]
-font = "Microsoft YaHei UI"
+# （想指定就写 macOS 上有的名字，如 PingFang SC）。
+font = 'Microsoft YaHei UI'
 font_size = 28
 color = "#FFFFFF"
 outline = "#000000"
@@ -196,17 +223,40 @@ next_color = "#9E9E9E"
 opacity = 90
 show_translation = true
 hide_when_paused = false
+
+# ── 不在这份文件里的东西（列出来免得你去找）──────────────────────────
+# 数据目录 ~/.config/canto：
+#   session.json          登录态（cookie jar）——别提交、别分享
+#   history.json          播放历史
+#   local_playlists.json  本地歌单
+#   desktop-lyrics.json   桌面歌词的开关与窗口中心点（**状态**：热键翻开关、拖动改位置）
+#   canto.log             日志（配置里的问题、热键注册失败的原因都在这儿）
+#   canto.lock            单例锁（内容只是持有者的 pid）
+#   login-qr.png          二维码落盘的一份（`o` 键用系统查看器打开）
+# 缓存目录 ~/.cache/canto：播放缓存与曲库索引（library.json）——**派生数据**，随时可删，
+#   重听 / 重扫会再生成。
+# 这些都不在这份文件里：路径是写死的，状态由程序自己记（配置只放「偏好」）。
+#
+# 重新生成这份配置（旧的先备份）：canto config init
+# 只想知道这份文件在哪：      canto config path
 ```
 
-字段缺了就用默认值（老配置文件不用动就能继续用）；**整个文件写坏了也能启动**（用默认值，并在
-状态行给一句提示、细节写进 `canto.log`）。界面上不提供设置项——改配置就是开这个文件改，改完重启。
+几条口径：
+
+- **缺键 = 默认**，所以老文件不用动就能继续用（模板里那句 `# dirs = [...]` 是注释不是键——
+  真写进去意思就变了：`dirs = []` 是「本地功能关掉」）。
+- **只有 TOML 语法本身坏**才整份回默认；某个键类型写错 / 超范围只波及它自己（回默认或夹住），
+  状态行说一句、每一条的原文都进 `canto.log`。
+- **不认识的键会被点名**（写进 `canto.log`）：拼错一个键不再等于「改了没反应」。
+- 界面上不提供设置项——改配置就是开这个文件改，改完重启。
 
 ## 文件
 
 ```
 ~/.config/canto/          # 数据目录（XDG 习惯，三平台同一套路径）
   session.json         # cookie jar（= 账号凭据：别提交、别分享）
-  config.toml          # 音质 / 下载目录 / 歌词目录 / 缓存上限 / 历史上限
+  config.toml          # 唯一的配置文件（音质 / 目录 / 上限 / 通知时长 / 全局热键 / 桌面歌词 / 曲库）
+  config.toml.<时间戳>.bak  # `canto config init` 备份下来的旧配置（它自己不会删）
   history.json         # 播放历史（最近 N 条）
   local_playlists.json # 本地歌单（自己建的；条目只存 mid + 标题/歌手快照，所以文件不在了也还在列表里）
   canto.log            # 日志（--log 控制级别）
@@ -222,9 +272,8 @@ hide_when_paused = false
 <歌词目录>/                # 同一次下载的 .lrc / .trans.lrc（跟歌曲分开放）
 ```
 
-目录位置改过：老版本在 macOS 的 `~/Library/Application Support/canto`。首次启动时会把
-**整个目录一次性搬过来**（会话、配置、历史、日志一起走，登录态不用重扫，只在「新目录还不存在」
-时动手）。
+数据目录三平台都是 `~/.config/canto`（刻意不用 macOS 的 `~/Library/Application Support`）。
+老版本在 macOS 上用的是老位置，现在**不做自动搬迁**：把 `session.json`（登录态）等文件手拷过来即可。
 
 ## 已知限制
 
@@ -279,10 +328,10 @@ hide_when_paused = false
 - 「会话已失效」的判定码还没等来一次真实的会话过期去核对。
 - **桌面歌词只有 Windows / macOS 有**：Linux（含 Wayland）不建窗口，`[desktop_lyrics]` 整段不生效，
   界面与播放照常。
-- **`[desktop_lyrics] enabled` 已移除**：开关改用全局热键 `lyrics`（默认 `ctrl+shift+d`），开不开
-  记在 `desktop-lyrics.json` 里（跟窗口位置同一个文件，可随时删）。老配置里写着那个键的话，启动
-  会给一句点名警告，并且**在状态文件还没记过开关时拿它当一次启动初值**（所以设了 `enabled = false`
-  的人升级后不会突然冒出个窗口）；之后按热键就是唯一入口。
+- **`[desktop_lyrics] enabled` 这个键没有了**：开关改用全局热键 `desktop_lyrics_toggle`
+  （默认 `ctrl+shift+d`），开不开记在 `desktop-lyrics.json` 里（跟窗口位置同一个文件，可随时删，
+  删了回默认：开着 + 底部居中）。配置文件里还写着 `enabled` 的话，它会作为「不认识的键」被点名进
+  `canto.log`（不再有任何作用）。
 - **热键「关」是真把窗口拆掉**（Windows 收线程与窗口、macOS 把 panel 关掉），不是藏起来——所以关着
   的时候这块功能零成本；代价是刚拆的那一下窗口是重新建的，锁定态回到默认（锁定、点不着）、
   拖动过的位置留着。

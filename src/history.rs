@@ -4,10 +4,11 @@
 //! 新条目插到最前，超上限从尾部丢：列表按时间倒序读，不用每次排序。
 
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+
+use crate::clock::{day_of_year, local_tm};
 
 /// 一条播放记录。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,14 +104,6 @@ impl History {
     }
 }
 
-/// 当前 Unix 秒。
-pub fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_secs())
-        .unwrap_or(0)
-}
-
 /// `刚刚` / `12 分钟前` / `21:30` / `昨天 21:30` / `3月5日` / `2025年12月31日`。
 pub fn relative(now: u64, at: u64) -> String {
     let delta = now.saturating_sub(at);
@@ -135,89 +128,6 @@ pub fn relative(now: u64, at: u64) -> String {
     format!("{}年{}月{}日", at_tm.year, at_tm.month, at_tm.mday)
 }
 
-/// 一年里的第几天（0 基）。
-///
-/// 自己算而不用系统的 `tm_yday`：Windows 的 `SYSTEMTIME` 里根本没有这个字段，
-/// 与其两边各写一套，不如统一从年月日推。
-fn day_of_year(tm: &LocalTm) -> i32 {
-    /// 平年每月之前的天数（1 月 = 0）。
-    const BEFORE: [i32; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
-    let month = tm.month.clamp(1, 12);
-    let leap = month >= 3 && leap_year(tm.year);
-    BEFORE[(month - 1) as usize] + tm.mday - 1 + i32::from(leap)
-}
-
-/// 闰年：4 年一闰，100 年不闰，400 年再闰。
-fn leap_year(year: i32) -> bool {
-    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
-}
-
-/// 本地时间：只留排一句话要用的字段。
-struct LocalTm {
-    year: i32,  // 公元年
-    month: i32, // 1-12
-    mday: i32,  // 1-31
-    hour: i32,
-    min: i32,
-}
-
-/// Unix 借 `libc`，Windows 借 `FileTimeToSystemTime` + 时区换算；
-/// 都不为一句 `HH:MM` 再拉一个时间库。
-#[cfg(unix)]
-fn local_tm(at: u64) -> LocalTm {
-    let seconds = at as libc::time_t;
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    // SAFETY: `localtime_r` 只写 `tm`，两个指针都指向本栈上的有效值。
-    unsafe { libc::localtime_r(&seconds, &mut tm) };
-    LocalTm {
-        year: tm.tm_year + 1900,
-        month: tm.tm_mon + 1,
-        mday: tm.tm_mday,
-        hour: tm.tm_hour,
-        min: tm.tm_min,
-    }
-}
-
-/// Windows 没有 `localtime_r`：Unix 秒 → UTC `FILETIME` → 按当前时区（含夏令时）
-/// 折成 `SYSTEMTIME`，再取同样的几个字段。
-#[cfg(windows)]
-fn local_tm(at: u64) -> LocalTm {
-    use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
-    use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
-
-    let (low, high) = filetime(at);
-    let utc = FILETIME {
-        dwLowDateTime: low,
-        dwHighDateTime: high,
-    };
-    let mut utc_sys: SYSTEMTIME = unsafe { std::mem::zeroed() };
-    let mut local: SYSTEMTIME = unsafe { std::mem::zeroed() };
-    // SAFETY: 两个调用都只写传进去的 `SYSTEMTIME`，时区传 null = 用当前系统时区。
-    // 时间超出范围时调用返回失败、`local` 保持全零，跟 Unix 那边 `localtime_r`
-    // 失败留下一份空 `tm` 一样，只影响这一行文字。
-    unsafe {
-        FileTimeToSystemTime(&utc, &mut utc_sys);
-        SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc_sys, &mut local);
-    }
-    LocalTm {
-        year: local.wYear as i32,
-        month: local.wMonth as i32,
-        mday: local.wDay as i32,
-        hour: local.wHour as i32,
-        min: local.wMinute as i32,
-    }
-}
-
-/// Unix 秒 → `FILETIME` 的两个 32 位半区。
-///
-/// 1601-01-01 到 1970-01-01 差 11644473600 秒，而 `FILETIME` 的单位是 100ns。
-/// 只有 Windows 会调它，但算式本身跟平台无关，所以留在 `cfg` 外面——能被测试盯着。
-#[cfg_attr(not(any(windows, test)), allow(dead_code))]
-fn filetime(at: u64) -> (u32, u32) {
-    let ticks = ((at as u128 + 11_644_473_600) * 10_000_000).min(u64::MAX as u128) as u64;
-    (ticks as u32, (ticks >> 32) as u32)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,7 +149,10 @@ mod tests {
     /// 新写的记录带着时长与各档位体积；读回来还在。
     #[test]
     fn an_entry_keeps_the_duration_and_sizes() {
-        let sizes = crate::model::FileSizes { mp3_128: 4_400_000, ..Default::default() };
+        let sizes = crate::model::FileSizes {
+            mp3_128: 4_400_000,
+            ..Default::default()
+        };
         let entry = Entry {
             mid: "a".to_string(),
             title: "成全".to_string(),
@@ -325,43 +238,13 @@ mod tests {
 
     #[test]
     fn relative_time_reads_like_a_person_wrote_it() {
-        let now = now_secs();
+        let now = crate::clock::now_secs();
         assert_eq!(relative(now, now), "刚刚");
         assert_eq!(relative(now, now - 300), "5 分钟前");
         let text = relative(now, now - 2 * 24 * 3600);
-        assert!(!text.is_empty() && text != "刚刚", "久远的记录给出日期：{text}");
-    }
-
-    /// 「昨天」靠自己算的年内天数判断，闰年 2 月之后要整体多一天。
-    #[test]
-    fn day_of_year_counts_days_from_new_year() {
-        let day = |year, month, mday| {
-            day_of_year(&LocalTm {
-                year,
-                month,
-                mday,
-                hour: 0,
-                min: 0,
-            })
-        };
-        assert_eq!(day(2025, 1, 1), 0);
-        assert_eq!(day(2025, 12, 31), 364);
-        assert_eq!(day(2024, 3, 1), 60, "2024 闰年：3 月 1 日前有 31 + 29 天");
-        assert_eq!(day(2025, 3, 1), 59, "2025 平年：3 月 1 日前有 31 + 28 天");
-        assert_eq!(day(2000, 12, 31), 365, "400 年再闰：2000 是闰年");
-        assert_eq!(day(1900, 3, 1), 59, "100 年不闰：1900 不是闰年");
-    }
-
-    /// `FILETIME` 的 64 位拆分：1970-01-01 在 Windows 纪元里是 0x019DB1DED53E8000。
-    #[test]
-    fn filetime_splits_a_timestamp_into_two_halves() {
-        let halves = |at| {
-            let (low, high) = filetime(at);
-            (u64::from(high) << 32) | u64::from(low)
-        };
-        assert_eq!(halves(0), 0x019D_B1DE_D53E_8000, "1970-01-01 的 FILETIME");
-        for at in [1_u64, 1_000_000_000, 1_700_000_000, u32::MAX as u64 + 7] {
-            assert_eq!(halves(at) / 10_000_000 - 11_644_473_600, at, "at = {at}");
-        }
+        assert!(
+            !text.is_empty() && text != "刚刚",
+            "久远的记录给出日期：{text}"
+        );
     }
 }

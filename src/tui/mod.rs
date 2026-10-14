@@ -65,7 +65,7 @@ pub fn run(
         tracing::info!("已注册 {} 个全局热键", report.registered);
     }
     app.history =
-        crate::history::History::load(&app.history_path.clone(), app.config.history_limit);
+        crate::history::History::load(&app.history_path.clone(), app.config.history.limit);
     // 曲库扫描在后台跑（读 tag 是磁盘密集型），界面不等它——先读索引的那一步在
     // `start_library_scan` 里已经同步做掉了，所以「本地曲库」屏第一次进去就有歌。
     app.start_library_scan();
@@ -80,9 +80,8 @@ pub fn run(
     if let Some(text) = report.notice() {
         app.notify(text);
     }
-    // 桌面歌词：装一个覆盖层窗口（Windows / macOS）。状态文件说开着（或者老配置里的
-    // `enabled` 说开着）才建窗口；之后由全局热键真拆真建。平台不支持 / 起不来都得到空句柄，
-    // 界面照跑——起不来的原因在日志里。
+    // 桌面歌词：装一个覆盖层窗口（Windows / macOS）。状态文件说开着才建窗口；之后由全局热键
+    // 真拆真建。平台不支持 / 起不来都得到空句柄，界面照跑——起不来的原因在日志里。
     let installed = overlay::DesktopLyrics::install(
         &app.config.desktop_lyrics,
         overlay::load_state(&crate::paths::desktop_lyrics_path()),

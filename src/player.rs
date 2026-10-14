@@ -84,7 +84,7 @@ pub enum TrackSource {
 
 /// 本地已有这份吗——顺序就是优先级：曲库路径（`Song` 自带）→ 播放缓存 → 下载目录。
 ///
-/// `cache_dir` 给 `None` 就是不查缓存（`config.toml` 里 `cache_mb = 0`）。目录传进来而不是
+/// `cache_dir` 给 `None` 就是不查缓存（`config.toml` 里 `[cache] mb = 0`）。目录传进来而不是
 /// 内部写死 `paths::cache_dir()`：这条判定要能拿一个临时目录测。
 pub fn local_copy(
     song: &Song,
@@ -227,7 +227,7 @@ pub struct Engine {
 impl Engine {
     /// 打开默认音频设备并启动音频线程。设备打不开会立刻报错（而不是等第一次播放）。
     ///
-    /// `cache_on`：边播边落盘（`config.toml` 的 `cache_mb` 为 0 时关掉）。
+    /// `cache_on`：边播边落盘（`config.toml` 的 `[cache] mb` 为 0 时关掉）。
     pub fn start(cache_on: bool) -> Result<Self> {
         let mut sink = DeviceSinkBuilder::open_default_sink()
             .context("打开默认音频设备失败（是不是有别的程序独占？）")?;
@@ -703,7 +703,7 @@ mod tests {
         assert_eq!(snapshot(300, Some(236)).progress(), 1.0);
     }
 
-    /// 「本地已有这份吗」的顺序：曲库路径 → 播放缓存 → 下载目录；缓存关掉（`cache_mb = 0`）
+    /// 「本地已有这份吗」的顺序：曲库路径 → 播放缓存 → 下载目录；缓存关掉（`[cache] mb = 0`）
     /// 就整段缓存判定不作数。这条判定只有一处，顺序错了就会出现「本地明明有那份还去取流」。
     #[test]
     fn local_copy_prefers_the_library_then_the_cache_then_the_download() {
@@ -770,7 +770,7 @@ mod tests {
         assert_eq!(
             local(local_copy(&song, None, &downloads)),
             Some((downloaded.clone(), None, PlaySource::Download)),
-            "`cache_mb = 0` 时缓存不算数，仍走下载目录"
+            "`[cache] mb = 0` 时缓存不算数，仍走下载目录"
         );
 
         let nothing = std::collections::HashMap::new();

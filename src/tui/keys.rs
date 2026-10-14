@@ -81,11 +81,11 @@ pub enum Action {
     InputSubmit,
     InputCancel,
     InputBackspace,
-    /// 全局热键 `lock`：切桌面歌词的锁定/解锁（界面上没有对应按键）。
+    /// 全局热键 `desktop_lyrics_lock`：切桌面歌词的锁定/解锁（界面上没有对应按键）。
     LyricsLock,
     /// 本地曲库屏的 `r`：重扫曲库（把索引丢了重来）。
     LocalRescan,
-    /// 全局热键 `lyrics`：开 / 关桌面歌词窗口——关掉是把窗口**拆了**（不是藏起来），
+    /// 全局热键 `desktop_lyrics_toggle`：开 / 关桌面歌词窗口——关掉是把窗口**拆了**（不是藏起来），
     /// 状态记在 `desktop-lyrics.json`（界面上没有对应按键）。
     LyricsWindow,
     /// 登录屏的 `Esc`：不登录，回首页（本地曲库照样能用）。

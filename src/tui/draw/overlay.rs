@@ -357,7 +357,7 @@ impl App {
         let (head, list_area) = rows::group(inner, 1);
         let columns = rows::fit(&rows::queue_columns(), rows::row_width(list_area.width));
 
-        let want = self.config.quality;
+        let want = self.config.playback.quality;
         let library: HashMap<&str, &Song> =
             self.library.iter().map(|song| (song.mid.as_str(), song)).collect();
         let items: Vec<ListItem> = self
@@ -550,18 +550,18 @@ mod tests {
         );
         assert!(cells.contains(&("Ctrl+Shift+Space", "播放 / 暂停")), "{cells:?}");
         assert!(cells.contains(&("Ctrl+Shift+→", "下一首")), "{cells:?}");
-        assert!(cells.contains(&("Ctrl+Shift+D", "歌词窗口开 / 关")), "{cells:?}");
+        assert!(cells.contains(&("Ctrl+Shift+D", "桌面歌词开 / 关")), "{cells:?}");
 
         // 空串 = 不注册 = 不列；改过的组合照着显示。
         let hotkeys = HotkeyConfig {
-            lock: String::new(),
+            desktop_lyrics_lock: String::new(),
             next: "ctrl+alt+n".to_string(),
             ..HotkeyConfig::default()
         };
         let rows = help_rows(Some(Menu::Favorites), &hotkeys);
         let cells: Vec<(&str, &str)> = rows.iter().filter_map(Row::cells).collect();
         assert!(
-            !cells.iter().any(|(_, help)| *help == "歌词窗口锁定 / 解锁"),
+            !cells.iter().any(|(_, help)| *help == "桌面歌词锁定 / 解锁"),
             "禁用的那条不该在表里：{cells:?}"
         );
         assert!(cells.contains(&("Ctrl+Alt+N", "下一首")), "{cells:?}");

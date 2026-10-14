@@ -1,10 +1,11 @@
 //! canto —— 自用的 QQ 音乐播放器。
 //!
-//! 只有一条启动路径：日志 → 配置 → 会话 → 终端界面。没登录时界面自己会先出
-//! 登录屏（扫码或粘贴 cookie）；所有功能都在界面里，命令行只剩 `--log`。
+//! 只有一条启动路径：配置 → 会话 → 终端界面。没登录时界面自己会先出登录屏（扫码或粘贴
+//! cookie）；所有功能都在界面里，命令行只剩 `--log` 与 `canto config …`（后者不进界面）。
 
 mod cli;
 mod cache;
+mod clock;
 mod config;
 mod download;
 mod history;
@@ -37,20 +38,25 @@ use crate::player::Engine;
 fn main() -> Result<()> {
     restore_sigpipe();
     let cli = Cli::parse();
-    // 数据目录搬过一次家（老版本在 `~/Library/Application Support/canto`）：必须在
-    // `init_tracing` 之前搬，否则新位置先被建出来、老目录就成孤儿了。
-    match paths::migrate_legacy() {
-        Ok(Some(legacy)) => eprintln!(
-            "数据目录已搬到 {}（原 {}）",
-            paths::data_dir().display(),
-            legacy.display()
-        ),
-        // 搬不动就让程序照常起：新目录会重新生成配置，登录态重扫一次码即可。
-        Err(error) => eprintln!(
-            "数据目录搬迁失败（{error:#}）；仍用 {}（老目录里的登录态需要手动搬过去）",
-            paths::data_dir().display()
-        ),
-        Ok(None) => {}
+    // 配置子命令干完就退：不加锁、不写日志、不进界面——`canto config path` 得能在数据目录
+    // 还没建起来的机器上回答，`canto config init` 的全部副作用也只有「备份 + 写这一个文件」。
+    // 只打印到 stdout：这条路径上界面没起来，糊不了屏。
+    if let Some(command) = &cli.command {
+        match command {
+            cli::Command::Config { action } => match action {
+                cli::ConfigAction::Path => {
+                    println!("{}", paths::config_path().display());
+                }
+                cli::ConfigAction::Init => {
+                    let (backup, written) = config::reset(&paths::config_path())?;
+                    if let Some(backup) = backup {
+                        println!("旧配置已备份到 {}", backup.display());
+                    }
+                    println!("已写出默认配置 {}", written.display());
+                }
+            },
+        }
+        return Ok(());
     }
 
     // 单例要在写日志**之前**：`init_tracing` 会清空日志文件，第二个实例被拒时
@@ -69,11 +75,11 @@ fn main() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new().context("创建异步运行时失败")?;
     let (config, warning) = config::load();
     // 起播之前把缓存整理一下：删掉上次没退干净留下的半截文件，再按上限压一压。
-    let (swept, freed) = cache::sweep(config.cache_mb * 1024 * 1024);
+    let (swept, freed) = cache::sweep(config.cache.mb * 1024 * 1024);
     if swept > 0 {
         tracing::info!("缓存清理：删除 {swept} 个文件，释放 {freed} 字节");
     }
-    let engine = Engine::start(config.cache_mb > 0)?;
+    let engine = Engine::start(config.cache.mb > 0)?;
     tui::run(
         runtime.handle().clone(),
         engine,

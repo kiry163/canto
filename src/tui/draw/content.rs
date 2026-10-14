@@ -201,7 +201,7 @@ impl App {
             frame.render_widget(super::empty_panel("暂无播放历史", title), area);
             return;
         }
-        let want = self.config.quality;
+        let want = self.config.playback.quality;
         let playing = self.now_playing_mid();
         let library: HashMap<&str, &Song> =
             self.library.iter().map(|song| (song.mid.as_str(), song)).collect();
@@ -251,7 +251,7 @@ impl App {
             Menu::LocalPlaylists if self.nav.local_shown.is_some() => rows::local_playlist_columns(),
             _ => rows::track_columns(),
         };
-        let want = self.config.quality;
+        let want = self.config.playback.quality;
         let playing = self.now_playing_mid();
         // 本地条目要按 mid 查当前曲库：补齐时长/容器/大小，顺带判「已丢失」。每行
         // `iter().any()` 是 O(行×曲库)，这里一次建表。
