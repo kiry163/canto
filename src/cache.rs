@@ -61,9 +61,10 @@ pub fn cached_entries() -> HashMap<String, (Quality, u64)> {
     cached_entries_in(&paths::cache_dir())
 }
 
-/// 歌词缓存目录（跟歌曲缓存分开一份，翻起来清楚）。
+/// 歌词缓存目录：**就是缓存根目录**（歌词与音频同目录，`<mid>.lrc` 与 `<mid>.<档位>.<ext>`
+/// 并排躺着）。老版本的 `lyrics/` 子目录只在 `sweep` 里被顺手清掉，不再被读。
 pub fn lyric_dir() -> PathBuf {
-    paths::cache_dir().join("lyrics")
+    paths::cache_dir()
 }
 
 fn read_lyric_in(dir: &Path, mid: &str) -> Option<Option<Lyric>> {
@@ -99,6 +100,23 @@ fn put_lyric_in(dir: &Path, mid: &str, lyric: Option<&Lyric>) {
     }
 }
 
+/// `<mid>.<档位>.<扩展名>` → `(mid, 档位)`；不是音频的一律 `None`。
+///
+/// 这是「哪些文件算缓存里的歌」的**唯一**口径：`cached_entries_in`（列表要看）与 `sweep_dir`
+/// （超限要删）都走它，免得一处认一处不认。mid 自己可能带点，所以按「从右边切两段」解析；
+/// `.lrc` / `.trans.lrc` / `library.json`（曲库索引）都在这儿被挡掉。
+fn parse_track_name(name: &str) -> Option<(&str, Quality)> {
+    let mut parts = name.rsplitn(3, '.');
+    let ext = parts.next()?;
+    let tier = parts.next()?;
+    let mid = parts.next()?;
+    // `.part` 是没下完的半截：`x.flac.part` 会被切成 tier = "flac"，光看档位认不出来。
+    if ext.is_empty() || ext == "part" || mid.is_empty() {
+        return None;
+    }
+    Quality::parse(tier).map(|quality| (mid, quality))
+}
+
 fn cached_entries_in(dir: &Path) -> HashMap<String, (Quality, u64)> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return HashMap::new();
@@ -112,15 +130,7 @@ fn cached_entries_in(dir: &Path) -> HashMap<String, (Quality, u64)> {
                 return None;
             }
             let name = path.file_name()?.to_str()?;
-            if name.ends_with(".part") {
-                return None;
-            }
-            // `<mid>.<档位>.<扩展名>`：mid 自己可能带点，按「从右边切两段」解析。
-            let mut parts = name.rsplitn(3, '.');
-            let _ext = parts.next()?;
-            let tier = parts.next()?;
-            let mid = parts.next()?;
-            let quality = Quality::parse(tier)?;
+            let (mid, quality) = parse_track_name(name)?;
             Some((mid.to_string(), (quality, metadata.len())))
         })
         .collect()
@@ -166,8 +176,23 @@ fn sweep_dir(dir: &Path, limit_bytes: u64) -> (usize, u64) {
             }
             continue;
         }
+        // 只认音频形态：`.lrc`（歌词）、`library.json`（曲库索引）不是缓存——既不算进上限，
+        // 也不能被删（旧实现把它们一起算、一起删，`library.json` 就这样被误删过）。
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if parse_track_name(name).is_none() {
+            continue;
+        }
         let at = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
         kept.push((path, metadata.len(), at));
+    }
+    // 老版本把歌词放在 `<cache>/lyrics/`：现在不再被读，留着只占地方，顺手清掉。
+    let legacy = dir.join("lyrics");
+    if legacy.is_dir()
+        && let Err(error) = std::fs::remove_dir_all(&legacy)
+    {
+        tracing::warn!("清掉老歌词子目录失败：{}：{error}", legacy.display());
     }
     let mut total: u64 = kept.iter().map(|(_, size, _)| *size).sum();
     if total <= limit_bytes {
@@ -342,6 +367,58 @@ mod tests {
         }
         assert!(!part.exists(), "没听完就不该留半截");
         assert!(!done.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 歌词与缓存**同目录**（不再有 `lyrics/` 子目录），同目录下音频与歌词互不冒充。
+    #[test]
+    fn lyrics_live_beside_the_tracks() {
+        assert_eq!(
+            lyric_dir(),
+            paths::cache_dir(),
+            "歌词就放缓存根目录，不再单独一个 lyrics/ 子目录"
+        );
+
+        let dir = temp_dir("flat-lyrics");
+        std::fs::write(dir.join("m1.320.mp3"), vec![0_u8; 10]).expect("写缓存");
+        std::fs::write(dir.join("m1.lrc"), "[00:01.00]第一句\n").expect("写歌词");
+        std::fs::write(dir.join("m1.trans.lrc"), "[00:01.00]译文\n").expect("写翻译");
+        std::fs::write(dir.join("library.json"), "{}").expect("写曲库索引");
+
+        let entries = cached_entries_in(&dir);
+        assert_eq!(entries.get("m1"), Some(&(Quality::High320, 10)), "只认音频：{entries:?}");
+        assert_eq!(entries.len(), 1, "歌词与索引都不是「缓存里的歌」：{entries:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 超限时只淘汰音频：歌词与曲库索引既不算进上限、也不删（旧实现会把它们一起算）。
+    #[test]
+    fn sweep_only_evicts_tracks() {
+        let dir = temp_dir("sweep-tracks");
+        std::fs::write(dir.join("a.128.mp3"), vec![0_u8; 10]).expect("写音频");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(dir.join("b.128.mp3"), vec![0_u8; 10]).expect("写音频");
+        std::fs::write(dir.join("a.lrc"), vec![0_u8; 5]).expect("写歌词");
+        std::fs::write(dir.join("library.json"), vec![0_u8; 5]).expect("写曲库索引");
+
+        // 音频一共 20 字节，上限 10：只该走掉最老的那个。
+        let (deleted, _) = sweep_dir(&dir, 10);
+        assert_eq!(deleted, 1, "只删一个音频");
+        assert!(!dir.join("a.128.mp3").exists(), "最久没听的那个音频被删");
+        assert!(dir.join("b.128.mp3").exists(), "另一个音频留下");
+        assert!(dir.join("a.lrc").exists(), "歌词不能动");
+        assert!(dir.join("library.json").exists(), "曲库索引不能动");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 老版本把歌词放在 `<cache>/lyrics/`：不再被读，`sweep` 顺手清掉（上限没超也要清）。
+    #[test]
+    fn a_legacy_lyrics_subdirectory_is_cleaned_up() {
+        let dir = temp_dir("sweep-legacy");
+        std::fs::create_dir_all(dir.join("lyrics")).expect("建老歌词目录");
+        std::fs::write(dir.join("lyrics/m1.lrc"), "x").expect("写老歌词");
+        sweep_dir(&dir, 0);
+        assert!(!dir.join("lyrics").exists(), "老歌词子目录顺手删掉");
         std::fs::remove_dir_all(&dir).ok();
     }
 
