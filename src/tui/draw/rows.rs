@@ -30,6 +30,8 @@ pub(super) enum Field {
     Size,
     Cached,
     Downloaded,
+    /// 本地那份是哪儿来的：`下载` / `目录`（只有本地屏有这一列）。
+    Source,
     Note,
 }
 
@@ -79,10 +81,12 @@ pub(super) const MIN_FOR_HEADER: u16 = 6;
 /// 让位顺序：装不下时从前往后撤。`标题`/`标记`/`缓存`/`下载` 永不撤。
 ///
 /// `专辑` 排第二：60 列（最小窗口）下它跟 `备注` 一起出局，于是加这一列**没有**动
-/// 最小窗口的观感（历史屏撤完这两列正好 60，其余 8 列一个不少）。
-const DROP_ORDER: [Field; 6] = [
+/// 最小窗口的观感（历史屏撤完这两列正好 60，其余 8 列一个不少）。`来源` 紧跟其后：
+/// 它是本地屏独有的 4 列，撤了也只是少知道「这份是下载来的还是目录里扫到的」。
+const DROP_ORDER: [Field; 7] = [
     Field::Note,
     Field::Album,
+    Field::Source,
     Field::Size,
     Field::Tier,
     Field::Duration,
@@ -158,7 +162,8 @@ pub(super) fn track_columns() -> Vec<Column> {
     ]
 }
 
-/// 本地曲库：本地歌不经过缓存，也不叫「下载」——那两列整列恒空，不如不画。
+/// 本地曲库：本地歌不经过缓存，也不叫「下载」——那两列整列恒空，不如不画；
+/// 换成 `来源`（这份是下载来的还是在目录里扫到的）——第 5 屏是两拨合起来的，得看得出区别。
 pub(super) fn local_columns() -> Vec<Column> {
     vec![
         column(Field::Marker, "", MARKER, Align::Left),
@@ -168,6 +173,7 @@ pub(super) fn local_columns() -> Vec<Column> {
         column(Field::Duration, "时长", DURATION, Align::Right),
         column(Field::Tier, "音质", TIER, Align::Left),
         column(Field::Size, "体积", SIZE, Align::Right),
+        column(Field::Source, "来源", MARK, Align::Center),
     ]
 }
 
@@ -212,6 +218,8 @@ pub(super) struct Row<'a> {
     pub size: Option<u64>,
     pub cached: bool,
     pub downloaded: bool,
+    /// 本地那份从哪儿来（`下载` / `目录`）；`None` = 不是本地歌 → 那一格写空串。
+    pub source: Option<&'a str>,
     pub note: Option<&'a str>,
 }
 
@@ -281,6 +289,12 @@ fn cell(column: &Column, row: &Row<'_>, width: usize) -> Span<'static> {
             pad(if row.downloaded { "↓" } else { " " }, width, Align::Center),
             Style::new().fg(Color::Cyan),
         ),
+        // 来源也是「补齐到列宽」的一员：退回空串的话这一行会比表头短一截。
+        Field::Source => Span::raw(pad(
+            row.source.unwrap_or(""),
+            width,
+            Align::Center,
+        )),
         // 空备注也补齐：别的每一列都会补到列宽，只有它退回空串的话，这一行会比表头短一截。
         Field::Note => Span::styled(
             clip(row.note.unwrap_or(""), width),
@@ -348,6 +362,9 @@ pub(super) struct LocalCopy<'a> {
     pub size: Option<u64>,
     pub cached: bool,
     pub downloaded: bool,
+    /// 本地那份是哪儿来的：`下载`（路径在下载索引里）/ `目录`（只被曲库扫到）。
+    /// 非本地歌是 `None`——那一列只有本地屏有。
+    pub origin: Option<&'static str>,
 }
 
 /// 口径：缓存 > 下载 > 曲库文件 > 按配置下限预估。
@@ -373,12 +390,15 @@ pub(super) fn copy_of<'a>(
                 || "—".to_string(),
                 |ext| crate::download::container_label(&ext.to_string_lossy()),
             );
+        // 本地那条是不是「下载来的」也按索引判（不是按目录位置猜）：历史屏里重播下载歌
+        // 同样该亮 `↓`，「来源」列也写同一份答案。
+        let registered = path.and_then(|path| downloads.mid_of_path(download_dir, path));
         return LocalCopy {
             tier: tier.into(),
             size: (song.local_bytes > 0).then_some(song.local_bytes),
             cached: false,
-            // 本地那条是不是「下载来的」也按索引判：历史屏里重播下载歌同样该亮 `↓`。
-            downloaded: path.is_some_and(|path| downloads.mid_of_path(download_dir, path).is_some()),
+            downloaded: registered.is_some(),
+            origin: Some(if registered.is_some() { "下载" } else { "目录" }),
         };
     }
     if let Some((quality, bytes)) = cached.get(&song.mid) {
@@ -388,6 +408,7 @@ pub(super) fn copy_of<'a>(
             cached: true,
             // 两个标记都按 mid 查：同一份文件在哪一屏都是同一个答案。
             downloaded: downloads.by_mid(&song.mid).is_some(),
+            origin: None,
         };
     }
     if let Some(found) = downloads.by_mid(&song.mid) {
@@ -396,6 +417,7 @@ pub(super) fn copy_of<'a>(
             size: Some(found.bytes),
             cached: false,
             downloaded: true,
+            origin: None,
         };
     }
     let (quality, size) = song.sizes.at_or_below(want);
@@ -404,6 +426,7 @@ pub(super) fn copy_of<'a>(
         size,
         cached: false,
         downloaded: false,
+        origin: None,
     }
 }
 
@@ -469,10 +492,10 @@ mod tests {
             (80, "历史", 10, 10, 10, 9),
             (120, "历史", 10, 20, 20, 19),
             (200, "历史", 10, 40, 40, 39),
-            (60, "本地", 7, 11, 11, 11), // 本地那屏没有缓存/下载两列（定宽只有 21），60 列就装得下
-            (80, "本地", 7, 18, 18, 17),
-            (120, "本地", 7, 31, 31, 31),
-            (200, "本地", 7, 58, 58, 57),
+            (60, "本地", 8, 10, 9, 9), // 多一个「来源」（4 列）：60 列装得下八列，代价是三列各窄一列
+            (80, "本地", 8, 16, 16, 16),
+            (120, "本地", 8, 30, 29, 29),
+            (200, "本地", 8, 56, 56, 56),
         ];
         for (width, screen, count, title, singers, album) in cases {
             let columns = match screen {
@@ -561,7 +584,8 @@ mod tests {
                 Field::Album,
                 Field::Duration,
                 Field::Tier,
-                Field::Size
+                Field::Size,
+                Field::Source
             ]
         );
         assert_eq!(
@@ -574,6 +598,7 @@ mod tests {
                 Field::Duration,
                 Field::Tier,
                 Field::Size,
+                Field::Source,
                 Field::Note
             ]
         );
@@ -622,6 +647,57 @@ mod tests {
     /// 表头与数据落在同一批列区间里：两行显示宽度一样，左对齐比起点、右对齐比终点、
     /// 居中允许一个字符的居中余数差。
     ///
+    /// `来源` 列的让位：60 列（最小窗口）装得下（八列 56 格），再窄才跟着 `专辑` 撤。
+    #[test]
+    fn the_local_columns_have_a_source_column_that_drops_on_narrow_screens() {
+        let wide: Vec<Field> = fit(&local_columns(), 60).iter().map(|c| c.field).collect();
+        assert!(wide.contains(&Field::Source), "{wide:?}");
+
+        // 46 列：`专辑` 先出局，还装不下就轮到 `来源`。
+        let narrow: Vec<Field> = fit(&local_columns(), 46).iter().map(|c| c.field).collect();
+        assert!(!narrow.contains(&Field::Source), "窄屏先撤：{narrow:?}");
+        assert!(narrow.contains(&Field::Title) && narrow.contains(&Field::Duration));
+    }
+
+    /// 本地那份的「来源」：下载索引里登记过 → `下载`，只在曲库目录里 → `目录`；
+    /// QQ 歌没这一格（那是另一个屏的列）。
+    #[test]
+    fn a_row_says_where_the_bytes_came_from() {
+        let dir = std::env::temp_dir().join(format!("canto-rows-source-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("建目录");
+        let downloaded = dir.join("歌手 - 下载的.flac");
+        std::fs::write(&downloaded, vec![0_u8; 4]).expect("写文件");
+        let downloads = download_index(&[("m1", "歌手 - 下载的.flac", Quality::Flac, 4)]);
+        let nothing = cached_index(&[]);
+
+        let mine = crate::tui::test_support::local_song(&downloaded.to_string_lossy());
+        let other =
+            crate::tui::test_support::local_song(&dir.join("自己的.flac").to_string_lossy());
+        assert_eq!(
+            copy_of(&mine, &nothing, &downloads, &dir, Quality::Low128).origin,
+            Some("下载")
+        );
+        assert_eq!(
+            copy_of(&other, &nothing, &downloads, &dir, Quality::Low128).origin,
+            Some("目录")
+        );
+        assert_eq!(
+            copy_of(
+                &crate::tui::test_support::test_song("m9"),
+                &nothing,
+                &downloads,
+                &dir,
+                Quality::Low128
+            )
+            .origin,
+            None,
+            "QQ 歌没这一格"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// 数据行按**列表渲染的样子**补上 [`INDENT`]（`List` 给每行留的选中符号那两列），
     /// 所以这里比的是绝对显示列。
     #[test]
@@ -644,6 +720,7 @@ mod tests {
                     size: Some(4_400_000),
                     cached: true,
                     downloaded: true,
+                    source: None,
                     note: None,
                 },
             ))
@@ -705,6 +782,7 @@ mod tests {
                     size: None,
                     cached: false,
                     downloaded: false,
+                    source: None,
                     note: None,
                 },
             ))
@@ -741,6 +819,7 @@ mod tests {
                 size: None,
                 cached: false,
                 downloaded: false,
+                source: None,
                 note: None,
             },
         ));

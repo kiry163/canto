@@ -232,11 +232,11 @@ impl App {
         self.nav.song_view_mut().state = state;
     }
 
-    /// 空曲库：说清去哪儿加目录（不是一片空白）。
+    /// 空曲库：说清这一屏的两半来源（下载来的 + 扫出来的），不是一片空白。
     pub(super) fn draw_empty_library(&self, frame: &mut Frame, area: Rect) {
         let text = Line::from(vec![
-            Span::styled("曲库是空的", Style::new().fg(Color::Yellow)),
-            Span::raw("：在 config.toml 的 [library] dirs 里加目录，再按 r 重扫"),
+            Span::styled("本地曲库是空的", Style::new().fg(Color::Yellow)),
+            Span::raw("：按 d 下载的歌会进来；想扫自己的目录就在 config.toml 的 [library] dirs 里写路径，再按 r"),
         ]);
         frame.render_widget(Paragraph::new(text).block(panel_block(" 本地曲库 ")), area);
     }
@@ -323,6 +323,7 @@ impl App {
             size: copy.size,
             cached: copy.cached,
             downloaded: copy.downloaded,
+            source: copy.origin,
             note,
         }
     }
