@@ -1,10 +1,12 @@
-//! 下载：把候选档位里第一个能打开的存成文件，歌词另存到**单独的目录**。
+//! 下载：把候选档位里第一个能打开的存成文件，歌词跟音频**同目录同名**。
 //!
 //! 传输直接用 [`MediaStream`]：它已经处理了"服务端给 purl 但文件其实不存在"
 //! （嗅探魔数）与 `Range` 重连，下载等于把它拷到磁盘。
 //! 先写 `.part` 再改名，中途失败不会留下坏文件。
+//!
+//! 下过什么由 `downloads.json`（[`Index`]）记着：**mid → 文件**，列表上的 `↓`、起播的本地
+//! 优先判定都按它查，不再靠文件名猜（同歌手同标题的两首会互相冒充）。
 
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -148,28 +150,65 @@ impl Index {
     }
 }
 
+/// 一个还没被占用的文件名：`歌手 - 标题.flac` 已被占就往后加 ` (2)`、` (3)`…。
+///
+/// 两个不同 mid 撞名时（同歌手同标题、或手工放进来一个同名文件）**不能互相冒充**——旧实现
+/// 看到文件存在就报「已下载」，等于把第二首当成第一首。
+fn free_name(dir: &Path, stem: &str, ext: &str) -> String {
+    let mut index = 1;
+    loop {
+        let name = if index == 1 {
+            format!("{stem}.{ext}")
+        } else {
+            format!("{stem} ({index}).{ext}")
+        };
+        if !dir.join(&name).exists() {
+            return name;
+        }
+        index += 1;
+    }
+}
+
+impl Track {
+    /// 这条登记 → 第 5 屏里的一首歌（身份是**路径**，跟曲库扫出来的那些一致）。
+    pub fn to_song(&self, dir: &Path) -> Song {
+        let path = dir.join(&self.file);
+        Song {
+            mid: crate::model::local_mid(&path),
+            song_id: None,
+            media_mid: None,
+            title: self.title.clone(),
+            singers: self.singers.clone(),
+            album_mid: String::new(),
+            album_name: self.album.clone(),
+            duration_secs: self.duration_secs,
+            sizes: crate::model::FileSizes::default(),
+            local_bytes: self.bytes,
+            source: crate::model::Source::Local(path),
+        }
+    }
+}
+
 /// 下载结果。
 pub struct Saved {
     pub path: PathBuf,
     pub quality: Quality,
     pub bytes: u64,
-    /// 一起写下的歌词文件（`.lrc` / `.trans.lrc`）。
+    /// 一起写下的歌词文件（`.lrc` / `.trans.lrc`），跟音频**同目录同名**。
     pub lyrics: Vec<PathBuf>,
-    /// 文件本来就在，跳过了。
-    pub existed: bool,
     /// 直接从播放缓存复制过来的（一个字节都没走网络）。
     pub from_cache: bool,
 }
 
 /// 下载第一个能打开的候选；`progress` 每读完一块回调一次（已收字节、总长）。
 ///
-/// `dir` 放音频，`lyrics_dir` 放 `.lrc`——两者刻意分开：歌曲目录里不该夹着一堆歌词，
-/// 想单独取歌词时也有个固定位置。
+/// `dir` 既放音频也放 `.lrc`——歌词跟着那份音频走：拷走一首歌不会落下它的词，本地播放器
+/// 也照同目录同名的约定自动找到。目标名被占（同歌手同标题的另一首、或手工放进来的同名文件）
+/// 就往后加序号，**不覆盖也不冒充**。
 pub fn save(
     song: &Song,
     candidates: &[Candidate],
     dir: &Path,
-    lyrics_dir: &Path,
     lyric: Option<&Lyric>,
     progress: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<Saved> {
@@ -184,43 +223,24 @@ pub fn save(
             .extension()
             .and_then(|ext| ext.to_str())
             .unwrap_or("bin");
-        let path = dir.join(format!("{stem}.{ext}"));
-        if path.exists() {
-            return Ok(Saved {
-                path,
-                quality,
-                bytes: 0,
-                lyrics: Vec::new(),
-                existed: true,
-                from_cache: true,
-            });
-        }
+        let name = free_name(dir, &stem, ext);
+        let path = dir.join(&name);
         let bytes = std::fs::copy(&cached, &path)
             .with_context(|| format!("从缓存复制到 {} 失败", path.display()))?;
         progress(bytes, Some(bytes));
-        let lyrics = write_lyrics(&stem, lyrics_dir, lyric)?;
+        let lyrics = write_lyrics(&name_stem(&name), dir, lyric)?;
         return Ok(Saved {
             path,
             quality,
             bytes,
             lyrics,
-            existed: false,
             from_cache: true,
         });
     }
 
     for candidate in candidates {
-        let path = dir.join(format!("{stem}.{}", candidate.ext));
-        if path.exists() {
-            return Ok(Saved {
-                path,
-                quality: candidate.quality,
-                bytes: 0,
-                lyrics: Vec::new(),
-                existed: true,
-                from_cache: false,
-            });
-        }
+        let name = free_name(dir, &stem, candidate.ext);
+        let path = dir.join(&name);
         let mut stream = match MediaStream::open(&candidate.url) {
             Ok(stream) => stream,
             Err(error) => {
@@ -254,17 +274,26 @@ pub fn save(
             continue;
         }
         std::fs::rename(&part, &path).with_context(|| format!("改名失败：{}", path.display()))?;
-        let lyrics = write_lyrics(&stem, lyrics_dir, lyric)?;
+        let lyrics = write_lyrics(&name_stem(&name), dir, lyric)?;
         return Ok(Saved {
             path,
             quality: candidate.quality,
             bytes: received,
             lyrics,
-            existed: false,
             from_cache: false,
         });
     }
     bail!("没有能下载的档位：{}", failures.join("；"))
+}
+
+/// 实际落盘的文件名 → 不带扩展名的部分（歌词要跟它同名）。
+///
+/// 与 `file_stem` 的区别：那个是「打算叫什么」，这个是「最后叫什么」（可能带了 ` (2)` 后缀），
+/// 歌词必须跟后者同名才配得上那份音频。
+fn name_stem(name: &str) -> String {
+    name.rsplit_once('.')
+        .map(|(stem, _)| stem.to_string())
+        .unwrap_or_else(|| name.to_string())
 }
 
 /// 文件名用 `歌手 - 标题`，把路径分隔符等非法字符换掉；空名退回 mid。
@@ -299,72 +328,7 @@ pub(crate) fn container_label(extension: &str) -> String {
     extension.to_ascii_uppercase()
 }
 
-/// 下载目录里的一份文件。
-#[derive(Debug, Clone)]
-pub struct Downloaded {
-    /// 磁盘上那份（起播时直接开它——列表里写着 `↓` 就该放这一份）。
-    pub path: PathBuf,
-    /// 容器名（`.mp3` → `MP3`）。列表那一列的「音质」位就写它。
-    pub container: String,
-    pub bytes: u64,
-}
-
-/// 扫一遍下载目录：`文件名（不含扩展名） → 那份文件`。
-///
-/// 列表里的 `↓` 与「体积报磁盘那份」用它（按 `file_stem` 查表，O(1)）；起播优先放本地
-/// 那份也用它（见 `player::local_copy`）。用文件名当键是**唯一可选**的口径：文件里没有 mid。
-/// 同一个 stem 有多份时（mp3 + flac）按容器排 `flac/wav > m4a/ogg > 其它`，同级取体积大的
-/// ——体积是文件本身唯一读得出的「档位高低」信号。
-/// 目录不存在 / 没权限一律给空表（下载目录可能还没建）。
-pub(crate) fn scan_downloads(dir: &Path) -> HashMap<String, Downloaded> {
-    let mut found: HashMap<String, Downloaded> = HashMap::new();
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return found;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let (Some(stem), Some(extension)) = (
-            path.file_stem().map(|stem| stem.to_string_lossy().into_owned()),
-            path.extension().map(|ext| ext.to_string_lossy().to_ascii_lowercase()),
-        ) else {
-            continue;
-        };
-        // 半截文件（`.part`）不算下好的一份。
-        if extension == "part" {
-            continue;
-        }
-        let Ok(metadata) = entry.metadata() else {
-            continue;
-        };
-        if !metadata.is_file() {
-            continue;
-        }
-        let candidate = Downloaded {
-            path,
-            container: container_label(&extension),
-            bytes: metadata.len(),
-        };
-        match found.get(&stem) {
-            Some(current) if rank(&candidate) <= rank(current) => {}
-            _ => {
-                found.insert(stem, candidate);
-            }
-        }
-    }
-    found
-}
-
-/// 「哪一份更高」：先看容器，同级看体积。
-fn rank(entry: &Downloaded) -> (u8, u64) {
-    let tier = match entry.container.as_str() {
-        "FLAC" | "WAV" => 2,
-        "M4A" | "OGG" => 1,
-        _ => 0,
-    };
-    (tier, entry.bytes)
-}
-
-/// 歌词落地：正文 `.lrc`；有翻译再写一份 `.trans.lrc`。都写进 `dir`（歌词目录）。
+/// 歌词落地：正文 `.lrc`；有翻译再写一份 `.trans.lrc`。都写进 `dir`（跟音频同一个目录）。
 fn write_lyrics(stem: &str, dir: &Path, lyric: Option<&Lyric>) -> Result<Vec<PathBuf>> {
     let Some(lyric) = lyric.filter(|lyric| !lyric.lines.is_empty()) else {
         return Ok(Vec::new());
@@ -444,6 +408,24 @@ mod tests {
         dir
     }
 
+    /// 同名文件已被占（同歌手同标题的两首、或手工放进来的同名文件）：往后加序号，
+    /// **不冒充**——旧实现看到文件存在就当「已下载」，第二首会被当成第一首。
+    #[test]
+    fn a_second_song_with_the_same_file_name_does_not_impersonate() {
+        let dir = temp_dir("free-name");
+        std::fs::write(dir.join("同一人 - 同一首歌.flac"), vec![0_u8; 4]).expect("先有一份");
+        assert_eq!(
+            free_name(&dir, "同一人 - 同一首歌", "flac"),
+            "同一人 - 同一首歌 (2).flac"
+        );
+        std::fs::write(dir.join("同一人 - 同一首歌 (2).flac"), vec![0_u8; 4]).expect("再有一份");
+        assert_eq!(
+            free_name(&dir, "同一人 - 同一首歌", "flac"),
+            "同一人 - 同一首歌 (3).flac"
+        );
+        assert_eq!(free_name(&dir, "别人 - 别的歌", "flac"), "别人 - 别的歌.flac");
+        std::fs::remove_dir_all(&dir).ok();
+    }
     /// 一条索引记录（测试用）：体积 0 表示「还没跟磁盘对过」。
     pub(super) fn track(mid: &str, file: &str) -> Track {
         Track {
@@ -596,57 +578,6 @@ mod tests {
         );
         assert!(mismatched.lines[0].translation.is_none());
         assert_eq!(render(&mismatched, true), "");
-    }
-
-    /// 扫下载目录：同名多份取「更高」的那份；`.part` 与目录不认；没有目录就是空表。
-    #[test]
-    fn scan_downloads_keeps_the_highest_copy_and_skips_parts() {
-        let dir = std::env::temp_dir().join(format!("canto-dl-scan-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(dir.join("sub")).expect("建目录");
-        std::fs::write(dir.join("刘若英 - 成全.mp3"), vec![0_u8; 44_000]).expect("写 mp3");
-        std::fs::write(dir.join("刘若英 - 成全.flac"), vec![0_u8; 314_570]).expect("写 flac");
-        std::fs::write(dir.join("周杰伦 - 晴天.mp3.part"), "半截".as_bytes()).expect("写半截");
-        std::fs::write(dir.join("README.txt"), "说明".as_bytes()).expect("写非音频");
-
-        let found = scan_downloads(&dir);
-        let best = found.get("刘若英 - 成全").expect("同名两份里总有一份");
-        assert_eq!(best.container, "FLAC", "取容器更高的那份：{found:?}");
-        assert_eq!(best.bytes, 314_570);
-        assert_eq!(
-            best.path,
-            dir.join("刘若英 - 成全.flac"),
-            "路径要指到磁盘上那份（起播直接开它）"
-        );
-        assert!(
-            !found.contains_key("周杰伦 - 晴天"),
-            "`.part` 不算：{found:?}"
-        );
-        assert_eq!(found.get("README").map(|found| found.container.as_str()), Some("TXT"));
-        assert!(
-            scan_downloads(&dir.join("没有这个目录")).is_empty(),
-            "目录不存在就是空表"
-        );
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// 扫出来的键就是落盘时用的文件名：两边共用 `file_stem`，改名规则不许各写一套。
-    #[test]
-    fn the_scanned_key_matches_the_file_we_write() {
-        let song = song("成全", "刘若英");
-        let dir = std::env::temp_dir().join(format!("canto-dl-key-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).expect("建目录");
-        std::fs::write(dir.join(format!("{}.mp3", file_stem(&song))), b"x").expect("写文件");
-
-        let found = scan_downloads(&dir);
-        assert_eq!(
-            found.get(&file_stem(&song)).map(|found| found.container.as_str()),
-            Some("MP3")
-        );
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

@@ -166,18 +166,12 @@ impl Menu {
         Menu::LocalPlaylists,
     ];
 
-    /// 首页上真正画出来、也真能按数字键进的那几屏。
+    /// 首页上画出来、也真能按数字键进的那几屏（`1`–`6` 就是这里的顺序）。
     ///
-    /// `[library] dirs = []` 是「本地功能整体关闭」（规格 §7）：首页不画第 5/6 格，数字键进不去
-    /// ——只剩 QQ 那四屏。
-    pub fn menus(local_on: bool) -> Vec<Menu> {
-        Menu::ALL
-            .iter()
-            .copied()
-            .filter(|menu| {
-                local_on || !matches!(menu, Menu::LocalLibrary | Menu::LocalPlaylists)
-            })
-            .collect()
+    /// 六屏**永远都在**：`[library] dirs` 留空只表示「不去扫别人的目录」，下载来的那些
+    /// 照样在第 5 屏（规格 §7）。
+    pub fn menus() -> &'static [Menu] {
+        &Menu::ALL
     }
 
     pub fn title(self) -> &'static str {
@@ -655,16 +649,43 @@ pub(super) struct Transfer {
     total: Arc<AtomicU64>,
     /// 完成后写上结果文案。
     outcome: Option<String>,
+    /// 下好的那份 → 索引里的一条登记（界面线程负责 upsert 与落盘，后台线程只带回数据）。
+    track: Option<download::Track>,
+}
+
+/// 刚下好的那份 → 索引里的一条登记。
+fn track_of(song: &Song, saved: &download::Saved) -> download::Track {
+    let file = saved
+        .path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let container = saved
+        .path
+        .extension()
+        .map(|ext| download::container_label(&ext.to_string_lossy()))
+        .unwrap_or_default();
+    download::Track {
+        mid: song.mid.clone(),
+        file,
+        quality: saved.quality,
+        container,
+        bytes: saved.bytes,
+        title: song.title.clone(),
+        singers: song.singers.clone(),
+        album: song.album_name.clone(),
+        duration_secs: song.duration_secs,
+        at: crate::clock::now_secs(),
+    }
 }
 
 /// 下载（含从缓存复制）成功后给状态行的一句话。
 ///
 /// **不带路径**，也不带体积 / 档位 / 歌词落点：通知位只有 32 列，那些细节进日志
 /// （列表里能看到档位与体积，文件在磁盘上）。抽成纯函数是为了能直接钉住这条约定。
+///
+/// 「这首本来就有」不在这里：那一步在下载之前就按索引拦下了（见 `download_selected`）。
 fn saved_notice(title: &str, saved: &download::Saved) -> String {
-    if saved.existed {
-        return format!("已存在：{title}");
-    }
     let what = if saved.from_cache {
         "已从缓存复制"
     } else {
@@ -814,8 +835,11 @@ pub(super) struct App {
     pub(super) logged_in: bool,
     /// 状态行右侧的通知（进度与一次性消息共用这一把槽）。
     pub(super) notice: Option<Notice>,
-    /// 本地曲库（扫出来的曲目，已按 歌手 → 专辑 → 标题 排好）。
+    /// 第 5 屏的全部条目：**曲库扫出来的 ∪ 下载索引里登记过的**（`merge_local` 维护，
+    /// 已按 歌手 → 专辑 → 标题 排好）。历史还原、本地歌单找时长、列表画行都读它这一份。
     pub(super) library: Vec<Song>,
+    /// 曲库扫出来的那些（不含下载目录——那里归索引管）。`merge_local` 拿它跟索引合并。
+    pub(super) scanned: Vec<Song>,
     /// 曲库是不是正在扫（扫描中按 `r` 不再起第二次）。
     pub(super) library_scanning: bool,
     /// 本地歌单的存储（启动读一次，改过就立刻落盘）。
@@ -886,6 +910,7 @@ impl App {
             notice: None,
             logged_in: crate::session::jar().state().logged_in,
             library: Vec::new(),
+            scanned: Vec::new(),
             library_scanning: false,
             playlists_store,
             local_picker: None,
@@ -906,11 +931,16 @@ impl App {
             return;
         }
         let dirs = self.config.library.resolve(&self.config.paths.download_dir);
+        // 没有额外目录：不扫别人的目录，但下载来的那些照样在第 5 屏（那一屏永远在）。
         if dirs.is_empty() {
-            return; // `[library] dirs = []`：本地功能整体关掉
+            self.scanned.clear();
+            self.merge_local();
+            self.refresh_local_view();
+            return;
         }
         let index_path = crate::paths::library_index_path();
-        self.library = crate::library::index_songs(&crate::library::load_index(&index_path, &dirs));
+        self.scanned = crate::library::index_songs(&crate::library::load_index(&index_path, &dirs));
+        self.merge_local();
         self.refresh_local_view();
         self.library_scanning = true;
         let tx = self.tx.clone();
@@ -922,17 +952,30 @@ impl App {
 
     /// 重读下载索引：`↓`、体积与「本地命中」的数据源。
     ///
-    /// 启动一次（`App::new` 里直接读）；每次下载完成（`poll_transfer` 收到结果）一次；
-    /// `r` 重扫曲库时顺带一次——外部删掉 / 手工改动的文件靠 `validate` 那一步反映（索引里没
-    /// 登记的文件不认，这是刻意的：下载目录归 canto 管）。
+    /// 读回来先跟磁盘对一遍（`load_downloads`）：索引里没登记的文件不认（下载目录归 canto 管），
+    /// 登记过而文件没了的幽灵条目掉出去、体积按磁盘校准、改过就回写。对完合并进第 5 屏——
+    /// 每次下载完成（`poll_transfer` 收到结果）与 `r` 重扫曲库时都走这里。
     pub(super) fn refresh_downloads(&mut self) {
         self.downloads = load_downloads(&self.config.paths.download_dir);
+        self.merge_local();
+        self.refresh_local_view();
     }
 
-    /// 本地曲库（已按 歌手 → 专辑 → 标题 排好）。Task 5 的「本地曲库」屏接上就摘掉这个 allow。
-    #[allow(dead_code)]
-    pub(super) fn local_songs(&self) -> &[Song] {
-        &self.library
+    /// 第 5 屏的条目 = 曲库扫出来的 ∪ 下载索引里登记过的。两拨合进同一个 `library`，
+    /// 别处（历史还原、本地歌单找时长、列表画行）都只读它这一份。
+    ///
+    /// 两边不会重复：曲库扫描跳过下载目录（`library::walk` 的 `skip`）。
+    fn merge_local(&mut self) {
+        let dir = self.config.paths.download_dir.clone();
+        let mut songs = self.scanned.clone();
+        songs.extend(
+            self.downloads
+                .tracks
+                .iter()
+                .map(|track| track.to_song(&dir)),
+        );
+        crate::library::sort_songs(&mut songs);
+        self.library = songs;
     }
 
     // -- 状态行那条通知 ------------------------------------------------------
@@ -1029,7 +1072,7 @@ impl App {
             return;
         }
         self.screen = Screen::Home;
-        let index = Menu::menus(self.local_features_on())
+        let index = Menu::menus()
             .iter()
             .position(|menu| *menu == self.nav.menu)
             .unwrap_or(0);
@@ -1042,14 +1085,6 @@ impl App {
         // 要登录的屏：未登录时**只给一句提示、不跳屏**（本地两屏与历史照进）。
         if !self.qq_screen_available(menu) {
             self.notify("需要登录：按 L");
-            return;
-        }
-        // 本地功能整体关掉时（`dirs = []`）那两屏进不去：进去也只会看到「曲库是空的」，
-        // 对着刚把目录清空的人说反话。
-        if !self.local_features_on()
-            && matches!(menu, Menu::LocalLibrary | Menu::LocalPlaylists)
-        {
-            self.notify("本地功能已关闭：config.toml 的 [library] dirs 是空的");
             return;
         }
         // 切屏就是离开这一屏：频谱区跟着收起来。
@@ -1091,8 +1126,17 @@ impl App {
         let Some(song) = self.selected_song() else {
             return;
         };
-        let dir = self.config.paths.download_dir.clone();
-        let lyrics_dir = self.config.paths.lyrics_dir.clone();
+        // 索引里登记过、文件也还在：不再下一遍。旧实现看到同名文件就报「已下载」——那是猜的，
+        // 同歌手同标题的另一首会被误判。判定归 `by_mid`（见规格 §5）。
+        let download_dir = self.config.paths.download_dir.clone();
+        if let Some(track) = self.downloads.by_mid(&song.mid) {
+            if self.downloads.path_of(track, &download_dir).is_file() {
+                let file = track.file.clone();
+                self.notify(format!("已下载：{file}"));
+                return;
+            }
+        }
+        let dir = download_dir;
         let quality = self.config.playback.quality;
         let cache_on = self.cache_on();
         let received = Arc::new(AtomicU64::new(0));
@@ -1102,13 +1146,14 @@ impl App {
             received: received.clone(),
             total: total.clone(),
             outcome: None,
+            track: None,
         }));
         self.transfer = Some(transfer.clone());
         self.notify_progress(format!("下载《{}》…", song.title));
         // 下载是阻塞 I/O（`reqwest::blocking`），放独立线程；取候选/歌词走运行时。
         let handle = self.handle.clone();
         std::thread::spawn(move || {
-            let outcome = match handle.block_on(async {
+            let (outcome, track) = match handle.block_on(async {
                 let candidates = qq::vkey::candidates(&song, Some(quality)).await?;
                 let lyric = qq::lyric::get(&song, cache_on).await.ok().flatten();
                 Ok::<_, anyhow::Error>((candidates, lyric))
@@ -1119,14 +1164,7 @@ impl App {
                         received.store(progress, Ordering::Relaxed);
                         total.store(size.unwrap_or(0), Ordering::Relaxed);
                     };
-                    match download::save(
-                        &song,
-                        &candidates,
-                        &dir,
-                        &lyrics_dir,
-                        lyric.as_ref(),
-                        &mut on_progress,
-                    ) {
+                    match download::save(&song, &candidates, &dir, lyric.as_ref(), &mut on_progress) {
                         Ok(saved) => {
                             // 细节（落到哪、多大、歌词在哪）进日志，状态行只说做了什么。
                             tracing::info!(
@@ -1143,26 +1181,30 @@ impl App {
                             );
                             if !saved.lyrics.is_empty() {
                                 tracing::info!(
-                                    "歌词 {} 个在 {}",
+                                    "歌词 {} 个跟着 {}",
                                     saved.lyrics.len(),
-                                    lyrics_dir.display()
+                                    saved.path.display()
                                 );
                             }
-                            saved_notice(&song.title, &saved)
+                            (
+                                saved_notice(&song.title, &saved),
+                                Some(track_of(&song, &saved)),
+                            )
                         }
                         Err(error) => {
                             tracing::warn!("下载《{}》失败：{error:#}", song.title);
-                            format!("下载失败：{}", song.title)
+                            (format!("下载失败：{}", song.title), None)
                         }
                     }
                 }
                 Err(error) => {
                     tracing::warn!("下载《{}》失败：{error:#}", song.title);
-                    format!("下载失败：{}", song.title)
+                    (format!("下载失败：{}", song.title), None)
                 }
             };
             if let Ok(mut transfer) = transfer.lock() {
                 transfer.outcome = Some(outcome);
+                transfer.track = track;
             }
         });
     }
@@ -1639,7 +1681,8 @@ impl App {
                 skipped_unsupported,
                 missing_dirs,
             } => {
-                self.library = songs;
+                self.scanned = songs;
+                self.merge_local();
                 self.refresh_local_view();
                 self.library_scanning = false;
                 // 通知槽只有一个：坏路径最要紧，其次是有变化，再次是「跳过了 N 首」。
@@ -1959,7 +2002,7 @@ impl App {
                 self.notify("队列已清空（当前这首不受影响）");
             }
             keys::Action::Menu(index) => {
-                if let Some(menu) = Menu::menus(self.local_features_on()).get(index).copied() {
+                if let Some(menu) = Menu::menus().get(index).copied() {
                     // 从首页按数字 = 进那一屏。
                     self.screen = Screen::Main;
                     self.switch_menu(menu);
@@ -1988,7 +2031,7 @@ impl App {
                 }
                 // 首页：Enter = 进选中那一屏（不是「播放选中」，首页没有选中的歌）。
                 if matches!(self.screen, Screen::Home) {
-                    let menus = Menu::menus(self.local_features_on());
+                    let menus = Menu::menus();
                     let menu = menus
                         .get(self.home_state.selected().unwrap_or(0))
                         .copied()
@@ -2193,11 +2236,6 @@ impl App {
     /// 这一屏要不要求登录：QQ 三屏要，历史与本地曲库不要。
     pub(super) fn qq_screen_available(&self, menu: Menu) -> bool {
         self.logged_in() || !matches!(menu, Menu::Favorites | Menu::Playlists | Menu::Search)
-    }
-
-    /// 本地功能开着吗（规格 §7：`[library] dirs = []` = 整体关闭，首页不画那两格）。
-    pub(super) fn local_features_on(&self) -> bool {
-        !matches!(&self.config.library.dirs, Some(dirs) if dirs.is_empty())
     }
 
     pub(super) fn sign_out(&mut self, reason: &str) {
@@ -2441,7 +2479,7 @@ impl App {
         if !matches!(self.screen, Screen::Home) {
             return;
         }
-        let count = Menu::menus(self.local_features_on()).len() as isize;
+        let count = Menu::menus().len() as isize;
         if count == 0 {
             return;
         }
@@ -2470,8 +2508,7 @@ impl App {
             return;
         }
         if matches!(self.screen, Screen::Home) {
-            let local_on = self.local_features_on();
-            edge_state(&mut self.home_state, Menu::menus(local_on).len(), last);
+            edge_state(&mut self.home_state, Menu::menus().len(), last);
             return;
         }
         self.nav.edge_selection(last);
@@ -2608,10 +2645,18 @@ impl App {
         let Ok(state) = transfer.lock() else { return };
         if let Some(outcome) = &state.outcome {
             let outcome = outcome.clone();
+            let track = state.track.clone();
             drop(state);
             self.transfer = None;
             self.clear_progress();
-            // 下载完成（成功或失败）之后重扫一次下载目录：成功的这次会多出一个 `↓`。
+            // 下好的那份先登记：索引只在界面线程写（后台线程只把那条记录带回来）。
+            if let Some(track) = track {
+                self.downloads.upsert(track);
+                if let Err(error) = self.downloads.save(&self.config.paths.download_dir) {
+                    tracing::warn!("下载索引落盘失败：{error:#}");
+                }
+            }
+            // 然后跟磁盘对一遍（体积校准、幽灵清理），第 5 屏与 `↓` 都跟着更新。
             self.refresh_downloads();
             self.notify(outcome);
             return;
@@ -3284,26 +3329,18 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// `[library] dirs = []`：首页只剩四格，本地两屏进不去，数字键也直跳不到。
+    /// `[library] dirs` 留空 = 不去扫别人的目录，但**本地两屏照样进得去**：第 5 屏永远在，
+    /// 里面是下载索引那拨（规格 §7）。
     #[test]
-    fn clearing_the_library_dirs_switches_the_local_half_off() {
+    fn an_empty_dirs_list_still_offers_the_local_screens() {
         let (mut app, _runtime) = test_app();
         app.config.library.dirs = Some(Vec::new());
         app.switch_menu(Menu::LocalLibrary);
-        assert_eq!(app.nav.menu, Menu::Favorites, "进不去，停在原地");
-        assert!(
-            app.notice_text()
-                .is_some_and(|text| text.contains("本地功能已关闭")),
-            "{:?}",
-            app.notice_text()
-        );
+        assert_eq!(app.nav.menu, Menu::LocalLibrary, "第 5 屏照样进");
+        assert!(app.library.is_empty(), "没扫过、也没下载过：这一屏是空的");
         app.screen = Screen::Home;
         app.apply(keys::Action::Menu(5));
-        assert_eq!(app.nav.menu, Menu::Favorites, "`6` 直跳不到本地歌单");
-        // 开着的时候照旧（默认配置里 `dirs` 是 `None` = 用下载目录）。
-        app.config.library.dirs = None;
-        app.switch_menu(Menu::LocalPlaylists);
-        assert_eq!(app.nav.menu, Menu::LocalPlaylists);
+        assert_eq!(app.nav.menu, Menu::LocalPlaylists, "`6` 也直跳得到");
     }
 
     /// 本地歌单屏：两级（歌单 → 曲目），`Esc` 退回来。
@@ -3610,7 +3647,7 @@ mod tests {
         let dir = crate::tui::test_support::temp_library_tree("scan-fill");
         let dirs = [dir.join("canto")];
         app.on_msg(scan_library(&dirs, &dir.join("library.json"), &dir.join("下载目录")));
-        assert_eq!(app.local_songs().len(), 2, "两首都进曲库");
+        assert_eq!(app.library.len(), 2, "两首都进曲库");
         assert!(!app.library_scanning);
         assert!(
             app.notice_text()
@@ -3629,7 +3666,7 @@ mod tests {
         app.on_msg(scan_library(&dirs, &index, &dir.join("下载目录")));
         app.notice = None;
         app.on_msg(scan_library(&dirs, &index, &dir.join("下载目录")));
-        assert_eq!(app.local_songs().len(), 2);
+        assert_eq!(app.library.len(), 2);
         assert!(
             app.notice_text().is_none(),
             "没变化就别打扰：{:?}",
@@ -3647,7 +3684,7 @@ mod tests {
         app.notice = None;
         std::fs::remove_file(dir.join("canto/b.wav")).expect("删一首");
         app.on_msg(scan_library(&dirs, &index, &dir.join("下载目录")));
-        assert_eq!(app.local_songs().len(), 1);
+        assert_eq!(app.library.len(), 1);
         assert!(
             app.notice_text()
                 .is_some_and(|text| text.contains("移除 1")),
@@ -3799,7 +3836,7 @@ mod tests {
     #[test]
     fn the_home_cycles_with_tab() {
         let (mut app, _runtime) = crate::tui::test_support::test_app();
-        let count = Menu::menus(app.local_features_on()).len();
+        let count = Menu::menus().len();
         app.go_home();
         app.home_state.select(Some(0));
 
@@ -3819,14 +3856,13 @@ mod tests {
         assert_eq!(app.home_state.selected(), Some(count - 1), "第一格 Shift+Tab 去末格");
     }
 
-    /// 本地功能关掉时首页只有四格：环绕按**当时**那个长度算，不能撞到第 5、6 格。
+    /// 首页环绕按**当时**那个长度算（六格）。
     #[test]
     fn the_home_cycles_inside_the_grid_it_actually_has() {
         let (mut app, _runtime) = crate::tui::test_support::test_app();
-        app.config.library.dirs = Some(Vec::new());
         app.go_home();
-        let count = Menu::menus(app.local_features_on()).len();
-        assert_eq!(count, 4, "前提：`dirs = []` 时首页四格");
+        let count = Menu::menus().len();
+        assert_eq!(count, 6, "前提：六屏永远都在");
         app.home_state.select(Some(count - 1));
 
         app.apply(keys::Action::NextMenuItem);
@@ -4343,29 +4379,20 @@ mod tests {
     /// 多大、什么档位、歌词在哪，都进日志——通知位只有 32 列。
     #[test]
     fn a_download_notice_has_no_path_and_stays_short() {
-        let saved = |from_cache: bool, existed: bool| crate::download::Saved {
+        let saved = |from_cache: bool| crate::download::Saved {
             path: std::path::PathBuf::from(r"C:\Users\me\Music\canto\非酋.flac"),
             quality: crate::model::Quality::Flac,
             bytes: 26_000_000,
             lyrics: vec![std::path::PathBuf::from(
-                r"C:\Users\me\Music\canto-lyrics\非酋.lrc",
+                r"C:\Users\me\Music\canto\非酋.lrc",
             )],
-            existed,
             from_cache,
         };
 
-        assert_eq!(saved_notice("非酋", &saved(false, false)), "已下载：非酋");
-        assert_eq!(
-            saved_notice("非酋", &saved(true, false)),
-            "已从缓存复制：非酋"
-        );
-        assert_eq!(saved_notice("非酋", &saved(true, true)), "已存在：非酋");
+        assert_eq!(saved_notice("非酋", &saved(false)), "已下载：非酋");
+        assert_eq!(saved_notice("非酋", &saved(true)), "已从缓存复制：非酋");
 
-        for text in [
-            saved_notice("非酋", &saved(false, false)),
-            saved_notice("非酋", &saved(true, false)),
-            saved_notice("非酋", &saved(true, true)),
-        ] {
+        for text in [saved_notice("非酋", &saved(false)), saved_notice("非酋", &saved(true))] {
             assert!(
                 !text.contains('\\') && !text.contains('/'),
                 "通知里不该出现路径：{text}"
@@ -4483,6 +4510,168 @@ mod tests {
             app.downloads.by_mid(&song.mid).is_none(),
             "文件没了，那条幽灵条目要掉：{:?}",
             app.downloads
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 第 5 屏 = 下载索引里的歌 ∪ 曲库目录扫出来的歌，**不重复**（曲库扫描跳过下载目录）。
+    #[test]
+    fn the_local_screen_merges_downloads_and_directories_without_duplicates() {
+        let (mut app, _runtime) = test_app();
+        let root = crate::tui::test_support::temp_library_tree("merge");
+        let music = root.join("canto");
+        // 下载目录**就在被扫的那棵树里**：跳过必须是整棵子树，否则这份文件会算两次。
+        let download_dir = music.join("downloads");
+        std::fs::create_dir_all(&download_dir).expect("建下载目录");
+        let file = download_dir.join("刘若英 - 成全.flac");
+        std::fs::write(&file, vec![0_u8; 8]).expect("写下载文件");
+        app.config.paths.download_dir = download_dir.clone();
+        app.downloads.upsert(crate::download::Track {
+            mid: "abc123".to_string(),
+            file: "刘若英 - 成全.flac".to_string(),
+            quality: crate::model::Quality::Flac,
+            container: "FLAC".to_string(),
+            bytes: 8,
+            title: "成全".to_string(),
+            singers: "刘若英".to_string(),
+            album: "年华".to_string(),
+            duration_secs: 276,
+            at: 0,
+        });
+        app.config.library.dirs = Some(vec![music.to_string_lossy().into_owned()]);
+
+        let dirs = [music.clone()];
+        app.on_msg(scan_library(&dirs, &root.join("library.json"), &download_dir));
+
+        let songs = app.library;
+        assert_eq!(songs.len(), 3, "扫到的两首 + 下载的一首，且没有重复：{songs:?}");
+        assert!(
+            songs
+                .iter()
+                .any(|song| song.mid == crate::model::local_mid(&file)),
+            "下载那首以路径身份进列表：{songs:?}"
+        );
+        assert_eq!(
+            songs
+                .iter()
+                .filter(|song| song.title == "成全")
+                .count(),
+            1,
+            "同一首只该出现一次"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// `↓` 按 mid 判：同歌手同标题的另一首不会被误标成已下载。
+    #[test]
+    fn the_download_marker_goes_by_mid_not_by_file_name() {
+        let (mut app, _runtime) = test_app();
+        let dir = std::env::temp_dir().join(format!("canto-dl-mid-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("建目录");
+        app.config.paths.download_dir = dir.clone();
+        std::fs::write(dir.join("同一人 - 同一首歌.flac"), vec![0_u8; 8]).expect("写文件");
+        app.downloads.upsert(crate::download::Track {
+            mid: "m1".to_string(),
+            file: "同一人 - 同一首歌.flac".to_string(),
+            quality: crate::model::Quality::Flac,
+            container: "FLAC".to_string(),
+            bytes: 8,
+            title: "同一首歌".to_string(),
+            singers: "同一人".to_string(),
+            album: String::new(),
+            duration_secs: 0,
+            at: 0,
+        });
+        app.downloads.save(&dir).expect("落盘");
+        app.refresh_downloads();
+
+        let mine = crate::tui::test_support::titled_song("m1", "同一首歌", "同一人");
+        let other = crate::tui::test_support::titled_song("m2", "同一首歌", "同一人");
+        assert!(
+            app.local_source(&mine).is_some(),
+            "登记过的那个 mid 本地有那份"
+        );
+        assert!(
+            app.local_source(&other).is_none(),
+            "同名的另一首不该被当成已下载"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 幽灵条目（文件没了）从第 5 屏与 `↓` 里一起消失。
+    #[test]
+    fn a_download_whose_file_is_gone_is_dropped_from_the_list() {
+        let (mut app, _runtime) = test_app();
+        let dir = std::env::temp_dir().join(format!("canto-dl-ghost-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("建目录");
+        app.config.paths.download_dir = dir.clone();
+        std::fs::write(dir.join("还在.flac"), vec![0_u8; 4]).expect("写文件");
+        for (mid, file) in [("m1", "还在.flac"), ("m2", "被删了.flac")] {
+            app.downloads.upsert(crate::download::Track {
+                mid: mid.to_string(),
+                file: file.to_string(),
+                quality: crate::model::Quality::Flac,
+                container: "FLAC".to_string(),
+                bytes: 4,
+                title: file.to_string(),
+                singers: "人".to_string(),
+                album: String::new(),
+                duration_secs: 0,
+                at: 0,
+            });
+        }
+        app.downloads.save(&dir).expect("落盘");
+        app.refresh_downloads();
+
+        assert!(app.downloads.by_mid("m1").is_some());
+        assert!(app.downloads.by_mid("m2").is_none(), "幽灵条目要掉");
+        assert_eq!(app.library.len(), 1);
+        assert!(
+            app.local_source(&crate::tui::test_support::titled_song("m2", "被删了", "人")).is_none(),
+            "`↓` 跟着灭"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `d` 已经下过的那首：只报一句，不起下载（旧实现看到同名文件也报「已下载」，但那是猜的）。
+    #[test]
+    fn pressing_d_on_an_already_downloaded_song_only_says_so() {
+        let (mut app, _runtime) = test_app();
+        let dir = std::env::temp_dir().join(format!("canto-dl-again-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("建目录");
+        app.config.paths.download_dir = dir.clone();
+        std::fs::write(dir.join("歌手 - 有了.flac"), vec![0_u8; 4]).expect("写文件");
+        app.downloads.upsert(crate::download::Track {
+            mid: "m1".to_string(),
+            file: "歌手 - 有了.flac".to_string(),
+            quality: crate::model::Quality::Flac,
+            container: "FLAC".to_string(),
+            bytes: 4,
+            title: "有了".to_string(),
+            singers: "歌手".to_string(),
+            album: String::new(),
+            duration_secs: 0,
+            at: 0,
+        });
+        app.downloads.save(&dir).expect("落盘");
+        app.refresh_downloads();
+
+        let song = crate::tui::test_support::titled_song("m1", "有了", "歌手");
+        app.nav.favorites.set_items(vec![song]);
+        app.switch_menu(Menu::Favorites);
+        app.apply(crate::tui::keys::Action::Download);
+
+        assert!(app.transfer.is_none(), "不该起下载");
+        assert_eq!(
+            app.notice_text(),
+            Some("已下载：歌手 - 有了.flac"),
+            "只报一句文件名"
         );
 
         std::fs::remove_dir_all(&dir).ok();

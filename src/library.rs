@@ -262,19 +262,35 @@ pub fn rescan(previous: &Index, dirs: &[PathBuf], skip: &Path) -> ScanOutcome {
     }
 }
 
-/// 索引 → 可直接播放的曲目，排序 **歌手 → 专辑 → 标题 → 路径**（同专辑天然相邻，
-/// 不用做两级界面；路径兜底保证顺序稳定）。
-pub fn index_songs(index: &Index) -> Vec<Song> {
-    let mut entries: Vec<&Entry> = index.entries.iter().collect();
-    entries.sort_by(|left, right| {
-        (&left.artist, &left.album, &left.title, &left.path).cmp(&(
-            &right.artist,
-            &right.album,
+/// 曲目排序：**歌手 → 专辑 → 标题 → 路径**（同专辑天然相邻，不用做两级界面；路径兜底保证
+/// 顺序稳定）。
+///
+/// 第 5 屏是「扫出来的」与「下载来的」两拨合起来的一张表，排序**只能有这一份**——两边各排
+/// 各的，同一首歌的邻居就会前后不一。
+pub fn sort_songs(songs: &mut [Song]) {
+    songs.sort_by(|left, right| {
+        (&left.singers, &left.album_name, &left.title, path_of(left)).cmp(&(
+            &right.singers,
+            &right.album_name,
             &right.title,
-            &right.path,
+            path_of(right),
         ))
     });
-    entries.into_iter().map(entry_to_song).collect()
+}
+
+/// 排序兜底键：本地歌给路径。
+fn path_of(song: &Song) -> &Path {
+    match &song.source {
+        Source::Local(path) => path.as_path(),
+        Source::Qq => Path::new(""),
+    }
+}
+
+/// 索引 → 可直接播放的曲目，交给 [`sort_songs`]。
+pub fn index_songs(index: &Index) -> Vec<Song> {
+    let mut songs: Vec<Song> = index.entries.iter().map(entry_to_song).collect();
+    sort_songs(&mut songs);
+    songs
 }
 
 /// 一条索引记录 → 一首歌。`sizes` 留全 0：本地文件没有接口报的体积，列表那一列渲染成 `—`。

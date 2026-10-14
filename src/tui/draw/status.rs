@@ -29,7 +29,7 @@ impl App {
         ])
         .split(area);
         frame.render_widget(
-            Paragraph::new(hints(self.context(), self.local_features_on())),
+            Paragraph::new(hints(self.context())),
             columns[0],
         );
         if let Some(text) = self.notice_text() {

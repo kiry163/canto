@@ -190,19 +190,14 @@ impl App {
 }
 
 /// 状态行左侧的键位提示：按当前上下文给三到五个，只写**真的接了行为**的键。
-pub fn hints(context: keys::Context, local_on: bool) -> &'static str {
+pub fn hints(context: keys::Context) -> &'static str {
     match context {
         keys::Context::Content => {
             "Enter 播放 · Space 暂停 · n/b 切歌 · / 筛选 · p 加歌单 · ? 帮助"
         }
-        // 首页没有「选中的歌」：提示里只给进屏 / 切屏与播放这几条。数字直跳的上限跟着
-        // 「本地功能开没开」走（`dirs = []` 时只有四屏）。
+        // 首页没有「选中的歌」：提示里只给进屏 / 切屏与播放这几条。
         keys::Context::Home => {
-            if local_on {
-                "Enter 进入 · 1-6 直跳 · Space 暂停 · n/b 切歌 · u 队列 · ? 帮助"
-            } else {
-                "Enter 进入 · 1-4 直跳 · Space 暂停 · n/b 切歌 · u 队列 · ? 帮助"
-            }
+            "Enter 进入 · 1-6 直跳 · Space 暂停 · n/b 切歌 · u 队列 · ? 帮助"
         }
         keys::Context::SearchInput => "输入关键词 · Enter 搜索 · Esc 退出输入",
         keys::Context::FilterInput => "输入即筛选 · Enter 确认 · Esc 清空",
@@ -360,18 +355,18 @@ mod tests {
         assert!(lost.contains("（已丢失）"), "{lost:?}");
     }
 
-    /// `dirs = []` 时首页只有四格，提示里的直跳上限也跟着退到 `1-4`。
+    /// `dirs` 留空时首页照样六格、提示照样 `1-6`：那一项只表示「不扫别人的目录」，
+    /// 第 5 屏（下载来的那些）永远在。
     #[test]
-    fn the_home_grid_drops_the_local_cells_when_they_are_off() {
+    fn the_home_grid_keeps_all_six_cells_with_no_extra_dirs() {
         let (mut app, _runtime) = test_app();
         app.config.library.dirs = Some(Vec::new());
         app.go_home();
         let text = frame_rows(&mut app, 120, 40).join("\n");
         assert!(text.contains("1在线收藏"), "{text:?}");
-        assert!(text.contains("4播放历史"), "{text:?}");
-        assert!(!text.contains("本地曲库"), "第 5 格不该画：{text:?}");
-        assert!(!text.contains("本地歌单"), "第 6 格不该画：{text:?}");
-        assert!(text.contains("1-4直跳"), "{text:?}");
+        assert!(text.contains("5本地曲库"), "{text:?}");
+        assert!(text.contains("6本地歌单"), "{text:?}");
+        assert!(text.contains("1-6直跳"), "{text:?}");
     }
 
     /// 标题的层级判断按**当前屏**取：在 `6` 上不该拿 QQ 那一层的状态当自己的层级。

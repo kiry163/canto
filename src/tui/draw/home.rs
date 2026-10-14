@@ -24,7 +24,7 @@ const ROW_GAP: u16 = 1;
 
 impl App {
     pub(super) fn draw_home(&mut self, frame: &mut Frame, area: Rect) {
-        let labels: Vec<String> = Menu::menus(self.local_features_on())
+        let labels: Vec<String> = Menu::menus()
             .iter()
             .enumerate()
             .map(|(index, menu)| format!("{}  {}", index + 1, menu.title()))
