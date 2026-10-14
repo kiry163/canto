@@ -72,9 +72,10 @@ pub enum TrackSource {
     Cdn(Vec<Candidate>),
     /// 本地文件（曲库 / 播放缓存 / 下载目录）。
     ///
-    /// `quality` 只在知道时才有值：缓存文件名里带着档位；曲库与下载目录那份读不出来
-    /// （`.mp3` 是 128 还是 320，文件本身不说），播放条就只报体积、不瞎报档位。
-    /// `from` 是那三种本地来源里的一种——线上不会出现在这里，它是 [`TrackSource::Cdn`]。
+    /// `quality` 只在知道时才有值：缓存文件名里带着档位，下载索引里那份是下载时记下来的；
+    /// 单纯被曲库扫到的文件读不出来（`.mp3` 是 128 还是 320，文件本身不说），播放条就只报
+    /// 体积、不瞎报档位。`from` 是那三种本地来源里的一种——线上不会出现在这里，它是
+    /// [`TrackSource::Cdn`]。
     Local {
         path: std::path::PathBuf,
         quality: Option<Quality>,
@@ -96,14 +97,18 @@ pub fn local_copy(
     download_dir: &std::path::Path,
 ) -> Option<TrackSource> {
     if let Some(path) = song.path() {
-        let from = if downloads.mid_of_path(download_dir, path).is_some() {
-            PlaySource::Download
-        } else {
-            PlaySource::Library
+        // 登记过的那份：档位用下载时记下来的那个（跟在线列表、第 5 屏同一个答案）；
+        // 只是被曲库扫到的文件读不出码率，播放条就只报体积、不瞎报档位。
+        let registered = downloads
+            .mid_of_path(download_dir, path)
+            .and_then(|mid| downloads.by_mid(mid));
+        let (from, quality) = match registered {
+            Some(track) => (PlaySource::Download, Some(track.quality)),
+            None => (PlaySource::Library, None),
         };
         return Some(TrackSource::Local {
             path: path.to_path_buf(),
-            quality: None,
+            quality,
             from,
         });
     }
@@ -834,8 +839,8 @@ mod tests {
         };
         assert_eq!(
             local(local_copy(&downloaded, None, &downloads, &dir)),
-            Some((mine, None, PlaySource::Download)),
-            "这份文件在下载索引里"
+            Some((mine, Some(crate::model::Quality::High320), PlaySource::Download)),
+            "这份文件在下载索引里：标签写「下载」，档位用它记下的那个"
         );
 
         let other_path = dir.join("自己放的.flac");

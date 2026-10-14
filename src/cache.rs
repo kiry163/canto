@@ -485,13 +485,13 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// 缓存里已有哪些歌：认正式文件，不认 `.part`，也不认歌词目录；带档位与字节数。
+    /// 缓存里已有哪些歌：认正式文件，不认 `.part`，也不认老布局的 `lyrics/` 子目录；带档位与字节数。
     #[test]
     fn cached_entries_list_only_complete_tracks() {
         let dir = temp_dir("mids");
         std::fs::write(dir.join("aaa.320.mp3"), vec![0_u8; 10]).expect("写完整缓存");
         std::fs::write(dir.join("bbb.flac.flac.part"), vec![0_u8; 5]).expect("写半截");
-        std::fs::create_dir_all(dir.join("lyrics")).expect("建歌词目录");
+        std::fs::create_dir_all(dir.join("lyrics")).expect("建老歌词子目录");
         std::fs::write(dir.join("lyrics/ccc.lrc"), "x").expect("写歌词");
 
         std::fs::write(dir.join("bbb.flac.flac.part"), vec![0_u8; 5]).expect("写半截");

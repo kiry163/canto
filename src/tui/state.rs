@@ -1129,12 +1129,12 @@ impl App {
         // 索引里登记过、文件也还在：不再下一遍。旧实现看到同名文件就报「已下载」——那是猜的，
         // 同歌手同标题的另一首会被误判。判定归 `by_mid`（见规格 §5）。
         let download_dir = self.config.paths.download_dir.clone();
-        if let Some(track) = self.downloads.by_mid(&song.mid) {
-            if self.downloads.path_of(track, &download_dir).is_file() {
-                let file = track.file.clone();
-                self.notify(format!("已下载：{file}"));
-                return;
-            }
+        if let Some(track) = self.downloads.by_mid(&song.mid)
+            && self.downloads.path_of(track, &download_dir).is_file()
+        {
+            let file = track.file.clone();
+            self.notify(format!("已下载：{file}"));
+            return;
         }
         let dir = download_dir;
         let quality = self.config.playback.quality;
@@ -1446,7 +1446,7 @@ impl App {
         }
         let found = path
             .as_deref()
-            .and_then(|path| crate::library::local_lyric(path));
+            .and_then(crate::library::local_lyric);
         match found {
             Some(lyric) => {
                 crate::cache::put_lyric(&song.mid, Some(&lyric));

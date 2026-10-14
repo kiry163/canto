@@ -403,11 +403,11 @@ mod tests {
         std::fs::write(canto.join("a.trans.lrc"), "[00:01.00]译文\n").expect("写翻译");
         std::fs::write(canto.join("无主.lrc"), "[00:01.00]孤儿\n").expect("写孤儿歌词");
 
-        let (files, unsupported) = walk(&[canto.clone()], &no_skip());
+        let (files, unsupported) = walk(std::slice::from_ref(&canto), &no_skip());
         assert_eq!(files.len(), 3, "只有三个音频进候选：{files:?}");
         assert_eq!(unsupported, 0, ".lrc 不算「不支持的音频」");
 
-        let outcome = rescan(&Index::default(), &[canto.clone()], &no_skip());
+        let outcome = rescan(&Index::default(), std::slice::from_ref(&canto), &no_skip());
         let paired = outcome
             .index
             .entries
@@ -441,7 +441,7 @@ mod tests {
         assert_eq!(files.len(), 1, "正好是它 → 那一条不扫：{files:?}");
         assert!(files[0].path.ends_with("自己的.wav"));
 
-        let (files, _) = walk(&[root.clone()], &download);
+        let (files, _) = walk(std::slice::from_ref(&root), &download);
         assert_eq!(files.len(), 1, "它是某一项的子树 → 递归到它时跳过：{files:?}");
         assert!(files[0].path.ends_with("自己的.wav"));
         std::fs::remove_dir_all(&root).ok();

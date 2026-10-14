@@ -333,7 +333,7 @@ fn write_lyrics(stem: &str, dir: &Path, lyric: Option<&Lyric>) -> Result<Vec<Pat
     let Some(lyric) = lyric.filter(|lyric| !lyric.lines.is_empty()) else {
         return Ok(Vec::new());
     };
-    std::fs::create_dir_all(dir).with_context(|| format!("创建歌词目录失败：{}", dir.display()))?;
+    std::fs::create_dir_all(dir).with_context(|| format!("创建下载目录失败：{}", dir.display()))?;
     let mut written = Vec::new();
     let main = dir.join(format!("{stem}.lrc"));
     std::fs::write(&main, render(lyric, false))
@@ -505,15 +505,15 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// 歌词写进**歌词目录**（不是歌曲目录），名字与音频同 stem。
+    /// 歌词写进**音频同目录**、同名（只差扩展名）：拷走一首歌不会落下它的词。
     #[test]
-    fn lyrics_land_in_their_own_directory() {
+    fn lyrics_land_beside_the_audio() {
         use crate::model::LyricLine;
         let root = std::env::temp_dir().join(format!("canto-dl-{}", std::process::id()));
         std::fs::remove_dir_all(&root).ok();
-        let songs = root.join("songs");
-        let lyrics = root.join("lyrics");
-        std::fs::create_dir_all(&songs).expect("建歌曲目录");
+        // 音频与歌词**同一个目录**：歌词就在音频旁边，名字只差扩展名。
+        let dir = root.join("canto");
+        std::fs::create_dir_all(&dir).expect("建下载目录");
 
         let lyric = Lyric {
             lines: vec![
@@ -529,20 +529,15 @@ mod tests {
                 },
             ],
         };
-        let written = write_lyrics("歌手 - 标题", &lyrics, Some(&lyric)).expect("写歌词");
+        let written = write_lyrics("歌手 - 标题", &dir, Some(&lyric)).expect("写歌词");
         assert_eq!(written.len(), 2, "正文 + 翻译各一份");
-        assert!(lyrics.join("歌手 - 标题.lrc").is_file(), "{written:?}");
-        assert!(lyrics.join("歌手 - 标题.trans.lrc").is_file(), "{written:?}");
-        assert_eq!(
-            std::fs::read_dir(&songs).expect("列歌曲目录").count(),
-            0,
-            "歌曲目录里不该混进歌词"
-        );
+        assert!(dir.join("歌手 - 标题.lrc").is_file(), "{written:?}");
+        assert!(dir.join("歌手 - 标题.trans.lrc").is_file(), "{written:?}");
 
         // 没有歌词（或歌词是空的）就一个文件都不写。
-        assert!(write_lyrics("歌手 - 标题", &lyrics, None).expect("没歌词").is_empty());
+        assert!(write_lyrics("歌手 - 标题", &dir, None).expect("没歌词").is_empty());
         assert!(
-            write_lyrics("歌手 - 标题", &lyrics, Some(&Lyric::default()))
+            write_lyrics("歌手 - 标题", &dir, Some(&Lyric::default()))
                 .expect("空歌词")
                 .is_empty()
         );
