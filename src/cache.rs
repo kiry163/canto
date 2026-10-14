@@ -32,24 +32,29 @@ pub fn for_song(mid: &str) -> Option<(PathBuf, Quality)> {
     for_song_in(&paths::cache_dir(), mid)
 }
 
+/// 认文件名走 [`parse_track_name`]（**同一个口径**），认不出来的一律跳过。
+///
+/// 目录里躺着的不只是音频：还有 `<mid>.lrc`（歌词）、`<mid>.trans.lrc`、`library.json`（曲库
+/// 索引）、没退干净的 `.part`。**一个陌生文件名只跳过它自己**——这里是 `read_dir` 的顺序，
+/// 任何「认不出就整次作废」的写法都会让「哪几首能命中」随文件系统变（APFS 哈希序、NTFS 名字
+/// 序），播放于是时灵时不灵（真踩过：歌词与音频同目录之后，绝大多数 mid 都查不到自己的缓存）。
 pub(crate) fn for_song_in(dir: &Path, mid: &str) -> Option<(PathBuf, Quality)> {
     let entries = std::fs::read_dir(dir).ok()?;
     for entry in entries.flatten() {
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
         let path = entry.path();
-        if !entry.metadata().ok()?.is_file() {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
-        }
-        let name = path.file_name()?.to_str()?;
-        if name.ends_with(".part") {
-            continue;
-        }
-        // `<mid>.<档位>.<扩展名>`：mid 自己可能带点，所以按「从右边切两段」解析。
-        let mut parts = name.rsplitn(3, '.');
-        let ext = parts.next()?;
-        let tier = parts.next()?;
-        let name_mid = parts.next()?;
-        if name_mid == mid && !ext.is_empty() {
-            return Quality::parse(tier).map(|quality| (path, quality));
+        };
+        if let Some((name_mid, quality)) = parse_track_name(name)
+            && name_mid == mid
+        {
+            return Some((path, quality));
         }
     }
     None
@@ -521,6 +526,33 @@ mod tests {
         );
         assert!(for_song_in(&dir, "m3").is_none(), "半截不算");
         assert!(for_song_in(&dir, "m4").is_none(), "没有就是没有");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 同目录里的歌词（`<mid>.lrc` / `<mid>.trans.lrc`）与曲库索引不能把音频藏起来。
+    ///
+    /// 这条真坏过：解析文件名的 `?` 是「整个扫描作废」而不是「跳过这个文件」，于是「哪几首
+    /// 认得出缓存」押在 `read_dir` 的枚举顺序上（APFS 哈希序、NTFS 名字序）——同一个目录在
+    /// 不同文件系统上命中的歌都不一样，播放也就时灵时不灵。这里成对地写音频与歌词：任何
+    /// 「按创建顺序枚举」的文件系统上也会出现「前一拍的歌词排在后一拍的音频前面」。
+    #[test]
+    fn foreign_files_beside_the_tracks_do_not_hide_them() {
+        let dir = temp_dir("mixed");
+        let mids: Vec<String> = (0..40).map(|index| format!("mid{index:02}")).collect();
+        for mid in &mids {
+            std::fs::write(dir.join(format!("{mid}.128.mp3")), vec![0_u8; 10]).expect("写音频");
+            std::fs::write(dir.join(format!("{mid}.lrc")), "词").expect("写歌词");
+        }
+        std::fs::write(dir.join("mid00.trans.lrc"), "译文").expect("写翻译");
+        std::fs::write(dir.join("library.json"), "{}").expect("写曲库索引");
+
+        for mid in &mids {
+            assert_eq!(
+                for_song_in(&dir, mid),
+                Some((dir.join(format!("{mid}.128.mp3")), Quality::Low128)),
+                "《{mid}》的音频就在目录里，旁边有歌词/索引也得认得出来"
+            );
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 
