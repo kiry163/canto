@@ -186,6 +186,36 @@ macOS 是主线程 `NSPanel` + 每帧手动泵 AppKit）只管把 payload 画出
 「窗口中心 = 主屏底部居中」「暂停按 `hide_when_paused` 藏/回」「热键开关真拆真建」
 「**关掉再开连按 8 轮：窗口真下屏、再建成功、位置一点不飘**」）。
 
+### 外观：衬底 / 光晕 / 描边粗细 / 行距（2026-10-15，实测 Windows）
+
+`[desktop_lyrics]` 从「字体 + 三个颜色 + 整层透明度」扩到 18 个键，新增的都是**偏好**。
+默认值刻意保持「与加这些功能之前逐像素一样」——想用再打开（配置模板里给了现成的一组值）：
+
+| 键 | 作用 | 两平台怎么落 |
+|---|---|---|
+| `outline_width` | 描边粗细（逻辑像素，0 = 不描边） | Windows：按窗口 DPI 放大成 r 圈偏移环（第 r 圈 = 切比雪夫距离正好 r 的 8r 个格子；`width = 1` 就是原来那八个方向）。macOS：折算成 AppKit 的 `NSStrokeWidth` 百分比（那是「字号的百分之几」），按行各给一个基准，`1` = 改造前的观感 |
+| `secondary_scale` / `line_gap` | 次要行占正文的百分比（默认 60 = 原来的 3/5）/ 行间距 | 两平台共用一条算式 `layout`：宽取最宽一行、高是各行之和 + 行**之间**的间距 + 两边内边距，并返回每行的 y。行距只加在行与行之间 |
+| `translation_color` | 译文自己的颜色（下一句仍用 `next_color`） | 默认与 `next_color` 同色；分开之后「译文 vs 下一句」才有主次 |
+| `background` / `background_opacity` / `corner_radius` | 三行文字下面那块圆角衬底 | Windows：往预乘 BGRA 上按圆角矩形的带符号距离填（1 像素抗锯齿、半径按短边收口）。macOS：内容视图换成一个自定义样式的 `NSBox`（`Custom` + 无边框无标题 + 圆角），`opacity = 0` 走 `setTransparent(true)` |
+| `shadow` / `shadow_radius` / `shadow_opacity` | 在描边之外再糊一圈柔光 | Windows：`stamp` 多一个「这一笔的上限 alpha」，由内向外逐环二次衰减（`glow_rings`），画布四边各留一个半径的余量。macOS：`NSShadow` 当文本属性（偏移 0 才是光晕），同样留余量免得被控件裁掉 |
+
+两个坑值得记下来：
+
+- **圆角矩形的带符号距离少一项就整块 50% 覆盖**：`qx`/`qy` 各自 `max(0)` 之后还得加上
+  `min(max(qx, qy), 0)` 这一项，才有「里面」的负距离。第一版漏了，像素级单测（在同一个
+  `Canvas` 上读回 DIB 的 alpha）当场报「边上该是 200、量到 100」——这类错误光看代码看不出来。
+- **Windows 的描边原来不跟 DPI 缩放**：`make_font` 一直按 `dpi/96` 放大字号，而描边写死 1 物理
+  像素（macOS 那边是字号百分比、天然跟着走），于是高 DPI 下描边相对变细；现在 `outline_width`
+  走同一条缩放。
+
+验收：`cargo test` 覆盖 `layout` / `outline_offsets` / `glow_rings` 三条纯函数（两平台共用的部分）
++ Windows 四条像素级单测（衬底圆角、衬底按 inset 让出光晕余量、光晕真的画到字框外、预乘叠加
+不回绕）；真机再跑一遍完整链路——`outline_width = 2` + `line_gap = 6` + `background_opacity = 45`
++ `shadow = "#7AA2F7"` 时桌面截图能看到变粗的描边、圆角衬底、蓝色柔光与两行之间的留白
+（Windows 实测 2026-10-15，配置里那些值就是这一次跑出来的）。macOS 这三处（`NSBox` 衬底 /
+`NSShadow` 光晕 / 描边百分比）目前只对过 vendored 源码里的类型与 API 名称，**没跑过真机**，
+下次上 macOS 时按同样的截图口径补一次。
+
 ### 开关：热键真拆真建（2026-10-13）
 
 原来「建不建」由 `[desktop_lyrics] enabled` 在启动时定；现在挪到全局热键 `desktop_lyrics_toggle`

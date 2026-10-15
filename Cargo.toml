@@ -50,6 +50,12 @@ objc2-app-kit = { version = "0.3", features = [
     "NSWindow",
     "NSPanel",
     "NSView",
+    # `NSBox` 的方法都挂在 `all(feature = "NSResponder", feature = "NSView")` 下面：
+    # 桌面歌词的衬底就是个自定义样式的 NSBox。
+    "NSResponder",
+    "NSBox",
+    # 光晕（`NSShadowAttributeName` + NSShadow）。
+    "NSShadow",
     "NSTextField",
     "NSScreen",
     "NSColor",

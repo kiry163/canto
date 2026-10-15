@@ -159,6 +159,67 @@ fn clamp_center(center: (i32, i32), screen: (i32, i32)) -> (i32, i32) {
     )
 }
 
+/// 三行文本的摆法：给定每行量出来的尺寸，算出窗口该多大、每行的 y 是多少。
+///
+/// 两个平台共用这一条算式（Windows 传按 DPI 放大过的像素、macOS 传点），行距与内边距
+/// 只在这里出现一次——「两边摆得一样」不靠人眼对齐。
+///
+/// 返回（宽、高、每行的 y）。`gap` 只加在行**之间**，最后一行后面不加。
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+fn layout(sizes: &[(f64, f64)], padding: f64, gap: f64) -> (f64, f64, Vec<f64>) {
+    let width = sizes.iter().map(|(width, _)| *width).fold(0.0, f64::max) + padding * 2.0;
+    let gaps = gap * sizes.len().saturating_sub(1) as f64;
+    let height: f64 = sizes.iter().map(|(_, height)| *height).sum::<f64>() + gaps + padding * 2.0;
+    let mut next = padding;
+    let ys = sizes
+        .iter()
+        .map(|(_, height)| {
+            let at = next;
+            next += height + gap;
+            at
+        })
+        .collect();
+    (width, height, ys)
+}
+
+/// 逻辑像素 → 窗口像素（Windows 按窗口 DPI 放大；`dpi` 至少按 96 算）。
+#[cfg(target_os = "windows")]
+fn scaled(value: i32, dpi: i32) -> i32 {
+    (value * dpi.max(96) / 96).max(0)
+}
+
+/// 描边用的偏移环：`width` 圈，第 r 圈是切比雪夫距离正好是 r 的格子（一圈 8r 个）。
+/// `width = 0` = 不描边；`width = 1` 就是原来那八个方向。
+#[cfg(target_os = "windows")]
+fn outline_offsets(width: i32) -> Vec<(i32, i32)> {
+    let mut offsets = Vec::new();
+    for radius in 1..=width.max(0) {
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                if dx.abs().max(dy.abs()) == radius {
+                    offsets.push((dx, dy));
+                }
+            }
+        }
+    }
+    offsets
+}
+
+/// 光晕每一圈的透明度（0-255）：从内到外二次衰减，一圈圈叠出来就是柔光。
+/// 半径 0 = 空表（光晕关掉）。
+#[cfg(target_os = "windows")]
+fn glow_rings(radius: i32, opacity: u8) -> Vec<(i32, u8)> {
+    let radius = radius.max(0);
+    (1..=radius)
+        .map(|ring| {
+            // 每一圈只被贴一次（相邻圈不重叠），所以这个值就是那一圈的最终透明度。
+            let falloff = f64::from(radius + 1 - ring) / f64::from(radius + 1);
+            let alpha = f64::from(opacity.min(100)) / 100.0 * 255.0 * falloff * falloff;
+            (ring, alpha.round().clamp(0.0, 255.0) as u8)
+        })
+        .collect()
+}
+
 /// 主屏尺寸（宽、高，逻辑点）。
 #[cfg(target_os = "windows")]
 fn primary_screen() -> (i32, i32) {
@@ -461,7 +522,9 @@ mod imp {
         WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
     };
 
-    use super::{DesktopLyricsConfig, Payload};
+    use super::{
+        DesktopLyricsConfig, Payload, glow_rings, layout, outline_offsets, scaled,
+    };
 
     /// 「有新 payload 了」的自定义消息。
     const WM_PAYLOAD: u32 = WM_APP + 1;
@@ -493,6 +556,8 @@ mod imp {
         big: HFONT,
         /// 译文与下一句的字体（小一号）。
         small: HFONT,
+        /// 窗口 DPI（至少 96）：描边、行距、衬底圆角这些逻辑像素都按它放大。
+        dpi: i32,
         /// `Some` = 样式已经按这个锁定态设过了。
         transparent: Option<bool>,
         /// 窗口中心点：每次 `draw` 都按窗口实际矩形刷新（拖动是系统直接改窗口的）。
@@ -648,10 +713,17 @@ mod imp {
             tracing::info!(dpi, "桌面歌词窗口已就绪");
             let face = wide(&shared.config.font);
             let big_size = (shared.config.font_size * dpi / 96).max(8) as i32;
-            let small_size = ((shared.config.font_size * 3 / 5) * dpi / 96).max(8) as i32;
+            // 次要行的字号是正文的一个百分比（默认 60%，就是原来的 3/5）。
+            let small_size = (shared.config.font_size as u64
+                * u64::from(shared.config.secondary_scale)
+                / 100
+                * u64::from(dpi)
+                / 96)
+                .max(8) as i32;
             let mut painter = Painter {
                 big: make_font(big_size, face.as_ptr()),
                 small: make_font(small_size, face.as_ptr()),
+                dpi: dpi as i32,
                 transparent: None,
                 center,
                 reported: center,
@@ -746,34 +818,40 @@ mod imp {
         }
 
         // 要画的三行：当前句（大、亮）→ 译文 → 下一句（都小、暗）。空的不画。
+        // 译文与下一句各有自己的颜色（默认同色），所以「主次」可以只改一处。
         let config = &shared.config;
         let mut rows: Vec<(HFONT, &str, (u8, u8, u8))> = Vec::new();
         if !payload.current.is_empty() {
             rows.push((painter.big, payload.current.as_str(), rgb(config.color)));
         }
         if let Some(translation) = payload.translation.as_deref().filter(|text| !text.is_empty()) {
-            rows.push((painter.small, translation, rgb(config.next_color)));
+            rows.push((painter.small, translation, rgb(config.translation_color)));
         }
         if !payload.next.is_empty() {
             rows.push((painter.small, payload.next.as_str(), rgb(config.next_color)));
         }
 
-        // 量尺寸：宽度取最宽一行，高度是各行之和，再加内边距。
-        let padding = (8 * GetDpiForWindow(hwnd).max(96) / 96) as i32;
+        // 量尺寸：宽度取最宽一行，高度是各行之和 + 行间距，再加内边距（算式与 macOS 共用）。
+        let dpi = painter.dpi;
+        let padding = scaled(8, dpi);
+        let gap = scaled(i32::from(config.line_gap), dpi);
+        // 描边与光晕都按逻辑像素配，这里折成窗口像素。
+        let outline = outline_offsets(scaled(i32::from(config.outline_width), dpi));
+        let glow = scaled(i32::from(config.shadow_radius), dpi);
+        let rings = glow_rings(glow, config.shadow_opacity);
         let measure = CreateCompatibleDC(std::ptr::null_mut());
-        let mut widths = Vec::new();
-        let mut heights = Vec::new();
+        let mut sizes = Vec::with_capacity(rows.len());
         for (font, text, _) in &rows {
             SelectObject(measure, *font as HGDIOBJ);
             let text: Vec<u16> = text.encode_utf16().collect();
             let mut size: SIZE = std::mem::zeroed();
             GetTextExtentPoint32W(measure, text.as_ptr(), text.len() as i32, &mut size);
-            widths.push(size.cx);
-            heights.push(size.cy);
+            sizes.push((f64::from(size.cx), f64::from(size.cy)));
         }
         DeleteDC(measure);
-        let width = widths.iter().copied().max().unwrap_or(0) + padding * 2;
-        let height: i32 = heights.iter().sum::<i32>() + padding * 2;
+        // 内边距里多加一个光晕半径：那圈余量是给光晕的（衬底仍按原来的内边距框，见下）。
+        let (width, height, ys) = layout(&sizes, f64::from(padding + glow), f64::from(gap));
+        let (width, height) = (width.round() as i32, height.round() as i32);
 
         // 位置以**窗口自己**为准：解锁态的拖动是系统直接改窗口，缓存里的中心点可能是旧的。
         // 每个 `draw` 都重新采纳一次，顺带得到两个好处：拖动途中换行不会把窗口拽回旧位置；
@@ -805,26 +883,41 @@ mod imp {
             tracing::warn!("建歌词画布失败（GDI 对象不够？）");
             return;
         };
-        let mut y = padding;
+        // 衬底：文字块（不含给光晕让出来的那圈）外面的圆角矩形。不透明度 0 = 不画。
+        if config.background_opacity > 0 {
+            let alpha = (u32::from(config.background_opacity) * 255 / 100) as u8;
+            let radius = scaled(i32::from(config.corner_radius), dpi);
+            canvas.fill_round_rect(glow, radius, rgb(config.background), alpha);
+        }
         for (index, (font, text, color)) in rows.iter().enumerate() {
             let text_wide: Vec<u16> = text.encode_utf16().collect();
-            let x = (width - widths[index]) / 2;
-            // 描边：八方向各画一遍，再画正文（这样任何背景上都看得清）。
-            for offset in OUTLINE_OFFSETS {
+            let x = (width - sizes[index].0.round() as i32) / 2;
+            let y = ys[index].round() as i32;
+            // 光晕：由里向外一圈圈贴（越外越淡），压在描边与正文下面。
+            for (radius, alpha) in &rings {
+                for offset in outline_offsets(*radius) {
+                    canvas.stamp(
+                        *font,
+                        &text_wide,
+                        x + offset.0,
+                        y + offset.1,
+                        rgb(config.shadow),
+                        *alpha,
+                    );
+                }
+            }
+            // 描边：按配置的圈数各画一遍，再画正文（这样任何背景上都看得清）。
+            for offset in &outline {
                 canvas.stamp(
                     *font,
                     &text_wide,
                     x + offset.0,
                     y + offset.1,
                     rgb(config.outline),
+                    255,
                 );
             }
-            canvas.stamp(*font, &text_wide, x, y, *color);
-            y += heights[index];
-        }
-        // 解锁态：画一圈细框，提示「现在能拖」。
-        if !payload.locked {
-            canvas.border();
+            canvas.stamp(*font, &text_wide, x, y, *color, 255);
         }
 
         let blend = BLENDFUNCTION {
@@ -876,18 +969,6 @@ mod imp {
             face,
         )
     }
-
-    /// 描边的八个方向。
-    const OUTLINE_OFFSETS: [(i32, i32); 8] = [
-        (-1, -1),
-        (0, -1),
-        (1, -1),
-        (-1, 0),
-        (1, 0),
-        (-1, 1),
-        (0, 1),
-        (1, 1),
-    ];
 
     /// 一块 32 位自上而下的 DIB（预乘 BGRA）+ 一块画蒙版用的同类 DIB。
     ///
@@ -957,8 +1038,20 @@ mod imp {
         }
 
         /// 把一行字以某个颜色画上去：先用「白字黑底」画进蒙版（GDI 只写 RGB），
-        /// 再按覆盖率合成到预乘 BGRA 上。
-        unsafe fn stamp(&mut self, font: HFONT, text: &[u16], x: i32, y: i32, color: (u8, u8, u8)) {
+        /// 再按覆盖率合成到预乘 BGRA 上。`alpha` 是整行的上限（0-255）——光晕靠它一圈圈变淡。
+        unsafe fn stamp(
+            &mut self,
+            font: HFONT,
+            text: &[u16],
+            x: i32,
+            y: i32,
+            color: (u8, u8, u8),
+            alpha: u8,
+        ) {
+            // 光晕最外圈会四舍五入到 0：那一次连贴字都省掉。
+            if alpha == 0 {
+                return;
+            }
             let pixels = (self.width * self.height) as usize;
             std::ptr::write_bytes(self.mask_bits, 0, pixels * 4);
             SelectObject(self.mask_dc, font as HGDIOBJ);
@@ -970,27 +1063,54 @@ mod imp {
             // GDI 会批处理绘制调用；要读那块 DIB 的内存，得先让它落地（`CreateDIBSection`
             // 的文档就是这么要求的）。不刷的话 `composite` 可能读到全零/上一帧的覆盖率。
             GdiFlush();
-            composite(self.mask_bits, self.bits, pixels, color);
+            composite(self.mask_bits, self.bits, pixels, color, alpha);
         }
 
-        /// 解锁提示框：直接往缓冲里描一圈 1px 的白线（alpha 140）。
-        unsafe fn border(&mut self) {
-            let (width, height) = (self.width as usize, self.height as usize);
-            let alpha = 140_u8;
-            let put = |x: usize, y: usize| {
-                let pixel = self.bits.add((y * width + x) * 4);
-                *pixel = alpha;
-                *pixel.add(1) = alpha;
-                *pixel.add(2) = alpha;
-                *pixel.add(3) = alpha;
-            };
-            for x in 0..width {
-                put(x, 0);
-                put(x, height - 1);
+        /// 一个圆角矩形（衬底）。`inset` 是四边的留白——给光晕让出来的那圈不算在衬底里；
+        /// 圆角按到边界的距离做 1 像素抗锯齿，半径按短边收口（写 120 也不会画成怪形状）。
+        unsafe fn fill_round_rect(
+            &mut self,
+            inset: i32,
+            radius: i32,
+            color: (u8, u8, u8),
+            alpha: u8,
+        ) {
+            if alpha == 0 {
+                return;
             }
+            let (width, height) = (self.width, self.height);
+            let (left, top) = (f64::from(inset), f64::from(inset));
+            let (right, bottom) = (f64::from(width - inset), f64::from(height - inset));
+            if right <= left || bottom <= top {
+                return;
+            }
+            let (half_w, half_h) = ((right - left) / 2.0, (bottom - top) / 2.0);
+            let radius = f64::from(radius).clamp(0.0, half_w.min(half_h));
+            let (center_x, center_y) = ((left + right) / 2.0, (top + bottom) / 2.0);
+            let (straight_x, straight_y) = (half_w - radius, half_h - radius);
             for y in 0..height {
-                put(0, y);
-                put(width - 1, y);
+                for x in 0..width {
+                    // 圆角矩形的带符号距离：负数 = 在里面。`qx`/`qy` 是到两条直边的距离
+                    // （角上是负的才说明进了直边之间的那块），`inside` 那项负责给出里面的负值
+                    // ——少了它就是「整块 50% 覆盖」，实测踩过。
+                    let qx = (f64::from(x) + 0.5 - center_x).abs() - straight_x;
+                    let qy = (f64::from(y) + 0.5 - center_y).abs() - straight_y;
+                    let inside = qx.max(qy).min(0.0);
+                    let distance = qx.max(0.0).hypot(qy.max(0.0)) + inside - radius;
+                    let coverage = (0.5 - distance).clamp(0.0, 1.0);
+                    if coverage <= 0.0 {
+                        continue;
+                    }
+                    let alpha = (f64::from(alpha) * coverage).round() as u8;
+                    if alpha == 0 {
+                        continue;
+                    }
+                    over(
+                        self.bits.add(((y * width + x) as usize) * 4),
+                        color,
+                        alpha,
+                    );
+                }
             }
         }
     }
@@ -1009,22 +1129,159 @@ mod imp {
         }
     }
 
-    /// 把蒙版按覆盖率 over 合成到预乘 BGRA 缓冲上（`dst = color*α + dst*(1-α)`）。
-    unsafe fn composite(mask: *const u8, dst: *mut u8, pixels: usize, color: (u8, u8, u8)) {
+    /// 把蒙版按覆盖率合成到预乘 BGRA 缓冲上（`dst = color*α + dst*(1-α)`），
+    /// 再乘上这一笔自己的 `alpha`（光晕的逐圈衰减）。
+    unsafe fn composite(mask: *const u8, dst: *mut u8, pixels: usize, color: (u8, u8, u8), alpha: u8) {
         for index in 0..pixels {
-            let coverage = *mask.add(index * 4) as u32;
+            let coverage = u32::from(*mask.add(index * 4)) * u32::from(alpha) / 255;
             if coverage == 0 {
                 continue;
             }
-            let inverse = 255 - coverage;
-            let pixel = dst.add(index * 4);
-            let blend = |channel: u8, value: u8| {
-                ((value as u32 * coverage + channel as u32 * inverse) / 255) as u8
-            };
+            // SAFETY: 调用方给的缓冲就是 `pixels` 个像素的预乘 BGRA。
+            unsafe { over(dst.add(index * 4), color, coverage as u8) };
+        }
+    }
+
+    /// 预乘 BGRA 上的 `over` 合成：`alpha` 是这一笔的覆盖率（0-255）。
+    ///
+    /// 四个通道一起按同一个系数走——RGB 是预乘过的，只有一起缩放才不会有暗边。
+    unsafe fn over(pixel: *mut u8, color: (u8, u8, u8), alpha: u8) {
+        let (alpha, inverse) = (u32::from(alpha), 255 - u32::from(alpha));
+        let blend = |channel: u8, value: u8| {
+            ((u32::from(value) * alpha + u32::from(channel) * inverse) / 255) as u8
+        };
+        // SAFETY: 调用方保证这个指针指向一个 4 字节的像素。
+        unsafe {
             *pixel = blend(*pixel, color.2);
             *pixel.add(1) = blend(*pixel.add(1), color.1);
             *pixel.add(2) = blend(*pixel.add(2), color.0);
-            *pixel.add(3) = (coverage + *pixel.add(3) as u32 * inverse / 255).min(255) as u8;
+            *pixel.add(3) = (alpha + u32::from(*pixel.add(3)) * inverse / 255).min(255) as u8;
+        }
+    }
+
+    /// 光栅化本身没法用「画面对不对」来断言（那要真屏幕），但可以逐像素读那块 DIB：
+    /// 衬底的圆角、光晕往外扩、以及「一笔透明度」这三件都要能在缓冲里看到。
+    ///
+    /// 每个测试都是「自己建一块画布、自己读写」，前置条件全在本地，所以整段包在
+    /// 一个 `unsafe` 块里——比逐句加括号更容易看出测的是什么。
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn new_canvas(width: i32, height: i32) -> Canvas {
+            unsafe { Canvas::new(width, height) }.expect("建画布")
+        }
+
+        /// 读一个像素的 alpha（预乘 BGRA 的第四个字节）。
+        fn alpha(canvas: &Canvas, x: i32, y: i32) -> u8 {
+            unsafe { *canvas.bits.add(((y * canvas.width + x) as usize) * 4 + 3) }
+        }
+
+        fn painted(canvas: &Canvas) -> usize {
+            let mut count = 0;
+            for y in 0..canvas.height {
+                for x in 0..canvas.width {
+                    if alpha(canvas, x, y) != 0 {
+                        count += 1;
+                    }
+                }
+            }
+            count
+        }
+
+        /// 衬底：里面满、四个角是空的（圆角），边的中点上还是满的。
+        #[test]
+        fn the_pill_fills_the_inside_and_rounds_the_corners() {
+            unsafe {
+                let mut canvas = new_canvas(40, 40);
+                canvas.fill_round_rect(0, 10, (0, 0, 0), 128);
+                assert_eq!(alpha(&canvas, 20, 20), 128, "正中是设定的不透明度");
+                assert_eq!(alpha(&canvas, 0, 20), 128, "边的中点是满的");
+                assert_eq!(alpha(&canvas, 0, 0), 0, "最角上的像素在圆角外");
+                assert_eq!(alpha(&canvas, 1, 1), 0, "圆角外面也是空的");
+                assert_eq!(alpha(&canvas, 3, 3), 128, "半径 10 的圆角圆弧之内仍是实心");
+
+                // 圆角半径超过短边的一半就按短边收口（不会画出怪形状）。
+                let mut clamped = new_canvas(40, 40);
+                clamped.fill_round_rect(0, 400, (0, 0, 0), 255);
+                assert_eq!(alpha(&clamped, 20, 20), 255);
+                assert_eq!(alpha(&clamped, 0, 0), 0);
+            }
+        }
+
+        /// 衬底按 `inset` 让出光晕那一圈：四边各空出 inset 像素。
+        #[test]
+        fn the_pill_keeps_the_glow_margin_free() {
+            unsafe {
+                let mut canvas = new_canvas(40, 40);
+                canvas.fill_round_rect(6, 0, (255, 255, 255), 200);
+                assert_eq!(alpha(&canvas, 5, 20), 0, "inset 之外不画");
+                assert_eq!(alpha(&canvas, 6, 20), 200);
+                assert_eq!(alpha(&canvas, 33, 20), 200);
+                assert_eq!(alpha(&canvas, 34, 20), 0);
+            }
+        }
+
+        /// 光晕：同一行字，多贴一圈就多出字框外的像素；透明度 0 的那一笔什么都不写。
+        #[test]
+        fn a_glow_paints_outside_the_glyph() {
+            unsafe {
+                let face = wide("Arial");
+                let font = make_font(28, face.as_ptr());
+                let text: Vec<u16> = "A".encode_utf16().collect();
+                let color = (255, 255, 255);
+
+                let mut plain = new_canvas(80, 48);
+                plain.stamp(font, &text, 20, 10, color, 255);
+                let base = painted(&plain);
+                assert!(base > 0, "正文总得画出点东西");
+
+                let mut glowing = new_canvas(80, 48);
+                for (radius, alpha) in glow_rings(4, 90) {
+                    for offset in outline_offsets(radius) {
+                        glowing.stamp(font, &text, 20 + offset.0, 10 + offset.1, color, alpha);
+                    }
+                }
+                glowing.stamp(font, &text, 20, 10, color, 255);
+                assert!(
+                    painted(&glowing) > base,
+                    "光晕该在字框外多出像素：{base} → {}",
+                    painted(&glowing)
+                );
+
+                // 透明度 0 的那一笔整趟不写（`stamp` 直接返回）。
+                let mut nothing = new_canvas(80, 48);
+                nothing.stamp(font, &text, 20, 10, color, 0);
+                assert_eq!(painted(&nothing), 0);
+
+                DeleteObject(font as HGDIOBJ);
+            }
+        }
+
+        /// 预乘 `over`：同色叠两次比一次更实，但不会溢出 255。
+        #[test]
+        fn the_over_blend_accumulates_without_overflowing() {
+            unsafe {
+                let mut canvas = new_canvas(4, 4);
+                canvas.fill_round_rect(0, 0, (0, 0, 0), 100);
+                canvas.fill_round_rect(0, 0, (0, 0, 0), 100);
+                let twice = alpha(&canvas, 1, 1);
+                assert!(twice > 100, "叠两次该比一次不透明：{twice}");
+                assert!(twice < 255, "两次 100 也不该到顶：{twice}");
+
+                let mut previous = twice;
+                for _ in 0..8 {
+                    canvas.fill_round_rect(0, 0, (0, 0, 0), 200);
+                    let now = alpha(&canvas, 1, 1);
+                    assert!(now >= previous, "同色叠加不该越叠越淡：{previous} → {now}");
+                    previous = now;
+                }
+                // 整数合成到不了 255（每次除 255 都截断），停在 254 附近就好——要紧的是**不回绕**。
+                assert!(
+                    (250..=255).contains(&previous),
+                    "叠够了就该几乎是实心的：{previous}"
+                );
+            }
         }
     }
 }
@@ -1045,9 +1302,10 @@ mod imp {
     use objc2::runtime::AnyObject;
     use objc2::{AllocAnyThread, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
-        NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSColor, NSFont,
-        NSFontAttributeName, NSForegroundColorAttributeName, NSEventMask, NSPanel, NSScreen,
-        NSStrokeColorAttributeName, NSStrokeWidthAttributeName, NSTextField, NSView,
+        NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSBox, NSBoxType, NSColor,
+        NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSEventMask, NSPanel,
+        NSScreen, NSShadow, NSShadowAttributeName, NSStrokeColorAttributeName,
+        NSStrokeWidthAttributeName, NSTextField, NSTitlePosition,
         NSWindowCollectionBehavior, NSWindowStyleMask,
     };
     use objc2_foundation::{
@@ -1057,16 +1315,15 @@ mod imp {
 
     use crate::config::Rgb;
 
-    use super::{DesktopLyricsConfig, Payload};
+    use super::{DesktopLyricsConfig, Payload, layout};
 
-    /// 次要行（译文 / 下一句）与正文的字号比：与 Windows 的 `small_size` 同一比例。
-    const SMALL_RATIO: f64 = 3.0 / 5.0;
     /// 文字四周的留白（Windows 是 8 逻辑像素 × DPI；macOS 直接用点）。
     const PAD: f64 = 8.0;
-    /// 描边粗细：**负值 = 填充 + 描边一次画完**（Windows 是八方向各画一遍再合成）。
-    /// 观感常数，真机对着 Windows 调。
-    const OUTLINE_MAIN: f64 = -3.0;
-    const OUTLINE_SMALL: f64 = -2.0;
+    /// 描边的「一档」：AppKit 的 `NSStrokeWidth` 是**字号的百分比**（负值 = 填充 + 描边一次
+    /// 画完），跟 Windows 那边的「逻辑像素圈数」不是一个量纲，所以按行各给一个基准，
+    /// 配置里的 `outline_width = 1` 就正好是改造前的观感，2 就是两倍粗。
+    const STROKE_MAIN_PER_UNIT: f64 = -3.0;
+    const STROKE_SMALL_PER_UNIT: f64 = -2.0;
     /// 浮层高度：桌面之上的浮动层（`CGWindowList` 里能看到 layer=3）。
     const LEVEL: isize = 3;
 
@@ -1085,6 +1342,9 @@ mod imp {
         next: Retained<NSTextField>,
         /// 配置在进程里是固定的，建窗口时拿一份（与 Windows 的 `Shared` 同一个理由）。
         config: DesktopLyricsConfig,
+        /// 光晕（`shadow_radius = 0` 就是 `None`）：AppKit 的 `NSShadow` 直接当文本属实用，
+        /// 配置固定所以只建一次。
+        shadow: Option<Retained<NSShadow>>,
         /// 拖动结束后的新中心点回传给主线程（落盘在 `tui/state.rs`）。
         positions: Sender<(i32, i32)>,
         /// 中心点（左上原点）：既是重画时的摆位依据，也是报给主线程落盘的值。
@@ -1196,26 +1456,37 @@ mod imp {
             }
 
             let main_size = f64::from(self.config.font_size);
-            let small_size = (main_size * SMALL_RATIO).max(8.0);
-            let (color, next_color, outline) =
-                (self.config.color, self.config.next_color, self.config.outline);
+            let small_size =
+                (main_size * f64::from(self.config.secondary_scale) / 100.0).max(8.0);
+            // 描边粗细按行各给一个基准（`outline_width = 0` = 不加描边属性，纯填充）。
+            let units = f64::from(self.config.outline_width);
+            let main_stroke = (units > 0.0).then_some(STROKE_MAIN_PER_UNIT * units);
+            let small_stroke = (units > 0.0).then_some(STROKE_SMALL_PER_UNIT * units);
+            let (color, translation_color, next_color, outline) = (
+                self.config.color,
+                self.config.translation_color,
+                self.config.next_color,
+                self.config.outline,
+            );
             set_line(
                 &self.current,
                 &payload.current,
                 main_size,
                 color,
                 outline,
+                main_stroke,
+                self.shadow.as_deref(),
                 &self.config,
-                OUTLINE_MAIN,
             );
             set_line(
                 &self.translation,
                 payload.translation.as_deref().unwrap_or(""),
                 small_size,
-                next_color,
+                translation_color,
                 outline,
+                small_stroke,
+                self.shadow.as_deref(),
                 &self.config,
-                OUTLINE_SMALL,
             );
             set_line(
                 &self.next,
@@ -1223,18 +1494,27 @@ mod imp {
                 small_size,
                 next_color,
                 outline,
+                small_stroke,
+                self.shadow.as_deref(),
                 &self.config,
-                OUTLINE_SMALL,
             );
 
-            // 量尺寸：宽度取最宽一行、高度是各行之和，再加内边距（与 Windows 同一算法）。
+            // 量尺寸：宽度取最宽一行、高度是各行之和 + 行间距，再加内边距（与 Windows 同一算式）。
+            // 内边距里多留一个光晕半径：`NSShadow` 会画到字框外面，不留这圈就可能被控件裁掉。
             let rows: Vec<&Retained<NSTextField>> = [&self.current, &self.translation, &self.next]
                 .into_iter()
                 .filter(|field| !field.isHidden())
                 .collect();
-            let width = rows.iter().map(|field| field.frame().size.width).fold(0.0_f64, f64::max)
-                + PAD * 2.0;
-            let height = rows.iter().map(|field| field.frame().size.height).sum::<f64>() + PAD * 2.0;
+            let sizes: Vec<(f64, f64)> = rows
+                .iter()
+                .map(|field| {
+                    let size = field.frame().size;
+                    (size.width, size.height)
+                })
+                .collect();
+            let glow = self.shadow.as_ref().map_or(0.0, |_| f64::from(self.config.shadow_radius));
+            let (width, height, ys) =
+                layout(&sizes, PAD + glow, f64::from(self.config.line_gap));
 
             // 位置以**我们记着的中心点**（`reported`）为准：建窗口时给的那个，或解锁态拖动跟出来的
             // 那个。不去读窗口自己的矩形再摆回去——`setFrame` 的整点吸附会让这个回路每转一圈多挪
@@ -1253,12 +1533,11 @@ mod imp {
             );
 
             // 每行水平居中，从上往下摆（AppKit 是左下原点：y 从顶边往下减）。
-            let mut y = height - PAD;
-            for field in &rows {
+            // `ys` 是每行的顶边（从窗口顶边数），换算成 AppKit 的 y 要再减掉行高。
+            for (index, field) in rows.iter().enumerate() {
                 let size = field.frame().size;
-                y -= size.height;
                 field.setFrame(NSRect::new(
-                    NSPoint::new(PAD + (width - PAD * 2.0 - size.width) / 2.0, y),
+                    NSPoint::new((width - size.width) / 2.0, height - ys[index] - size.height),
                     size,
                 ));
             }
@@ -1291,12 +1570,30 @@ mod imp {
 
     /// `Rgb`（0-255）→ `NSColor`。
     fn ns_color(color: Rgb) -> Retained<NSColor> {
+        ns_color_alpha(color, 100)
+    }
+
+    /// `Rgb` + 不透明度（0-100）→ `NSColor`。衬底与光晕都要带自己的 alpha。
+    fn ns_color_alpha(color: Rgb, opacity: u8) -> Retained<NSColor> {
         NSColor::colorWithSRGBRed_green_blue_alpha(
             f64::from(color.r) / 255.0,
             f64::from(color.g) / 255.0,
             f64::from(color.b) / 255.0,
-            1.0,
+            f64::from(opacity.min(100)) / 100.0,
         )
+    }
+
+    /// 光晕：`NSShadow` 直接当文本属性用。半径与不透明度任一为 0 就是关掉（`None`）。
+    fn make_shadow(config: &DesktopLyricsConfig) -> Option<Retained<NSShadow>> {
+        if config.shadow_radius == 0 || config.shadow_opacity == 0 {
+            return None;
+        }
+        let shadow = NSShadow::new();
+        shadow.setShadowBlurRadius(f64::from(config.shadow_radius));
+        // 四周均匀：偏移为 0 才是「光晕」而不是「投影」。
+        shadow.setShadowOffset(NSSize::new(0.0, 0.0));
+        shadow.setShadowColor(Some(&ns_color_alpha(config.shadow, config.shadow_opacity)));
+        Some(shadow)
     }
 
     /// 配置里的字体面认不出来（macOS 上默认那串就是 Windows 字体名）就回退系统字体。
@@ -1312,14 +1609,18 @@ mod imp {
     }
 
     /// 给一行设文本与样式。空文本 = 这行不画（`setHidden`），也就不参与量尺寸。
+    ///
+    /// 描边与光晕都是可选的：`stroke = None`（配置里 `outline_width = 0`）就是纯填充，
+    /// `shadow = None`（半径 0）就不加光晕属性。
     fn set_line(
         field: &NSTextField,
         text: &str,
         size: f64,
         color: Rgb,
         outline: Rgb,
+        stroke: Option<f64>,
+        shadow: Option<&NSShadow>,
         config: &DesktopLyricsConfig,
-        stroke_width: f64,
     ) {
         field.setHidden(text.is_empty());
         if text.is_empty() {
@@ -1328,23 +1629,29 @@ mod imp {
         let font = font_for(&config.font, size);
         let text_color = ns_color(color);
         let outline_color = ns_color(outline);
-        let stroke = NSNumber::numberWithDouble(stroke_width);
-        // SAFETY: 属性名是 AppKit 导出的常量，值的类型与属性名要求的一致。
-        let attributes = NSDictionary::from_slices(
-            &[
-                unsafe { NSFontAttributeName },
-                unsafe { NSForegroundColorAttributeName },
-                unsafe { NSStrokeColorAttributeName },
-                unsafe { NSStrokeWidthAttributeName },
-            ],
-            &[
-                unsafe { any(&*font) },
-                unsafe { any(&*text_color) },
-                unsafe { any(&*outline_color) },
-                unsafe { any(&*stroke) },
-            ],
-        );
+        // 描边才需要那两样：`NSStrokeWidth` 是字号的百分比，负值 = 填充 + 描边一次画完。
+        let stroke_number = stroke.map(NSNumber::numberWithDouble);
+        // SAFETY: 属性名是 AppKit 导出的常量（`&'static`），类型由它们定，不用手写。
+        let mut keys = vec![
+            unsafe { NSFontAttributeName },
+            unsafe { NSForegroundColorAttributeName },
+        ];
+        let mut values = vec![unsafe { any(&*font) }, unsafe { any(&*text_color) }];
+        if let Some(number) = &stroke_number {
+            // SAFETY: 同上：常量 + 与属性要求一致的值类型（颜色与 `NSNumber`）。
+            keys.push(unsafe { NSStrokeColorAttributeName });
+            values.push(unsafe { any(&*outline_color) });
+            keys.push(unsafe { NSStrokeWidthAttributeName });
+            values.push(unsafe { any(&*number) });
+        }
+        if let Some(shadow) = shadow {
+            // SAFETY: `NSShadowAttributeName` 要的就是一个 `NSShadow`。
+            keys.push(unsafe { NSShadowAttributeName });
+            values.push(unsafe { any(shadow) });
+        }
         // SAFETY: 属性键都是 AppKit 的常量，字典是我们刚建的。
+        let attributes = NSDictionary::from_slices(&keys, &values);
+        // SAFETY: 同上。
         let attributed = unsafe {
             NSAttributedString::initWithString_attributes(
                 NSAttributedString::alloc(),
@@ -1398,6 +1705,27 @@ mod imp {
         field
     }
 
+    /// 衬底：一个自定义样式的 `NSBox`（无边框、无标题、填色 + 圆角），当内容视图用。
+    /// `background_opacity = 0` 就是整块透明——那才是「什么都不画」，不是「画一层黑的」。
+    fn make_background(mtm: MainThreadMarker, config: &DesktopLyricsConfig) -> Retained<NSBox> {
+        // 先给个 1×1 的框；面板设内容视图时会按内容区重设尺寸，之后每帧由 panel 带着走。
+        let pill = NSBox::initWithFrame(
+            NSBox::alloc(mtm),
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1.0, 1.0)),
+        );
+        pill.setBoxType(NSBoxType::Custom);
+        pill.setTitlePosition(NSTitlePosition::NoTitle);
+        pill.setBorderWidth(0.0);
+        // 默认的内容边距会把 label 往里挤，按 0 收口——摆位一律由 `push` 算。
+        pill.setContentViewMargins(NSSize::new(0.0, 0.0));
+        pill.setTransparent(config.background_opacity == 0);
+        if config.background_opacity > 0 {
+            pill.setFillColor(&ns_color_alpha(config.background, config.background_opacity));
+            pill.setCornerRadius(f64::from(config.corner_radius));
+        }
+        pill
+    }
+
     pub(super) fn install(config: &DesktopLyricsConfig, center: (i32, i32)) -> Started {
         let Some(mtm) = MainThreadMarker::new() else {
             tracing::warn!("桌面歌词要在主线程建窗口");
@@ -1419,11 +1747,10 @@ mod imp {
 
         let panel = make_panel(mtm);
         let (current, translation, next) = (make_label(mtm), make_label(mtm), make_label(mtm));
-        // 内容视图装三行 label。
-        let view = NSView::initWithFrame(
-            NSView::alloc(mtm),
-            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(1.0, 1.0)),
-        );
+        // 内容视图就是那块衬底：`NSBox` 的自定义样式能填色 + 圆角，比自绘一层省一整个
+        // `NSView` 子类。三行 label 是它的子视图，所以衬底永远在文字下面。
+        // 不透明度 0（默认）= 整块透明，与加这个功能之前一样。
+        let view = make_background(mtm, config);
         view.addSubview(&current);
         view.addSubview(&translation);
         view.addSubview(&next);
@@ -1434,6 +1761,7 @@ mod imp {
             current,
             translation,
             next,
+            shadow: make_shadow(config),
             config: config.clone(),
             positions,
             reported: center,
@@ -1832,5 +2160,83 @@ mod tests {
 
         // 再算一次：没有新变化，不该重复推。
         assert!(state.advance(frame, &config).is_none(), "没变化别重复推");
+    }
+
+    /// 三行文本的摆法：宽取最宽一行、高是各行之和 + **行之间**的间距 + 两边内边距，
+    /// 每行的 y 从内边距开始往下推。两个平台共用这一条算式，所以钉在这儿。
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[test]
+    fn the_rows_are_laid_out_with_one_shared_formula() {
+        let sizes = [(100.0, 20.0), (50.0, 10.0), (80.0, 12.0)];
+        let (width, height, ys) = layout(&sizes, 8.0, 4.0);
+        assert_eq!(width, 116.0, "宽 = 最宽一行 + 两个内边距");
+        assert_eq!(height, 66.0, "高 = 20+10+12 + 两个行距 + 两个内边距");
+        assert_eq!(ys, vec![8.0, 32.0, 46.0], "行距只加在行之间");
+
+        // 一行时行距不参与（最后一行后面不留白）。
+        let (_, height, ys) = layout(&[(100.0, 20.0)], 8.0, 4.0);
+        assert_eq!((height, ys), (36.0, vec![8.0]));
+
+        // 行距 0（默认）时，每行的 y 就是「内边距 + 上面各行的行高之和」——与这个函数
+        // 出现之前那段 `y += heights[i]` 逐行相同，所以**默认配置的观感没有变化**。
+        let (_, height, ys) = layout(&sizes, 8.0, 0.0);
+        assert_eq!(ys, vec![8.0, 28.0, 38.0]);
+        assert_eq!(height, 58.0, "没有行距时高度就是各行之和 + 内边距");
+
+        // 没有行（歌词整段空）也不 panic，尺寸就是两个内边距。
+        let (width, height, ys) = layout(&[], 8.0, 4.0);
+        assert_eq!((width, height, ys), (16.0, 16.0, vec![]));
+    }
+
+    /// 描边偏移环：第 r 圈是切比雪夫距离正好 r 的格子（8r 个），一圈 = 1 逻辑像素；
+    /// `width = 0` 就是不描边，`width = 1` 与改造前那八个方向逐点相同。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_outline_ring_grows_with_the_configured_width() {
+        assert!(outline_offsets(0).is_empty(), "0 = 不描边");
+        assert_eq!(
+            outline_offsets(1),
+            vec![(-1, -1), (0, -1), (1, -1), (-1, 0), (1, 0), (-1, 1), (0, 1), (1, 1)],
+            "1 圈就是原来那八个方向"
+        );
+        for width in 1..=4 {
+            let offsets = outline_offsets(width);
+            // 一圈 8r 个，`width` 圈是 1..=width 的和；第 r 圈外扩 r 个像素。
+            let expected = (1..=width).map(|radius| radius * 8).sum::<i32>() as usize;
+            assert_eq!(offsets.len(), expected, "{width} 圈该有 {expected} 个偏移");
+            let outer = &offsets[offsets.len() - 8..];
+            assert!(
+                outer.iter().all(|(x, y)| x.abs().max(y.abs()) == width),
+                "最后八个是最外圈：{outer:?}"
+            );
+        }
+    }
+
+    /// 逻辑像素按窗口 DPI 放大：96 原样、144（150%）按 1.5 倍、别小于 96。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn logical_pixels_are_scaled_by_the_window_dpi() {
+        assert_eq!(scaled(8, 96), 8);
+        assert_eq!(scaled(8, 144), 12);
+        assert_eq!(scaled(1, 192), 2);
+        assert_eq!(scaled(8, 48), 8, "低于 96 的 DPI 按 96 算");
+    }
+
+    /// 光晕：一圈比一圈淡、半径 0 时是空表（关掉），最外圈会淡到 0 附近。
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_glow_fades_outwards() {
+        assert!(glow_rings(0, 80).is_empty(), "半径 0 = 关");
+        let rings = glow_rings(6, 100);
+        assert_eq!(rings.len(), 6);
+        assert_eq!(rings[0].0, 1, "第一圈紧贴描边");
+        let alphas: Vec<u8> = rings.iter().map(|(_, alpha)| *alpha).collect();
+        assert!(
+            alphas.windows(2).all(|pair| pair[0] > pair[1]),
+            "必须由内到外单调变淡：{alphas:?}"
+        );
+        assert!(alphas[0] < 255, "最内圈也不该是不透明白块：{alphas:?}");
+        // 透明度 0 就是整圈不画（省掉那几次贴字）。
+        assert!(glow_rings(4, 0).iter().all(|(_, alpha)| *alpha == 0));
     }
 }

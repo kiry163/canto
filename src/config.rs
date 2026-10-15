@@ -263,7 +263,7 @@ impl LibraryConfig {
 
 /// `[desktop_lyrics]` 段：桌面歌词覆盖层（Windows / macOS）。
 ///
-/// 八个字段全是**偏好**；开 / 关与窗口位置是**状态**（全局热键翻、拖动改），记在
+/// 字段全是**偏好**；开 / 关与窗口位置是**状态**（全局热键翻、拖动改），记在
 /// `desktop-lyrics.json` 里，不在这儿。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesktopLyricsConfig {
@@ -275,8 +275,29 @@ pub struct DesktopLyricsConfig {
     pub color: Rgb,
     /// 描边颜色。
     pub outline: Rgb,
-    /// 下一句与译文的颜色。
+    /// 描边粗细（逻辑像素；0 = 不描边）。Windows 按窗口 DPI 放大成几圈偏移，
+    /// macOS 折算成 AppKit 的 `NSStrokeWidth` 百分比（那儿的语义是「字号的百分之几」）。
+    pub outline_width: u8,
+    /// 次要行（译文 / 下一句）的字号占正文的百分比。
+    pub secondary_scale: u8,
+    /// 行间距（逻辑像素）。
+    pub line_gap: u8,
+    /// 译文的颜色（下一句用 `next_color`）。
+    pub translation_color: Rgb,
+    /// 下一句与（没设 `translation_color` 时的）译文的颜色。
     pub next_color: Rgb,
+    /// 衬底色。
+    pub background: Rgb,
+    /// 衬底的不透明度（0-100）；0 = 不画衬底。
+    pub background_opacity: u8,
+    /// 衬底的圆角半径（逻辑像素）。
+    pub corner_radius: u8,
+    /// 光晕颜色。
+    pub shadow: Rgb,
+    /// 光晕半径（逻辑像素）；0 = 关。
+    pub shadow_radius: u8,
+    /// 光晕的不透明度（0-100）。
+    pub shadow_opacity: u8,
     /// 整层透明度（0-100）。
     pub opacity: u8,
     /// 当前句有译文时是否一起显示。
@@ -296,11 +317,26 @@ impl Default for DesktopLyricsConfig {
                 b: 255,
             },
             outline: Rgb { r: 0, g: 0, b: 0 },
+            outline_width: 1,
+            secondary_scale: 60,
+            line_gap: 0,
+            translation_color: Rgb {
+                r: 158,
+                g: 158,
+                b: 158,
+            },
             next_color: Rgb {
                 r: 158,
                 g: 158,
                 b: 158,
             },
+            background: Rgb { r: 0, g: 0, b: 0 },
+            // 衬底与光晕默认关：默认的样子与加这两个功能之前**逐像素一样**，想用再打开。
+            background_opacity: 0,
+            corner_radius: 12,
+            shadow: Rgb { r: 0, g: 0, b: 0 },
+            shadow_radius: 0,
+            shadow_opacity: 60,
             opacity: 90,
             show_translation: true,
             hide_when_paused: false,
@@ -643,7 +679,17 @@ fn desktop_lyrics_config(
         "font_size",
         "color",
         "outline",
+        "outline_width",
+        "secondary_scale",
+        "line_gap",
+        "translation_color",
         "next_color",
+        "background",
+        "background_opacity",
+        "corner_radius",
+        "shadow",
+        "shadow_radius",
+        "shadow_opacity",
         "opacity",
         "show_translation",
         "hide_when_paused",
@@ -665,15 +711,20 @@ fn desktop_lyrics_config(
     }
     take_color(&mut section, "color", &mut config.color);
     take_color(&mut section, "outline", &mut config.outline);
+    // 上限都是「画得出来 / 不至于一帧糊几十次」的实用口径：描边 8 圈 = 64 次贴字，
+    // 光晕 24 圈 = 每行 24 次，已经远超肉眼能分辨的范围。
+    take_range(&mut section, "outline_width", &mut config.outline_width, 0, 8);
+    take_range(&mut section, "secondary_scale", &mut config.secondary_scale, 20, 100);
+    take_range(&mut section, "line_gap", &mut config.line_gap, 0, 200);
+    take_color(&mut section, "translation_color", &mut config.translation_color);
     take_color(&mut section, "next_color", &mut config.next_color);
-    if let Some(opacity) = section.integer("opacity") {
-        if !(0..=100).contains(&opacity) {
-            section.warn(format!(
-                "[desktop_lyrics] opacity = {opacity} 超出 0-100，已夹住"
-            ));
-        }
-        config.opacity = opacity.clamp(0, 100) as u8;
-    }
+    take_color(&mut section, "background", &mut config.background);
+    take_range(&mut section, "background_opacity", &mut config.background_opacity, 0, 100);
+    take_range(&mut section, "corner_radius", &mut config.corner_radius, 0, 120);
+    take_color(&mut section, "shadow", &mut config.shadow);
+    take_range(&mut section, "shadow_radius", &mut config.shadow_radius, 0, 24);
+    take_range(&mut section, "shadow_opacity", &mut config.shadow_opacity, 0, 100);
+    take_range(&mut section, "opacity", &mut config.opacity, 0, 100);
     if let Some(show) = section.boolean("show_translation") {
         config.show_translation = show;
     }
@@ -681,6 +732,18 @@ fn desktop_lyrics_config(
         config.hide_when_paused = hide;
     }
     config
+}
+
+/// 解析一个 `min..=max` 的整数键：越界夹住并点名，别的键照旧。
+fn take_range(section: &mut Section<'_, '_>, key: &str, slot: &mut u8, min: i64, max: i64) {
+    let Some(value) = section.integer(key) else {
+        return;
+    };
+    if !(min..=max).contains(&value) {
+        let text = format!("[desktop_lyrics] {key} = {value} 超出 {min}-{max}，已夹住");
+        section.warn(text);
+    }
+    *slot = value.clamp(min, max) as u8;
 }
 
 /// 解析一个颜色字段：写坏了点名警告并**保持默认值**。
@@ -935,8 +998,26 @@ fn render_default() -> String {
          font = {font}\n\
          font_size = {font_size}\n\
          color = \"{color}\"\n\
+         # 描边：粗细按逻辑像素算（0 = 不描边），Windows 按窗口 DPI 放大；想更抓眼就把\n\
+         # outline 写成跟 color 一样（同色描边会把笔画撑粗）。\n\
          outline = \"{outline}\"\n\
+         outline_width = {outline_width}\n\
+         # 次要行（译文 / 下一句）字号占正文的百分比，以及行与行之间再加多少留白。\n\
+         secondary_scale = {secondary_scale}\n\
+         line_gap = {line_gap}\n\
+         # 译文与下一句各自的颜色（默认同色）；想要主次就只改一个，如译文 \"#8FA6C8\"。\n\
+         translation_color = \"{translation_color}\"\n\
          next_color = \"{next_color}\"\n\
+         # 三行文字下面那层圆角衬底：浅色 / 花壁纸上更好认。不透明度 0 = 不画。\n\
+         # 想要半透明黑底：background = \"#000000\" + background_opacity = 45 + corner_radius = 12\n\
+         background = \"{background}\"\n\
+         background_opacity = {background_opacity}\n\
+         corner_radius = {corner_radius}\n\
+         # 光晕：在描边之外再糊一圈柔光，半径 0 = 关。\n\
+         # 想要的霓虹感：shadow = \"#3B82F6\" + shadow_radius = 6 + shadow_opacity = 55\n\
+         shadow = \"{shadow}\"\n\
+         shadow_radius = {shadow_radius}\n\
+         shadow_opacity = {shadow_opacity}\n\
          opacity = {opacity}\n\
          show_translation = {show_translation}\n\
          hide_when_paused = {hide_when_paused}\n\
@@ -964,7 +1045,17 @@ fn render_default() -> String {
         font_size = lyrics.font_size,
         color = lyrics.color.to_hex(),
         outline = lyrics.outline.to_hex(),
+        outline_width = lyrics.outline_width,
+        secondary_scale = lyrics.secondary_scale,
+        line_gap = lyrics.line_gap,
+        translation_color = lyrics.translation_color.to_hex(),
         next_color = lyrics.next_color.to_hex(),
+        background = lyrics.background.to_hex(),
+        background_opacity = lyrics.background_opacity,
+        corner_radius = lyrics.corner_radius,
+        shadow = lyrics.shadow.to_hex(),
+        shadow_radius = lyrics.shadow_radius,
+        shadow_opacity = lyrics.shadow_opacity,
         opacity = lyrics.opacity,
         show_translation = lyrics.show_translation,
         hide_when_paused = lyrics.hide_when_paused,
@@ -1023,6 +1114,16 @@ opacity = 40
 show_translation = false
 hide_when_paused = true
 color = '#102030'
+outline_width = 3
+secondary_scale = 50
+line_gap = 6
+translation_color = '#445566'
+background = '#AABBCC'
+background_opacity = 30
+corner_radius = 20
+shadow = '#112233'
+shadow_radius = 5
+shadow_opacity = 70
 ";
         let (config, warnings) = parse(text);
         assert!(warnings.is_empty(), "{warnings:?}");
@@ -1037,6 +1138,13 @@ color = '#102030'
         assert_eq!(config.desktop_lyrics.opacity, 40);
         assert!(!config.desktop_lyrics.show_translation);
         assert!(config.desktop_lyrics.hide_when_paused);
+        assert_eq!(config.desktop_lyrics.outline_width, 3);
+        assert_eq!(config.desktop_lyrics.secondary_scale, 50);
+        assert_eq!(config.desktop_lyrics.line_gap, 6);
+        assert_eq!(config.desktop_lyrics.background_opacity, 30);
+        assert_eq!(config.desktop_lyrics.corner_radius, 20);
+        assert_eq!(config.desktop_lyrics.shadow_radius, 5);
+        assert_eq!(config.desktop_lyrics.shadow_opacity, 70);
         assert_eq!(
             config.desktop_lyrics.color,
             Rgb {
@@ -1045,6 +1153,21 @@ color = '#102030'
                 b: 0x30
             }
         );
+        for (got, want, key) in [
+            (config.desktop_lyrics.translation_color, 0x445566, "translation_color"),
+            (config.desktop_lyrics.background, 0xAABBCC, "background"),
+            (config.desktop_lyrics.shadow, 0x112233, "shadow"),
+        ] {
+            assert_eq!(
+                (got.r, got.g, got.b),
+                (
+                    (want >> 16) as u8,
+                    ((want >> 8) & 0xFF) as u8,
+                    (want & 0xFF) as u8
+                ),
+                "{key} 该从文件里读"
+            );
+        }
         assert_eq!(
             config.desktop_lyrics.outline,
             DesktopLyricsConfig::default().outline,
@@ -1102,19 +1225,35 @@ color = '#102030'
     fn out_of_range_values_are_clamped_and_named() {
         let (config, warnings) = parse(
             "[cache]\nmb = -1\n[history]\nlimit = 0\n[ui]\nnotice_seconds = -3\n\
-             [desktop_lyrics]\nopacity = 900\nfont_size = -5\n",
+             [desktop_lyrics]\nopacity = 900\nfont_size = -5\noutline_width = 99\n\
+             secondary_scale = 5\nline_gap = -4\nbackground_opacity = 300\ncorner_radius = -1\n\
+             shadow_radius = 99\nshadow_opacity = -8\n",
         );
         assert_eq!(config.cache.mb, 0, "负数按 0（关掉缓存）");
         assert_eq!(config.history.limit, 1, "至少 1 条");
         assert_eq!(config.ui.notice_seconds, 0, "负数按 0（不自动消失）");
         assert_eq!(config.desktop_lyrics.opacity, 100, "夹到上限");
         assert_eq!(config.desktop_lyrics.font_size, 8, "下限是 8");
+        assert_eq!(config.desktop_lyrics.outline_width, 8, "描边最多 8 圈");
+        assert_eq!(config.desktop_lyrics.secondary_scale, 20, "次要行至少 20%");
+        assert_eq!(config.desktop_lyrics.line_gap, 0, "行距负数按 0");
+        assert_eq!(config.desktop_lyrics.background_opacity, 100);
+        assert_eq!(config.desktop_lyrics.corner_radius, 0);
+        assert_eq!(config.desktop_lyrics.shadow_radius, 24);
+        assert_eq!(config.desktop_lyrics.shadow_opacity, 0);
         for key in [
             "[cache] mb",
             "[history] limit",
             "[ui] notice_seconds",
             "[desktop_lyrics] opacity",
             "[desktop_lyrics] font_size",
+            "[desktop_lyrics] outline_width",
+            "[desktop_lyrics] secondary_scale",
+            "[desktop_lyrics] line_gap",
+            "[desktop_lyrics] background_opacity",
+            "[desktop_lyrics] corner_radius",
+            "[desktop_lyrics] shadow_radius",
+            "[desktop_lyrics] shadow_opacity",
         ] {
             assert!(
                 warnings.iter().any(|warning| warning.contains(key)),
@@ -1470,10 +1609,32 @@ color = '#102030'
             format!("opacity = {}", default.desktop_lyrics.opacity),
             format!("color = \"{}\"", default.desktop_lyrics.color.to_hex()),
             format!("outline = \"{}\"", default.desktop_lyrics.outline.to_hex()),
+            format!("outline_width = {}", default.desktop_lyrics.outline_width),
+            format!(
+                "secondary_scale = {}",
+                default.desktop_lyrics.secondary_scale
+            ),
+            format!("line_gap = {}", default.desktop_lyrics.line_gap),
+            format!(
+                "translation_color = \"{}\"",
+                default.desktop_lyrics.translation_color.to_hex()
+            ),
             format!(
                 "next_color = \"{}\"",
                 default.desktop_lyrics.next_color.to_hex()
             ),
+            format!(
+                "background = \"{}\"",
+                default.desktop_lyrics.background.to_hex()
+            ),
+            format!(
+                "background_opacity = {}",
+                default.desktop_lyrics.background_opacity
+            ),
+            format!("corner_radius = {}", default.desktop_lyrics.corner_radius),
+            format!("shadow = \"{}\"", default.desktop_lyrics.shadow.to_hex()),
+            format!("shadow_radius = {}", default.desktop_lyrics.shadow_radius),
+            format!("shadow_opacity = {}", default.desktop_lyrics.shadow_opacity),
             format!(
                 "show_translation = {}",
                 default.desktop_lyrics.show_translation
